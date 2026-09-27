@@ -24,7 +24,9 @@ use super::checks::{self, Gate, RunOnce};
 use super::in_process::{self, InProcessRequest};
 use super::input::{self, Input, Line, StdinInput, YesNo};
 use super::launch::{self, LaunchError};
-use super::outcome::{error_exit_code, helper_exit_text, result_exit_code};
+use super::outcome::{
+    error_exit_code, helper_exit_text, lost_recovery_exit_code, result_exit_code,
+};
 use super::preview;
 use super::relay::{self, Presenter, RelayConfig, SessionEnd};
 use super::render::{
@@ -222,9 +224,14 @@ fn post_reboot_command() -> Result<String> {
 
 /// Design F.4 / review C17: registers the post-reboot check when the journal says a restart is
 /// pending, whatever the session returned. Problems are warnings: the journal keeps the state.
-fn post_reboot_rule(ui: &mut Ui, in_process: bool) {
+///
+/// Only an unelevated process registers. An elevated one (an elevated console, `--in-process`)
+/// may run as another administrator than the signed-in user, so its `HKCU` would be the wrong
+/// account's; it tells the user instead. When elevation cannot be checked, it tells the user too.
+fn post_reboot_rule(ui: &mut Ui) {
+    let elevated = elevated().unwrap_or(true);
     let decision = read_journal()
-        .and_then(|(journal, _)| Ok(checks::run_once(&journal, boot_id()?, in_process)));
+        .and_then(|(journal, _)| Ok(checks::run_once(&journal, boot_id()?, elevated)));
     match decision {
         Ok(RunOnce::NotNeeded) => {}
         Ok(RunOnce::Register) => {
@@ -278,7 +285,10 @@ fn operation_error(ui: &mut Ui, error: &OperationError) -> Result<i32> {
             "\n  Per-keyboard values have no effect in fixed mode. Switch with `mklm-cli migrate` \
              (add `--also <keyboard>=<layout>` to assign this layout in the same step)."
         }
-        OperationError::NotFixedMode => "\n  Nothing to migrate.",
+        OperationError::NotFixedMode => {
+            "\n  Nothing to migrate. Assign layouts with `mklm-cli set <keyboard> --layout <layout>` \
+             instead of `--also`."
+        }
         _ => "",
     };
     eprintln!("error: {error}{hint}");
@@ -333,7 +343,7 @@ fn run_request(
         Ended::Launch(code) => code,
         Ended::Session(end) => finish(ui, end, apply, after, true)?,
     };
-    post_reboot_rule(ui, false);
+    post_reboot_rule(ui);
     Ok(code)
 }
 
@@ -429,10 +439,11 @@ fn finish(
                 }
                 return Ok(exit_code::FAILURE);
             }
+            // Recovery may finish the operation as well as undo it (C.7): the result says which.
             ui.say(if countdown {
-                "The helper stopped during the countdown; undoing the change now."
+                "The helper stopped during the countdown; recovering now."
             } else {
-                "Undoing what the helper left unfinished now."
+                "Recovering what the helper left unfinished now."
             })?;
             let request = Request::Recover { apply };
             match session(ui, request, None)? {
@@ -440,13 +451,17 @@ fn finish(
                     eprintln!("Run `mklm-cli recover` as soon as possible.");
                     Ok(code)
                 }
-                Ended::Session(end) => {
-                    let code = finish(ui, end, apply, After::Nothing, false)?;
-                    Ok(match code {
-                        exit_code::OK | exit_code::RESTART_REQUIRED => exit_code::REVERTED,
-                        other => other,
-                    })
+                Ended::Session(SessionEnd::Finished(result)) => {
+                    finish(
+                        ui,
+                        SessionEnd::Finished(result.clone()),
+                        apply,
+                        After::Recover,
+                        false,
+                    )?;
+                    Ok(lost_recovery_exit_code(&result))
                 }
+                Ended::Session(end) => finish(ui, end, apply, After::Nothing, false),
             }
         }
     }
@@ -556,7 +571,7 @@ fn dry_run_done(ui: &mut Ui) -> Result<()> {
 fn start(ui: &mut Ui, dry_run: bool) -> Result<(Journal, BootId)> {
     check_os()?;
     if !dry_run {
-        post_reboot_rule(ui, false);
+        post_reboot_rule(ui);
     }
     let (journal, _) = read_journal()?;
     Ok((journal, boot_id()?))
@@ -599,9 +614,22 @@ pub fn set(args: &SetArgs) -> Result<i32> {
                 "Nothing to change: {} already has this layout.",
                 keyboard.display_name
             ))?;
+            if args.dry_run {
+                dry_run_done(&mut ui)?;
+            }
             return Ok(blocked.unwrap_or(exit_code::OK));
         }
-        if flags.is_none() && plan.apply == PendingAction::ResetKeyboard {
+        if flags.is_none() && plan.apply != PendingAction::ResetKeyboard {
+            // The question was not asked, so the user declared nothing: the request must not
+            // claim another way to type (C9). The plan is made again with the options that are
+            // sent, so that what is shown, sent as the expected plan and written agree (usually
+            // the same apply method: no live reset was planned anyway).
+            options = preview::no_other_input(&options);
+            plan = match plan_for(&options) {
+                Ok(plan) => plan,
+                Err(error) => return operation_error(&mut ui, &error),
+            };
+        } else if flags.is_none() {
             let alone = plan_for(&preview::no_other_input(&options));
             if args.dry_run {
                 if let Ok(alone) = alone {
@@ -669,12 +697,21 @@ pub fn migrate(args: &MigrateArgs) -> Result<i32> {
         }
         let blocked = gate(&mut ui, &journal, boot, Gate::NewOp, args.dry_run)?;
         let global = &snapshot.global;
+        if global.mode() != GlobalMode::Fixed {
+            // Design F.5: already in per-keyboard mode is "no change" (0), like `set` with
+            // nothing to change, unless `--also` asked for assignments migrate cannot make (1).
+            if !assignments.is_empty() {
+                return operation_error(&mut ui, &OperationError::NotFixedMode);
+            }
+            ui.say("Nothing to migrate: this PC is already in per-keyboard mode.")?;
+            if args.dry_run {
+                dry_run_done(&mut ui)?;
+            }
+            return Ok(blocked.unwrap_or(exit_code::OK));
+        }
         let standard = match args.standard {
             Some(StandardArg::Jis) => Layout::Jis,
             Some(StandardArg::Us) => Layout::Us,
-            None if global.mode() != GlobalMode::Fixed => {
-                return operation_error(&mut ui, &OperationError::NotFixedMode);
-            }
             None => match ps2_pin_layout(global) {
                 Some(layout) => layout,
                 None => {
@@ -816,17 +853,16 @@ fn run_in_process(ui: &mut Ui, request: &InProcessRequest, apply: ApplyOptions) 
     let presenter = Presenter::new(ui.console, None);
     let result: Result<OperationResult, ErrorInfo> =
         in_process::run(request, apply, presenter, &mut ui.input, &mut ui.out)?;
+    // `recover` says what still waits for the user, as through the helper (design review C7).
+    let after = match request {
+        InProcessRequest::Recover => After::Recover,
+        InProcessRequest::Undo | InProcessRequest::Restore { .. } => After::Nothing,
+    };
     let code = match result {
-        Ok(result) => finish(
-            ui,
-            SessionEnd::Finished(result),
-            apply,
-            After::Nothing,
-            false,
-        )?,
+        Ok(result) => finish(ui, SessionEnd::Finished(result), apply, after, false)?,
         Err(info) => finish(ui, SessionEnd::Failed(info), apply, After::Nothing, false)?,
     };
-    post_reboot_rule(ui, true);
+    post_reboot_rule(ui);
     Ok(code)
 }
 
@@ -842,6 +878,9 @@ pub fn undo(args: &RecoverArgs) -> Result<i32> {
             &current_of(snapshot.as_ref()),
         ))?;
         if journal.open_entries().is_empty() {
+            if args.dry_run {
+                dry_run_done(&mut ui)?;
+            }
             return Ok(blocked.unwrap_or(exit_code::OK));
         }
         let apply = apply_or_no_reset(&args.apply);
@@ -1086,7 +1125,9 @@ pub fn restore(args: &RestoreArgs) -> Result<i32> {
             Ok(restore) => restore,
             Err(error) => return operation_error(&mut ui, &error),
         };
-        if flags.is_none() && restore.apply == Some(PendingAction::ResetKeyboard) && !args.dry_run {
+        let asks = flags.is_none() && restore.apply == Some(PendingAction::ResetKeyboard);
+        if asks && !args.dry_run {
+            // The preview once, before the question; after it only what changed.
             ui.say(&preview::restore_text(&restore))?;
             if ui.ask(OTHER_INPUT_QUESTION)? != YesNo::Yes {
                 options = preview::no_other_input(&options);
@@ -1094,9 +1135,27 @@ pub fn restore(args: &RestoreArgs) -> Result<i32> {
                     Ok(restore) => restore,
                     Err(error) => return operation_error(&mut ui, &error),
                 };
+                if let Some(apply) = restore.apply {
+                    ui.say(&format!(
+                        "Takes effect: {}",
+                        super::render::apply_text(apply)
+                    ))?;
+                }
             }
+        } else {
+            if flags.is_none() && !asks {
+                // Nothing was asked, so nothing was declared: the request must not claim another
+                // way to type (C9). The helper plans the apply method again by itself (a restore
+                // carries no expected plan), so with a keyboard plugged in meanwhile it must not
+                // take a reset the user never agreed to.
+                options = preview::no_other_input(&options);
+                restore = match preview_for(&options) {
+                    Ok(restore) => restore,
+                    Err(error) => return operation_error(&mut ui, &error),
+                };
+            }
+            ui.say(&preview::restore_text(&restore))?;
         }
-        ui.say(&preview::restore_text(&restore))?;
         if let Err(error) = &restore.order {
             eprintln!("error: {error}");
             return Ok(exit_code::FAILURE);
@@ -1113,8 +1172,14 @@ pub fn restore(args: &RestoreArgs) -> Result<i32> {
                  `--on-conflict skip` (leave them) or `--on-conflict overwrite` (put back the \
                  values from before MKLM).",
             )?;
+            if args.dry_run {
+                dry_run_done(&mut ui)?;
+            }
             return Ok(blocked.unwrap_or(exit_code::CONFLICT));
         } else if restore.writes.is_empty() {
+            if args.dry_run {
+                dry_run_done(&mut ui)?;
+            }
             return Ok(blocked.unwrap_or(exit_code::OK));
         }
         if args.dry_run {
@@ -1243,7 +1308,7 @@ pub fn reboot(yes: bool) -> Result<i32> {
             return Ok(exit_code::CANCELLED);
         }
     }
-    post_reboot_rule(&mut ui, false);
+    post_reboot_rule(&mut ui);
     session::restart_pc().context("restarting the PC failed")?;
     ui.say("Restarting...")?;
     Ok(exit_code::OK)
@@ -1297,7 +1362,7 @@ pub fn post_reboot() -> Result<i32> {
                  Restart it with Restart, not Shut down (with Fast Startup a shutdown keeps the \
                  drivers as they were).",
             )?;
-            post_reboot_rule(&mut ui, false);
+            post_reboot_rule(&mut ui);
             code = exit_code::RESTART_REQUIRED;
             continue;
         }
@@ -1316,7 +1381,7 @@ pub fn post_reboot() -> Result<i32> {
                     "Nothing changed; you will be asked again after the next sign-in (or run \
                      `mklm-cli keep {op}` / `mklm-cli revert {op}`)."
                 ))?;
-                post_reboot_rule(&mut ui, false);
+                post_reboot_rule(&mut ui);
                 code = exit_code::AWAITING_CONFIRM;
                 continue;
             }

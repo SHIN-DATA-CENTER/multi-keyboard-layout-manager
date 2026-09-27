@@ -28,7 +28,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::allowlist::{DEVICE_VALUE_NAMES, GLOBAL_VALUE_NAMES, WriteTarget};
-use crate::journal::{RegValue, ValueRecord, is_ps2_value_name, same_target, value_eq};
+use crate::journal::{
+    BaselineRecord, RegValue, ValueKey, ValueRecord, is_ps2_value_name, same_target, value_eq,
+};
 use crate::model::{DeviceOverrides, GlobalSettings, KeyboardDevice, KeyboardDriver, value_names};
 use crate::safety::{InvPs2Violation, check_inv_ps2};
 
@@ -102,9 +104,11 @@ pub struct RestoreStep {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestorePlan {
     pub steps: Vec<RestoreStep>,
-    /// Set when the end state violates INV-PS2. Allowed only when that end state is exactly the
-    /// recorded baseline of every i8042prt and global value (MKLM puts back a pre-existing
-    /// violation, and says so); every other violating plan is rejected.
+    /// Set when the end state violates INV-PS2. Allowed only when the plan writes none of the
+    /// values INV-PS2 reads (it cannot change the violation it reports), or when that end state
+    /// has every i8042prt pin and the global type/subtype pair at its recorded baseline, values
+    /// outside the plan included (MKLM puts back a pre-existing violation, and says so); every
+    /// other violating plan is rejected.
     pub restores_inv_ps2_violation: Option<InvPs2Violation>,
 }
 
@@ -234,8 +238,7 @@ fn apply_global(global: &mut GlobalSettings, writes: &[RestoreWrite]) {
 }
 
 /// True when the restore puts every i8042prt device value and every global value it writes back
-/// to the record's baseline: then a violation it leaves is the one MKLM found (and says so).
-/// Vacuously true for a restore of HID values only, which cannot change INV-PS2 either way.
+/// to the record's baseline.
 fn restores_baselines_only(records: &[ValueRecord], to: RestoreTo) -> bool {
     records
         .iter()
@@ -246,11 +249,78 @@ fn restores_baselines_only(records: &[ValueRecord], to: RestoreTo) -> bool {
         })
 }
 
+/// True when the plan writes a value INV-PS2 reads: an i8042prt pin or the global type/subtype
+/// pair (both use the PS/2 value names; HID keyboards never get them).
+fn touches_inv_ps2(records: &[ValueRecord]) -> bool {
+    records.iter().any(|record| is_ps2_value_name(&record.name))
+}
+
+/// True when every value INV-PS2 reads is at its baseline in the end state (`keyboards`,
+/// `global` after the plan): the type/subtype pin of every i8042prt keyboard and the global pair.
+/// A value in the plan is compared with its record's baseline, any other value with its entry in
+/// `baselines`; a value with neither was never changed by MKLM, so it is as MKLM found it.
+/// Compared as the drivers read them (only a `REG_DWORD` counts).
+fn inv_ps2_values_at_baseline(
+    records: &[ValueRecord],
+    baselines: &[BaselineRecord],
+    keyboards: &[KeyboardDevice],
+    global: &GlobalSettings,
+) -> bool {
+    let at_baseline = |target: &WriteTarget, name: &str, now: Option<u32>| {
+        let key = ValueKey {
+            target: target.clone(),
+            name: name.to_string(),
+        };
+        let recorded = records
+            .iter()
+            .find(|record| record.key().same_value(&key))
+            .map(|record| &record.baseline)
+            .or_else(|| {
+                baselines
+                    .iter()
+                    .find(|baseline| baseline.key.same_value(&key))
+                    .map(|baseline| &baseline.value)
+            });
+        recorded.is_none_or(|baseline| as_dword(baseline) == now)
+    };
+    let global_ok = at_baseline(
+        &WriteTarget::Global,
+        value_names::PS2_TYPE,
+        global.override_keyboard_type,
+    ) && at_baseline(
+        &WriteTarget::Global,
+        value_names::PS2_SUBTYPE,
+        global.override_keyboard_subtype,
+    );
+    global_ok
+        && keyboards
+            .iter()
+            .filter(|kb| kb.driver == KeyboardDriver::I8042prt)
+            .all(|kb| {
+                let target = WriteTarget::Device {
+                    instance_id: kb.instance_id.clone(),
+                };
+                at_baseline(
+                    &target,
+                    value_names::PS2_TYPE,
+                    kb.overrides.override_keyboard_type,
+                ) && at_baseline(
+                    &target,
+                    value_names::PS2_SUBTYPE,
+                    kb.overrides.override_keyboard_subtype,
+                )
+            })
+}
+
 /// Builds the ordered restore plan for `records` (phases in the module docs) and replays it on
 /// `keyboards` / `global` to check INV-PS2 after every step. Records whose devnode is gone are left
 /// out by the caller (`SkipReason::DeviceRemoved`).
 ///
-/// `expect(i)` gives the compare-and-swap expectation of record `i`.
+/// `expect(i)` gives the compare-and-swap expectation of record `i`. `baselines` are the
+/// journal's recorded baselines (`Journal::baselines`): a violating end state is accepted as
+/// "the values before MKLM" only if the values *outside* the plan are at their baselines too
+/// (a device-scoped restore of a PS/2 keyboard must not unpin it while the global pair that
+/// MKLM removed stays removed).
 ///
 /// One step per registry key, in the order the key first appears in `records`, then sorted by
 /// phase (stable, so forward order is kept inside a phase). The replay follows `check_plan`: no
@@ -262,6 +332,7 @@ pub fn plan_restore(
     expect: &dyn Fn(usize) -> Expect,
     keyboards: &[KeyboardDevice],
     global: &GlobalSettings,
+    baselines: &[BaselineRecord],
 ) -> Result<RestorePlan, RestoreError> {
     let mut steps: Vec<RestoreStep> = Vec::new();
     for (index, record) in records.iter().enumerate() {
@@ -344,8 +415,14 @@ pub fn plan_restore(
         }
         violation = now;
     }
+    // A plan that writes nothing INV-PS2 reads leaves the violation it found (a phantom PS/2
+    // keyboard that appeared, say) exactly as it was; otherwise the whole end state must be the
+    // values before MKLM.
+    let exception = !touches_inv_ps2(records)
+        || (restores_baselines_only(records, to)
+            && inv_ps2_values_at_baseline(records, baselines, &state_keyboards, &state_global));
     match (violation, broken_by_step) {
-        (Some(end), _) if restores_baselines_only(records, to) => Ok(RestorePlan {
+        (Some(end), _) if exception => Ok(RestorePlan {
             steps,
             restores_inv_ps2_violation: Some(end),
         }),
@@ -465,6 +542,7 @@ mod tests {
             &last_written(&records),
             &keyboards,
             &global,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -518,6 +596,7 @@ mod tests {
             &last_written(&records),
             &keyboards,
             &global,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -552,6 +631,7 @@ mod tests {
             &last_written(&records),
             &keyboards,
             &global,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -589,6 +669,7 @@ mod tests {
             &last_written(&records),
             &keyboards,
             &per_keyboard,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -608,6 +689,7 @@ mod tests {
             &last_written(&records),
             &[ps2_bare()],
             &fixed,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -705,8 +787,7 @@ mod tests {
                 RestoreTo::Before,
                 &|_| Expect::Any,
                 &keyboards,
-                &fixtures::global_per_keyboard()
-            ),
+                &fixtures::global_per_keyboard(), &[]),
             Err(RestoreError::NameNotAllowed { name, .. }) if name == "Start"
         ));
     }
@@ -754,6 +835,7 @@ mod tests {
             &|_| Expect::Any,
             &keyboards,
             &fixtures::global_per_keyboard(),
+            &[],
         )
         .unwrap();
         assert_eq!(plan.steps[0].writes[0].value, odd);
@@ -773,7 +855,8 @@ mod tests {
                 RestoreTo::Resolution,
                 &|_| Expect::Any,
                 &keyboards,
-                &fixtures::global_per_keyboard()
+                &fixtures::global_per_keyboard(),
+                &[]
             ),
             Err(RestoreError::NoResolution { record: 1 })
         );
@@ -786,6 +869,7 @@ mod tests {
             },
             &keyboards,
             &fixtures::global_per_keyboard(),
+            &[],
         )
         .unwrap();
         let values: Vec<&RegValue> = plan.steps[0].writes.iter().map(|w| &w.value).collect();
@@ -797,6 +881,92 @@ mod tests {
                 RestoreTo::Resolution
             ),
             Err(RestoreError::NoResolution { record: 0 })
+        );
+    }
+
+    /// A baseline record as the journal keeps it.
+    fn baseline_of(target: WriteTarget, name: &str, value: RegValue) -> BaselineRecord {
+        BaselineRecord {
+            schema_version: crate::BASELINE_SCHEMA_VERSION,
+            key: ValueKey {
+                target,
+                name: name.to_string(),
+            },
+            key_path: String::new(),
+            value,
+            captured_at: crate::Timestamp(0),
+            captured_by: op_id(1),
+        }
+    }
+
+    /// Design D.1 table: a violating end state is "the values before MKLM" only when every
+    /// i8042prt pin and the global pair are at their baselines, including values outside the plan.
+    /// A device-scoped restore of the PS/2 keyboard on a migrated PC (pair removed by MKLM) holds
+    /// only the pin records, all at baseline, but must not unpin it while the pair stays removed.
+    #[test]
+    fn a_violation_is_baseline_only_when_values_outside_the_plan_are_too() {
+        let records = vec![
+            record(device(&ps2_id()), PS2_TYPE, RegValue::Absent, dword(7)),
+            record(device(&ps2_id()), PS2_SUBTYPE, RegValue::Absent, dword(2)),
+        ];
+        let keyboards = vec![ps2_pinned(7, 2)];
+        let migrated = fixtures::global_per_keyboard();
+        // Migrated from fixed JIS: the pair's baseline is 7/2, and it is outside this plan.
+        let mut baselines = vec![
+            baseline_of(device(&ps2_id()), PS2_TYPE, RegValue::Absent),
+            baseline_of(device(&ps2_id()), PS2_SUBTYPE, RegValue::Absent),
+            baseline_of(WriteTarget::Global, PS2_TYPE, dword(7)),
+            baseline_of(WriteTarget::Global, PS2_SUBTYPE, dword(2)),
+        ];
+        let violation = InvPs2Violation {
+            keyboards: vec![ps2_id()],
+        };
+        assert_eq!(
+            plan_restore(
+                &records,
+                RestoreTo::Baseline,
+                &last_written(&records),
+                &keyboards,
+                &migrated,
+                &baselines,
+            ),
+            Err(RestoreError::InvPs2(violation.clone()))
+        );
+        // The same plan when the PC was in per-keyboard mode before MKLM: the violation is the
+        // one MKLM found.
+        baselines.truncate(2);
+        baselines.push(baseline_of(WriteTarget::Global, PS2_TYPE, RegValue::Absent));
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Baseline,
+            &last_written(&records),
+            &keyboards,
+            &migrated,
+            &baselines,
+        )
+        .unwrap();
+        assert_eq!(plan.restores_inv_ps2_violation, Some(violation.clone()));
+        // Another i8042prt keyboard that MKLM pinned and this plan leaves pinned is not at its
+        // baseline either.
+        let other_ps2 = KeyboardDevice {
+            instance_id: r"ACPI\PNP0303\4&2&0".into(),
+            ..ps2_pinned(7, 2)
+        };
+        baselines.push(baseline_of(
+            device(&other_ps2.instance_id),
+            PS2_TYPE,
+            RegValue::Absent,
+        ));
+        assert_eq!(
+            plan_restore(
+                &records,
+                RestoreTo::Baseline,
+                &last_written(&records),
+                &[ps2_pinned(7, 2), other_ps2],
+                &migrated,
+                &baselines,
+            ),
+            Err(RestoreError::InvPs2(violation))
         );
     }
 
@@ -815,6 +985,7 @@ mod tests {
             &last_written(&records),
             &keyboards,
             &global,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -836,7 +1007,8 @@ mod tests {
                 RestoreTo::Before,
                 &last_written(&not_baseline),
                 &keyboards,
-                &global
+                &global,
+                &[]
             ),
             Err(RestoreError::InvPs2(InvPs2Violation {
                 keyboards: vec![ps2_id()]
@@ -857,6 +1029,7 @@ mod tests {
             &last_written(&hid),
             &[keychron_with(Some((7, 2))), phantom.clone()],
             &global,
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -885,6 +1058,7 @@ mod tests {
             },
             &keyboards,
             &fixtures::global_per_keyboard(),
+            &[],
         )
         .unwrap();
         assert_eq!(plan.steps.len(), 3);
@@ -903,7 +1077,8 @@ mod tests {
                 RestoreTo::Before,
                 &|_| Expect::Any,
                 &keyboards,
-                &fixtures::global_per_keyboard()
+                &fixtures::global_per_keyboard(),
+                &[]
             ),
             Ok(RestorePlan {
                 steps: vec![],
@@ -928,6 +1103,7 @@ mod tests {
             &last_written(&records),
             &keyboards,
             &fixtures::global_per_keyboard(),
+            &[],
         )
         .unwrap();
         assert_eq!(

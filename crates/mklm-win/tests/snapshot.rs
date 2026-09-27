@@ -260,43 +260,50 @@ fn dev_internal_ps2_types_jis() {
 }
 
 #[test]
-#[ignore = "development machine only (VXE R1SE+ mouse connected over BLE)"]
+#[ignore = "development machine only (VXE R1SE+ mouse paired over BLE, connected or not)"]
 fn dev_ble_mouse_keyboard_collection() {
+    // The static properties hold whether the mouse is connected or not; what Raw Input reports
+    // depends on it.
     let snap = all_keyboards();
     let kb = find(&snap, VXE_COL02);
-    assert!(kb.present);
     assert_eq!(kb.driver, KeyboardDriver::Kbdhid);
     assert_eq!(kb.transport, Transport::BluetoothLe);
     assert_eq!(kb.display_name, "VXE R1SE+");
     assert_eq!((kb.vendor_id, kb.product_id), (Some(0x25A7), Some(0xFA6C)));
     assert!(!kb.is_internal);
     assert!(kb.overrides.is_empty());
-    assert_eq!(kb.reported_type, Some(KeyboardType::HID_UNKNOWN));
+    if kb.present {
+        assert_eq!(kb.reported_type, Some(KeyboardType::HID_UNKNOWN));
+    } else {
+        assert_eq!(kb.reported_type, None);
+    }
 }
 
 #[test]
-#[ignore = "development machine only (non-present BLE mouse \"X3-5.4 Mouse\")"]
+#[ignore = "development machine only (BLE mouse \"X3-5.4 Mouse\", connected or not)"]
 fn dev_phantom_ble_mouse_keyboard_collection() {
-    // A BLE mouse that reports a Microsoft PnP ID (045E/0040), not a BLE keyboard.
+    // A BLE mouse that reports a Microsoft PnP ID (045E/0040), not a BLE keyboard. It was not
+    // connected in M0 (a phantom); whether it is now only decides which lists show it.
     let snap = all_keyboards();
-    let phantom = snap
+    let mouse = snap
         .keyboards
         .iter()
         .find(|kb| kb.vendor_id == Some(0x045E) && kb.product_id == Some(0x0040))
         .expect("VID 045E PID 0040 keyboard collection");
-    assert!(!phantom.present);
-    assert_eq!(phantom.display_name, "X3-5.4 Mouse");
-    assert_eq!(phantom.reported_type, None);
-    assert_eq!(phantom.transport, Transport::BluetoothLe);
-    assert_eq!(phantom.driver, KeyboardDriver::Kbdhid);
+    assert_eq!(mouse.display_name, "X3-5.4 Mouse");
+    assert_eq!(mouse.transport, Transport::BluetoothLe);
+    assert_eq!(mouse.driver, KeyboardDriver::Kbdhid);
+    if !mouse.present {
+        assert_eq!(mouse.reported_type, None);
+    }
 
+    // The list without non-present keyboards shows it exactly when it is connected.
     let present = snapshot(SnapshotOptions::default()).unwrap();
-    assert!(
-        present
-            .keyboards
-            .iter()
-            .all(|kb| !kb.instance_id.eq_ignore_ascii_case(&phantom.instance_id))
-    );
+    let listed = present
+        .keyboards
+        .iter()
+        .any(|kb| kb.instance_id.eq_ignore_ascii_case(&mouse.instance_id));
+    assert_eq!(listed, mouse.present);
 }
 
 #[test]

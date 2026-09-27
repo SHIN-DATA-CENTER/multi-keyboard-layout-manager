@@ -65,4 +65,13 @@ pub trait Host {
     /// Warnings the host produced on its own since the last call (e.g. a squatted data directory
     /// that was quarantined, design review S1). The engine appends them to the result.
     fn drain_warnings(&mut self) -> Vec<String>;
+
+    /// True, once, when a quarantine since the last call moved the recovery files away: a level
+    /// of the base directory failed validation and was renamed aside with everything under it,
+    /// `Recovery` included (design review S1). The engine then writes the recovery files again in
+    /// the same request, so that the path the documentation gives for WinRE keeps working (G.1).
+    /// Hosts without quarantine never report one.
+    fn take_recovery_assets_moved(&mut self) -> bool {
+        false
+    }
 }

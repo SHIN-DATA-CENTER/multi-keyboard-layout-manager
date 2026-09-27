@@ -1673,3 +1673,75 @@ fn journal_reads_without_the_lock() {
     let journal = w.engine().read_journal().unwrap();
     assert!(journal.entry(&op).is_some());
 }
+
+#[test]
+fn a_change_put_back_later_does_not_block_reverting_the_one_before() {
+    // C.8: only the operation that last changed a value may revert it. A later `set` whose
+    // countdown ran out put the value back where the first one left it: no net change.
+    let mut w = World::dev_machine();
+    let original = w.hid(KEYCHRON);
+    let first = op_of(&World::ok(w.set(
+        KEYCHRON,
+        LayoutChoice::Jis,
+        LIVE,
+        &mut ScriptedSink::new([ScriptedSink::keep()]),
+    )));
+    let second = op_of(&World::ok(w.set(
+        KEYCHRON,
+        LayoutChoice::Us,
+        LIVE,
+        &mut ScriptedSink::default(),
+    )));
+    assert_eq!(w.entry(&second).state, OpState::Reverted);
+    assert_eq!(w.hid(KEYCHRON), jis());
+    World::ok(w.revert(&first, NO_RESET));
+    assert_eq!(w.hid(KEYCHRON), original);
+
+    // A later change that is still in effect keeps blocking it.
+    let mut w = World::dev_machine();
+    let first = op_of(&World::ok(w.set(
+        KEYCHRON,
+        LayoutChoice::Jis,
+        LIVE,
+        &mut ScriptedSink::new([ScriptedSink::keep()]),
+    )));
+    World::ok(w.set(
+        KEYCHRON,
+        LayoutChoice::Us,
+        LIVE,
+        &mut ScriptedSink::new([ScriptedSink::keep()]),
+    ));
+    assert!(matches!(
+        w.revert(&first, NO_RESET),
+        Err(EngineError::NotLatest { .. })
+    ));
+}
+
+#[test]
+fn recovery_files_moved_by_a_quarantine_are_written_again() {
+    // Design review S1 / G.1: a quarantine of the base directory takes `Recovery` with it; the
+    // next request puts the recovery files back while baselines exist.
+    let mut w = World::pre_m0();
+    World::ok(w.migrate(Layout::Jis, &[(KEYCHRON, LayoutChoice::Jis)]));
+    let written = w.host.recovery_asset_writes();
+    assert!(w.host.recovery_assets().is_some());
+    w.host.quarantine_base();
+    assert!(w.host.recovery_assets().is_none());
+    let result = World::ok(w.recover());
+    assert!(
+        result.warnings.iter().any(|m| m.contains("quarantined")),
+        "{result:?}"
+    );
+    assert_eq!(w.host.recovery_asset_writes(), written + 1);
+    let assets = w.host.recovery_assets().expect("written again");
+    assert!(assets.cmd.contains("i8042prt"), "{}", assets.cmd);
+    // Once only.
+    World::ok(w.recover());
+    assert_eq!(w.host.recovery_asset_writes(), written + 1);
+
+    // Nothing to put back without baselines.
+    let mut clean = World::dev_machine();
+    clean.host.quarantine_base();
+    World::ok(clean.recover());
+    assert_eq!(clean.host.recovery_asset_writes(), 0);
+}

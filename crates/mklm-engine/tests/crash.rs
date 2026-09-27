@@ -702,6 +702,7 @@ fn denied_recovery(
     base: World,
     run: &dyn Fn(&mut World) -> Result<OperationResult, EngineError>,
     denied: WriteTarget,
+    deny_reads: bool,
 ) {
     let mut dry = base.fork();
     assert!(run(&mut dry).is_ok());
@@ -718,6 +719,7 @@ fn denied_recovery(
         let ctx = format!("{name}: crash_after {n}");
         world.registry.set_faults(FaultPlan {
             deny_target: Some(denied.clone()),
+            deny_reads,
             ..FaultPlan::default()
         });
         let result = world.recover();
@@ -746,6 +748,7 @@ fn denied_recovery(
         // The second recovery does not try again.
         world.registry.set_faults(FaultPlan {
             deny_target: Some(denied.clone()),
+            deny_reads,
             ..FaultPlan::default()
         });
         assert!(world.recover().is_ok());
@@ -776,6 +779,7 @@ fn a_denied_keyboard_ends_recovery_in_conflict_once() {
             )
         },
         device(KEYCHRON),
+        false,
     );
 }
 
@@ -788,7 +792,60 @@ fn a_denied_global_key_ends_recovery_in_conflict_once() {
         World::pre_m0(),
         &|w: &mut World| w.migrate(Layout::Jis, &[(KEYCHRON, LayoutChoice::Jis)]),
         WriteTarget::Global,
+        false,
     );
+}
+
+/// I7 with a key that cannot even be read (a DACL that denies reading too): recovery cannot
+/// observe the values, and still ends the entry in `Conflict` once instead of failing every
+/// request.
+#[test]
+fn an_unreadable_keyboard_ends_recovery_in_conflict_once() {
+    denied_recovery(
+        "usb set",
+        World::dev_machine(),
+        &|w: &mut World| {
+            w.set(
+                KEYCHRON,
+                LayoutChoice::Jis,
+                LIVE,
+                &mut ScriptedSink::new([ScriptedSink::keep()]),
+            )
+        },
+        device(KEYCHRON),
+        true,
+    );
+}
+
+/// A keyboard MKLM never touches (the phantom Bluetooth collection of the development machine)
+/// that cannot be read stops nothing: recovery, `set` on another keyboard and `undo` go on, with
+/// a warning.
+#[test]
+fn an_unreadable_untouched_keyboard_stops_nothing() {
+    let phantom = mklm_core::fixtures::ms_ble_phantom().instance_id;
+    let mut w = World::dev_machine();
+    w.registry.set_faults(FaultPlan {
+        deny_target: Some(device(&phantom)),
+        deny_reads: true,
+        ..FaultPlan::default()
+    });
+    let result = World::ok(w.recover());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|m| m.contains("could not be read")),
+        "{result:?}"
+    );
+    let set = World::ok(w.set(
+        KEYCHRON,
+        LayoutChoice::Jis,
+        LIVE,
+        &mut ScriptedSink::new([ScriptedSink::keep()]),
+    ));
+    assert_eq!(set.outcome, mklm_core::Outcome::Confirmed, "{set:?}");
+    assert_eq!(w.hid(KEYCHRON), (dword(7), dword(2)));
+    World::ok(w.undo());
 }
 
 #[test]
@@ -843,4 +900,310 @@ fn recovery_with_permission_to_reset_leaves_nothing_pending() {
             "crash_after {n}: apply_pending left"
         );
     }
+}
+
+// ------------------------------------------------------------------------------------------
+// INV-PS2 and restores of part of the baselines (design D.1 table)
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn a_device_restore_of_the_ps2_keyboard_keeps_inv_ps2() {
+    // Pre-M0 fixed JIS → migrate → restart → keep. The PS/2 pin's baseline is "absent", but the
+    // global pair MKLM removed is outside a device-scoped restore: unpinning the keyboard would
+    // leave it with neither a pin nor the pair (the lock-out INV-PS2 exists to prevent).
+    for mode in [RestoreMode::Interactive, RestoreMode::Silent] {
+        let mut w = migrated_confirmed();
+        assert!(inv_ps2_holds(&w));
+        let before = values_of(&w.registry.contents());
+        let params = restore_params(
+            RestoreScope::Device {
+                instance_id: PS2.to_string(),
+            },
+            ConflictPolicy::Report,
+            mode,
+        );
+        let result = w.run(|e| e.restore_baseline(&params, &mut ScriptedSink::default()));
+        assert!(
+            matches!(
+                result,
+                Err(EngineError::Restore(mklm_core::RestoreError::InvPs2(_)))
+            ),
+            "{mode:?}: {result:?}"
+        );
+        assert!(inv_ps2_holds(&w), "{mode:?}");
+        assert_eq!(values_of(&w.registry.contents()), before, "{mode:?}");
+        assert_eq!(
+            w.ps2(&device(PS2)),
+            (dword(7), dword(2)),
+            "{mode:?}: the pin was removed"
+        );
+    }
+    // The whole restore puts the pair back first and stays allowed.
+    let mut w = migrated_confirmed();
+    World::ok(w.restore_all(RestoreMode::Interactive));
+    assert!(inv_ps2_holds(&w));
+}
+
+// ------------------------------------------------------------------------------------------
+// C3: a read that fails (not a crash) never leaves an entry in flight
+// ------------------------------------------------------------------------------------------
+
+/// Runs `run` on `base` once for every read it makes, with exactly that read failing
+/// (`BackendError::Os`). Whatever the request returns, no entry may be left in flight or counting
+/// down, and INV-PS2 must hold if it held before (design K: "クラッシュ以外のエラーで、エンジンが
+/// 書き込み中のエントリを残して返る経路がない").
+fn sweep_read_errors(
+    name: &str,
+    base: &World,
+    run: &dyn Fn(&mut World) -> Result<OperationResult, EngineError>,
+) {
+    let mut dry = base.fork();
+    dry.registry.set_faults(FaultPlan::default());
+    assert!(run(&mut dry).is_ok(), "{name}: the undisturbed run fails");
+    let reads = dry.registry.reads();
+    assert!(reads > 0, "{name}: no reads");
+    for k in 1..=reads {
+        let mut world = base.fork();
+        world.registry.set_faults(FaultPlan {
+            fail_read_at: Some(k),
+            ..FaultPlan::default()
+        });
+        let result = run(&mut world);
+        let ctx = format!("{name}: read {k} of {reads} fails: {result:?}");
+        for entry in &world.journal().entries {
+            assert!(
+                !entry.state.is_in_flight(),
+                "{ctx}: {} left {:?}",
+                entry.op_id,
+                entry.state
+            );
+            assert!(
+                !(entry.state == OpState::AwaitingConfirm && entry.countdown.is_some()),
+                "{ctx}: {} left counting down",
+                entry.op_id
+            );
+        }
+        if inv_ps2_holds(base) {
+            assert!(inv_ps2_holds(&world), "{ctx}: INV-PS2 broken");
+        }
+        assert!(!world.lock.is_locked(), "{ctx}: lock left held");
+    }
+}
+
+#[test]
+fn read_errors_never_leave_an_entry_in_flight() {
+    sweep_read_errors("migrate", &World::pre_m0(), &|w| {
+        w.migrate(Layout::Jis, &[(KEYCHRON, LayoutChoice::Jis)])
+    });
+    sweep_read_errors("usb set, keep", &World::dev_machine(), &|w| {
+        w.set(
+            KEYCHRON,
+            LayoutChoice::Jis,
+            LIVE,
+            &mut ScriptedSink::new([ScriptedSink::keep()]),
+        )
+    });
+    sweep_read_errors("usb set, countdown expires", &World::dev_machine(), &|w| {
+        w.set(
+            KEYCHRON,
+            LayoutChoice::Jis,
+            LIVE,
+            &mut ScriptedSink::default(),
+        )
+    });
+    sweep_read_errors("ble set", &World::dev_machine(), &|w| {
+        w.set(VXE, LayoutChoice::Jis, LIVE, &mut ScriptedSink::default())
+    });
+    let (pending, op) = migrated_pending();
+    sweep_read_errors("migration revert", &pending, &move |w| {
+        w.revert(&op, NO_RESET)
+    });
+    sweep_read_errors("undo", &pending, &|w| w.undo());
+    sweep_read_errors("restore --baseline --all", &migrated_confirmed(), &|w| {
+        w.restore_all(RestoreMode::Interactive)
+    });
+    sweep_read_errors("silent restore", &migrated_confirmed(), &|w| {
+        w.restore_all(RestoreMode::Silent)
+    });
+
+    // A resolution that writes (RevertPending), then reads every value to close.
+    let mut conflict = World::dev_machine();
+    let op = op_of(&World::ok(conflict.set(
+        KEYCHRON,
+        LayoutChoice::Jis,
+        LIVE,
+        &mut ScriptedSink::new([ScriptedSink::keep()]),
+    )));
+    conflict
+        .registry
+        .outside_edit(&device(KEYCHRON), value_names::HID_TYPE, dword(4));
+    conflict
+        .registry
+        .outside_edit(&device(KEYCHRON), value_names::HID_SUBTYPE, dword(5));
+    let result = World::ok(conflict.revert(&op, NO_RESET));
+    assert_eq!(result.outcome, mklm_core::Outcome::Conflict);
+    sweep_read_errors("resolve", &conflict, &move |w| {
+        let params = ResolveParams {
+            op_id: op.clone(),
+            choices: vec![
+                ValueChoice {
+                    record: 0,
+                    choice: ResolutionChoice::UseIntended,
+                },
+                ValueChoice {
+                    record: 1,
+                    choice: ResolutionChoice::KeepCurrent,
+                },
+            ],
+            apply: NO_RESET,
+        };
+        w.run(|e| e.resolve_conflict(&params, &mut ScriptedSink::default()))
+    });
+    sweep_read_errors("undo of a conflict", &conflict, &|w| w.undo());
+}
+
+// ------------------------------------------------------------------------------------------
+// I4: an interrupted undo of a `Conflict` entry recovers to what the undo would have done
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn an_interrupted_undo_of_a_conflict_recovers_like_the_undo() {
+    // A migration waiting for the restart; the Keychron's value is changed outside MKLM; after
+    // the restart, recovery finds the conflict.
+    let (mut w, op) = migrated_pending();
+    w.registry
+        .outside_edit(&device(KEYCHRON), value_names::HID_TYPE, dword(5));
+    w.reboot();
+    World::ok(w.recover());
+    assert_eq!(w.entry(&op).state, OpState::Conflict);
+    let base = w.fork();
+
+    // Undisturbed: everything but the value changed outside MKLM goes back; still a conflict.
+    let mut undisturbed = base.fork();
+    World::ok(undisturbed.undo());
+    let expected_values = values_of(&undisturbed.registry.contents());
+    let expected_state = undisturbed.entry(&op).state;
+    assert_eq!(expected_state, OpState::Conflict);
+    assert_eq!(
+        undisturbed.value(&device(KEYCHRON), value_names::HID_TYPE),
+        dword(5)
+    );
+    let calls = undisturbed.registry.mutating_calls();
+
+    for n in 1..calls {
+        let mut run = base.fork();
+        run.registry.set_faults(FaultPlan {
+            crash_after: Some(n),
+            ..FaultPlan::default()
+        });
+        assert!(run.undo().is_err(), "crash_after {n}");
+        let mut after = run.after_crash(mklm_engine::memory::CrashImage::ProcessKill, false);
+        if !after
+            .journal()
+            .entries
+            .iter()
+            .any(|e| e.state == OpState::RevertPending)
+        {
+            // Crashed before the undo was journaled: nothing to continue.
+            continue;
+        }
+        World::ok(after.recover());
+        assert_eq!(
+            values_of(&after.registry.contents()),
+            expected_values,
+            "crash_after {n}"
+        );
+        assert_eq!(after.entry(&op).state, expected_state, "crash_after {n}");
+        assert!(inv_ps2_holds(&after), "crash_after {n}");
+    }
+}
+
+// ------------------------------------------------------------------------------------------
+// C.5 / I.2: recovery flushes what the dead process wrote before relying on it
+// ------------------------------------------------------------------------------------------
+
+/// For every crash whose log ends with value writes not flushed yet (killed between T and FT),
+/// the recovery of the process-kill image flushes the SYSTEM hive before it journals anything:
+/// otherwise a power failure after its FJ could lose values its entry already names.
+fn check_recovery_flushes_inherited_writes(
+    name: &str,
+    base: &World,
+    run: &dyn Fn(&mut World) -> Result<OperationResult, EngineError>,
+) -> usize {
+    use mklm_engine::memory::{Hive, Mutation};
+    let mut dry = base.fork();
+    assert!(run(&mut dry).is_ok(), "{name}");
+    let total = dry.registry.mutating_calls();
+    let mut checked = 0;
+    for n in 0..total {
+        let mut crashed = base.fork();
+        crashed.registry.set_faults(FaultPlan {
+            crash_after: Some(n),
+            ..FaultPlan::default()
+        });
+        assert!(run(&mut crashed).is_err());
+        let log = crashed.registry.mutations();
+        let last_write = log
+            .iter()
+            .rposition(|m| matches!(m, Mutation::WriteValue { .. }));
+        let last_flush = log
+            .iter()
+            .rposition(|m| matches!(m, Mutation::Flush { hive: Hive::System }));
+        let unflushed = match (last_write, last_flush) {
+            (Some(write), Some(flush)) => write > flush,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if !unflushed {
+            continue;
+        }
+        let mut after = crashed.after_crash(mklm_engine::memory::CrashImage::ProcessKill, false);
+        World::ok(after.recover());
+        let recovery = after.registry.mutations();
+        let first_journal = recovery
+            .iter()
+            .position(|m| matches!(m, Mutation::WriteJournal { .. }));
+        let first_flush = recovery
+            .iter()
+            .position(|m| matches!(m, Mutation::Flush { hive: Hive::System }));
+        if let Some(journal) = first_journal {
+            assert!(
+                first_flush.is_some_and(|flush| flush < journal),
+                "{name}: crash_after {n}: recovery journaled before flushing: {recovery:?}"
+            );
+        }
+        checked += 1;
+    }
+    checked
+}
+
+#[test]
+fn recovery_flushes_inherited_writes_before_relying_on_them() {
+    let mut checked = 0;
+    let dev = World::dev_machine();
+    checked += check_recovery_flushes_inherited_writes("ble set", &dev, &|w| {
+        w.set(VXE, LayoutChoice::Jis, LIVE, &mut ScriptedSink::default())
+    });
+    checked += check_recovery_flushes_inherited_writes("migrate", &World::pre_m0(), &|w| {
+        w.migrate(Layout::Jis, &[(KEYCHRON, LayoutChoice::Jis)])
+    });
+    let mut usb = dev.fork();
+    let op = op_of(&World::ok(usb.set(
+        KEYCHRON,
+        LayoutChoice::Jis,
+        LIVE,
+        &mut ScriptedSink::new([ScriptedSink::keep()]),
+    )));
+    checked += check_recovery_flushes_inherited_writes("usb revert", &usb, &move |w| {
+        w.revert(&op, NO_RESET)
+    });
+    let (pending, op) = migrated_pending();
+    checked += check_recovery_flushes_inherited_writes("migration revert", &pending, &move |w| {
+        w.revert(&op, NO_RESET)
+    });
+    checked +=
+        check_recovery_flushes_inherited_writes("restore all", &migrated_confirmed(), &|w| {
+            w.restore_all(RestoreMode::Interactive)
+        });
+    assert!(checked > 0, "no crash left unflushed writes");
 }

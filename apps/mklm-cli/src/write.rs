@@ -235,6 +235,7 @@ pub struct RevertArgs {
     pub op: String,
     #[command(flatten)]
     pub apply: ApplyArgs,
+    /// Skip the confirmation (the UAC prompt still appears when not elevated).
     #[arg(long)]
     pub yes: bool,
 }
@@ -253,6 +254,7 @@ pub struct ResolveArgs {
     pub values: Vec<ValueChoiceArg>,
     #[command(flatten)]
     pub apply: ApplyArgs,
+    /// Skip the confirmation (the UAC prompt still appears when not elevated).
     #[arg(long)]
     pub yes: bool,
 }
@@ -262,14 +264,15 @@ pub struct ResolveArgs {
 pub struct RecoverArgs {
     #[command(flatten)]
     pub apply: ApplyArgs,
+    /// Skip the confirmation (the UAC prompt still appears when not elevated).
     #[arg(long)]
     pub yes: bool,
     /// Run the engine inside this (elevated) process instead of the helper: a last resort when
     /// the helper cannot start.
     #[arg(long, hide = true)]
     pub in_process: bool,
-    /// Print the checked plan (steps, how it takes effect, INV-PS2) and stop: nothing is written
-    /// and the helper is not started.
+    /// List the journal entries it would recover or undo, and stop: nothing is written and the
+    /// helper is not started.
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -283,6 +286,7 @@ pub struct MigrateArgs {
     /// Also assign a layout in the same operation, e.g. `--also #2=us`. Repeatable.
     #[arg(long, value_name = "KEYBOARD=LAYOUT")]
     pub also: Vec<AlsoArg>,
+    /// Skip the confirmation (the UAC prompt still appears when not elevated).
     #[arg(long)]
     pub yes: bool,
     /// Print the checked plan (steps, how it takes effect, INV-PS2) and stop: nothing is written

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use mklm_core::KeyboardType;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_DEVNODE_STATUS_FLAGS, CM_Get_DevNode_Status, CM_LOCATE_DEVNODE_NORMAL, CM_Locate_DevNodeW,
-    CM_PROB, CR_NO_SUCH_DEVNODE, CR_SUCCESS, DI_NEEDREBOOT, DI_NEEDRESTART,
+    CM_PROB, CR_INVALID_DEVICE_ID, CR_NO_SUCH_DEVNODE, CR_SUCCESS, DI_NEEDREBOOT, DI_NEEDRESTART,
     DICS_FLAG_CONFIGSPECIFIC, DICS_PROPCHANGE, DIF_PROPERTYCHANGE, DN_STARTED,
     GUID_DEVCLASS_KEYBOARD, HDEVINFO, SP_CLASSINSTALL_HEADER, SP_DEVINFO_DATA,
     SP_DEVINSTALL_PARAMS_W, SP_PROPCHANGE_PARAMS, SetupDiCallClassInstaller,
@@ -60,6 +60,11 @@ impl Drop for DeviceInfoSet {
 ///
 /// A devnode of another setup class fails with [`Error::NotKeyboard`] before anything happens.
 pub fn restart_device(instance_id: &str) -> Result<RestartResult, Error> {
+    // An embedded NUL would truncate the ID handed to SetupAPI, which could then open another
+    // devnode; an empty one names none. Refused before any SetupAPI call, like `DevNode::locate`.
+    if instance_id.trim().is_empty() || instance_id.contains('\0') {
+        return Err(config_ret("SetupDiOpenDeviceInfoW", CR_INVALID_DEVICE_ID));
+    }
     // SAFETY: the class GUID is a static; no parent window.
     let set = unsafe { SetupDiCreateDeviceInfoList(Some(&GUID_DEVCLASS_KEYBOARD), None) }
         .map_err(|error| win32("SetupDiCreateDeviceInfoList", &error))?;
@@ -90,13 +95,16 @@ pub fn restart_device(instance_id: &str) -> Result<RestartResult, Error> {
         Scope: DICS_FLAG_CONFIGSPECIFIC,
         HwProfile: 0,
     };
-    // SAFETY: `device` belongs to `set`; `params` is a complete SP_PROPCHANGE_PARAMS whose header
-    // starts it, and its size is passed.
+    // The header pointer is derived from the whole structure (not from its header field), so it
+    // may cover every byte of the size passed; SP_PROPCHANGE_PARAMS starts with that header.
+    let header = std::ptr::from_ref(&params).cast::<SP_CLASSINSTALL_HEADER>();
+    // SAFETY: `device` belongs to `set`; `header` points at the complete SP_PROPCHANGE_PARAMS
+    // `params`, which outlives the call, and its full size is passed.
     unsafe {
         SetupDiSetClassInstallParamsW(
             set.0,
             Some(&device),
-            Some(&params.ClassInstallHeader),
+            Some(header),
             size_of::<SP_PROPCHANGE_PARAMS>() as u32,
         )
     }
@@ -329,6 +337,22 @@ mod tests {
         assert_eq!(devnode_state(""), Ok(absent));
         assert!(!absent.is_started());
         assert_eq!(reported_type(r"HID\MKLM_NO_SUCH_DEVICE\0"), Ok(None));
+    }
+
+    /// Empty IDs and IDs with an embedded NUL are refused before any SetupAPI call, so this
+    /// test never restarts anything.
+    #[test]
+    fn malformed_instance_ids_are_never_restarted() {
+        for id in ["", "   ", "HID\\VID_046D&PID_C31C\\0\0ACPI\\PNP0303\\0"] {
+            assert_eq!(
+                restart_device(id),
+                Err(Error::ConfigRet {
+                    function: "SetupDiOpenDeviceInfoW",
+                    code: CR_INVALID_DEVICE_ID.0,
+                }),
+                "{id:?}"
+            );
+        }
     }
 
     #[test]

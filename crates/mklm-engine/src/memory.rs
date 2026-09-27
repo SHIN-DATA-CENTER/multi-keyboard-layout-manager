@@ -86,7 +86,17 @@ pub struct FaultPlan {
     /// and after [`MemoryRegistry::after_crash`] too (EDR or tamper protection; design review C3).
     /// Recovery must end in `Conflict` rather than retry forever.
     pub deny_target: Option<WriteTarget>,
+    /// With `deny_target`: reads of that target fail with [`BackendError::AccessDenied`] too (a
+    /// DACL that denies reading as well), also after [`MemoryRegistry::after_crash`].
+    pub deny_reads: bool,
+    /// Read `n` (`read_value` and `list_values`, 1-based, counted separately from the mutating
+    /// calls) fails with [`BackendError::Os`]; later reads work. Error-path tests of the reads
+    /// (design review C3: no non-crash error may leave an entry in flight).
+    pub fail_read_at: Option<usize>,
 }
+
+/// `ERROR_REGISTRY_IO_FAILED`, the code of an injected read failure.
+const INJECTED_READ_ERROR: u32 = 1016;
 
 /// A state the registry can be found in after a crash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -214,6 +224,8 @@ struct MemoryState {
     log: Vec<Logged>,
     faults: FaultPlan,
     mutating_calls: usize,
+    /// Reads made since the last `set_faults` (for `fail_read_at`).
+    reads: usize,
     crashed: bool,
     /// Upper-case instance IDs of removed devnodes.
     removed: BTreeSet<String>,
@@ -243,6 +255,24 @@ impl MemoryState {
         if self.faults.fail_at == Some(self.mutating_calls) {
             return Err(BackendError::Injected {
                 call: self.mutating_calls,
+            });
+        }
+        Ok(())
+    }
+
+    /// Counts one read of `target` and applies `fail_read_at` and `deny_reads`.
+    fn begin_read(&mut self, target: &WriteTarget) -> Result<(), BackendError> {
+        self.check_alive()?;
+        self.reads += 1;
+        if self.faults.fail_read_at == Some(self.reads) {
+            return Err(BackendError::Os {
+                what: target_text(target),
+                code: INJECTED_READ_ERROR,
+            });
+        }
+        if self.faults.deny_reads && self.faults.deny_target.as_ref() == Some(target) {
+            return Err(BackendError::AccessDenied {
+                what: target_text(target),
             });
         }
         Ok(())
@@ -333,6 +363,13 @@ impl MemoryRegistry {
         let mut state = self.state.borrow_mut();
         state.faults = faults;
         state.mutating_calls = 0;
+        state.reads = 0;
+    }
+
+    /// Reads (`read_value`, `list_values`) made since the last [`MemoryRegistry::set_faults`]
+    /// (the upper bound for `fail_read_at` loops).
+    pub fn reads(&self) -> usize {
+        self.state.borrow().reads
     }
 
     /// The devnode disappears (removed in Device Manager): reads and writes of its values fail
@@ -478,9 +515,11 @@ impl MemoryRegistry {
                 log: Vec::new(),
                 faults: FaultPlan {
                     deny_target: state.faults.deny_target.clone(),
+                    deny_reads: state.faults.deny_reads,
                     ..FaultPlan::default()
                 },
                 mutating_calls: 0,
+                reads: 0,
                 crashed: false,
                 removed: state.removed.clone(),
             })),
@@ -497,15 +536,15 @@ impl MemoryRegistry {
 
 impl RegistryBackend for MemoryRegistry {
     fn read_value(&self, target: &WriteTarget, name: &str) -> Result<RegValue, BackendError> {
-        let state = self.state.borrow();
-        state.check_alive()?;
+        let mut state = self.state.borrow_mut();
+        state.begin_read(target)?;
         state.check_device(target)?;
         Ok(state.current.value(target, name))
     }
 
     fn list_values(&self, target: &WriteTarget) -> Result<Vec<(String, RegValue)>, BackendError> {
-        let state = self.state.borrow();
-        state.check_alive()?;
+        let mut state = self.state.borrow_mut();
+        state.begin_read(target)?;
         state.check_device(target)?;
         let key = match target {
             WriteTarget::Device { instance_id } => {
@@ -942,6 +981,8 @@ pub struct FakeHost {
     /// System32 files that do not exist (default: every file exists).
     missing_system32: Vec<String>,
     warnings: Vec<String>,
+    /// A quarantine moved the recovery files away since the last `take_recovery_assets_moved`.
+    assets_moved: bool,
 }
 
 impl FakeHost {
@@ -961,6 +1002,7 @@ impl FakeHost {
             fail_assets: false,
             missing_system32: Vec::new(),
             warnings: Vec::new(),
+            assets_moved: false,
         }
     }
 
@@ -972,6 +1014,15 @@ impl FakeHost {
     /// Queues a warning for [`Host::drain_warnings`] (e.g. a quarantined data directory).
     pub fn push_warning(&mut self, warning: &str) {
         self.warnings.push(warning.to_string());
+    }
+
+    /// A squatted base directory was quarantined (design review S1): the warning is queued and
+    /// the recovery files are gone from their place until written again.
+    pub fn quarantine_base(&mut self) {
+        self.warnings
+            .push("a squatted data directory was quarantined".to_string());
+        self.assets = None;
+        self.assets_moved = true;
     }
 
     /// A new boot: new boot ID, no process of the old boot runs, and this host continues as a
@@ -1123,6 +1174,10 @@ impl Host for FakeHost {
 
     fn drain_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.warnings)
+    }
+
+    fn take_recovery_assets_moved(&mut self) -> bool {
+        std::mem::take(&mut self.assets_moved)
     }
 }
 
@@ -1397,6 +1452,50 @@ mod tests {
         for _ in 0..10 {
             after.flush_journal().unwrap();
         }
+    }
+
+    #[test]
+    fn read_faults() {
+        let reg = MemoryRegistry::new();
+        let kb = device(KEYCHRON);
+        reg.set_faults(FaultPlan {
+            fail_read_at: Some(2),
+            ..FaultPlan::default()
+        });
+        assert_eq!(
+            reg.read_value(&kb, value_names::HID_TYPE),
+            Ok(RegValue::Absent)
+        );
+        assert!(matches!(
+            reg.list_values(&WriteTarget::Global),
+            Err(BackendError::Os { .. })
+        ));
+        assert_eq!(
+            reg.read_value(&kb, value_names::HID_TYPE),
+            Ok(RegValue::Absent)
+        );
+        assert_eq!(reg.reads(), 3);
+        assert_eq!(reg.mutating_calls(), 0);
+
+        // A denied target that cannot be read either; the fault survives a crash.
+        reg.set_faults(FaultPlan {
+            deny_target: Some(kb.clone()),
+            deny_reads: true,
+            ..FaultPlan::default()
+        });
+        assert!(matches!(
+            reg.read_value(&kb, value_names::HID_TYPE),
+            Err(BackendError::AccessDenied { .. })
+        ));
+        assert_eq!(
+            reg.read_value(&WriteTarget::Global, value_names::PS2_TYPE),
+            Ok(RegValue::Absent)
+        );
+        let after = reg.after_crash(CrashImage::ProcessKill);
+        assert!(matches!(
+            after.list_values(&kb),
+            Err(BackendError::AccessDenied { .. })
+        ));
     }
 
     /// The crash images are exactly the per-hive prefixes that keep every flushed call.

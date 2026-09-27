@@ -3,12 +3,20 @@
 //!
 //! `%ProgramData%` comes from `SHGetKnownFolderPath(FOLDERID_ProgramData)`, never from the
 //! environment. Each level from `SHIN DATA CENTER` down is opened with
-//! `FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT` and without `FILE_SHARE_DELETE`, and
-//! kept open while in use (so it cannot be renamed or swapped), then validated through the handle:
-//! not a reparse point, owner Administrators or SYSTEM, protected DACL, and no ACE that grants any
-//! write-type right (`FILE_WRITE_DATA`, `FILE_APPEND_DATA`, `FILE_WRITE_EA`, `FILE_WRITE_ATTRIBUTES`,
-//! `DELETE`, `FILE_DELETE_CHILD`, `WRITE_DAC`, `WRITE_OWNER`, `GENERIC_WRITE`, `GENERIC_ALL`) to any
-//! SID other than SYSTEM and Administrators. Missing levels are created with the SDDL below.
+//! `FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT`, kept open while in use, and
+//! validated through that handle: not a reparse point, owner Administrators or SYSTEM, protected
+//! DACL, and no ACE that grants any write-type right (`FILE_WRITE_DATA`, `FILE_APPEND_DATA`,
+//! `FILE_WRITE_EA`, `FILE_WRITE_ATTRIBUTES`, `DELETE`, `FILE_DELETE_CHILD`, `WRITE_DAC`,
+//! `WRITE_OWNER`, `GENERIC_WRITE`, `GENERIC_ALL`) to any SID other than SYSTEM and Administrators.
+//! Missing levels are created with the SDDL below. A validated level cannot be renamed or swapped
+//! by anyone but SYSTEM and Administrators, because that needs `DELETE` on it or
+//! `FILE_DELETE_CHILD` on its parent.
+//!
+//! The pinning handles ask for no data access (`READ_CONTROL | FILE_READ_ATTRIBUTES |
+//! SYNCHRONIZE`), so they take no part in the file system's share-access check: users may list
+//! these folders, and a user who holds one open with any share mode cannot make the pin fail
+//! (which would stop every write, recovery included). Only the short-lived handle that flushes the
+//! `Recovery` directory after a replace asks for `FILE_ADD_FILE`.
 //!
 //! **Squatting** (design review S1). `%ProgramData%` lets every user create folders, so before
 //! MKLM's first elevated run anyone can create `SHIN DATA CENTER` (or `MKLM`, or `mklm.lock`)
@@ -34,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_LOCK_VIOLATION,
-    GENERIC_READ, GENERIC_WRITE,
+    ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE,
 };
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::Storage::FileSystem::{
@@ -79,11 +87,21 @@ pub const LOCK_FILE_NAME: &str = "mklm.lock";
 /// it in the moment between the rename and the new folder).
 const MAX_QUARANTINES: usize = 3;
 
-/// Access of the handles that pin each level: validation needs `READ_CONTROL` and the attributes;
-/// `FILE_ADD_FILE` lets [`ProtectedDir::replace_file`] flush the directory.
-const PIN_ACCESS: u32 = READ_CONTROL.0 | FILE_READ_ATTRIBUTES.0 | FILE_ADD_FILE.0 | SYNCHRONIZE.0;
-/// No `FILE_SHARE_DELETE`: nobody can rename or delete a pinned level.
+/// Access of the handles that pin each level: validation needs `READ_CONTROL` and the attributes.
+/// No data access (`FILE_LIST_DIRECTORY`, `FILE_TRAVERSE`, `FILE_ADD_FILE`, `DELETE`): those take
+/// part in the share-access check, and Users may open these folders, so any of them would let a
+/// standard user block the pin with a handle of their own (module docs).
+const PIN_ACCESS: u32 = READ_CONTROL.0 | FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0;
+/// Share mode of the pins and of the lock file (whose handle does ask for data access).
 const PIN_SHARE: FILE_SHARE_MODE = FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0);
+/// Access of the short-lived handle that flushes a directory: `FlushFileBuffers` needs write
+/// access (`FILE_ADD_FILE` is `FILE_WRITE_DATA` on a directory).
+const FLUSH_ACCESS: u32 = FILE_ADD_FILE.0 | SYNCHRONIZE.0;
+/// How long a replace retries while another program (antivirus, the Explorer preview pane, a
+/// user copying the files) holds a recovery file or the directory open.
+const BUSY_RETRY_FOR: Duration = Duration::from_secs(2);
+/// Pause between two of those attempts.
+const BUSY_RETRY_EVERY: Duration = Duration::from_millis(100);
 /// Open directories, and a reparse point as itself rather than its target.
 const NO_FOLLOW: FILE_FLAGS_AND_ATTRIBUTES =
     FILE_FLAGS_AND_ATTRIBUTES(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0);
@@ -162,12 +180,18 @@ impl ProtectedDir {
     /// file with the directory's inherited DACL, `FlushFileBuffers` on it, then the current file
     /// (if any) is kept as `<name>.prev` (`MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` over the
     /// previous `.prev`), the temporary file is renamed to `name` the same way, and
-    /// `FlushFileBuffers` on the pinned directory handle makes the renames durable. `name` must be
-    /// a plain file name.
+    /// `FlushFileBuffers` on a short-lived handle of the directory makes the renames durable.
+    /// `name` must be a plain file name.
     ///
     /// The current file is *copied* to `.prev` (through its own durable temporary file), not
     /// moved, so that `name` never goes missing, even for a moment: a crash at any point leaves
     /// `name` with either the old or the new content, and `.prev` complete.
+    ///
+    /// Users may read the recovery files, so another program can hold one open without
+    /// `FILE_SHARE_DELETE`, which makes the replace fail with `ERROR_ACCESS_DENIED` or
+    /// `ERROR_SHARING_VIOLATION`. Those are retried for a short while (antivirus software and the
+    /// Explorer preview pane let go quickly); after that the error is returned and the files keep
+    /// their previous, complete content (residual risk, design I.18).
     pub fn replace_file(&self, name: &str, bytes: &[u8]) -> Result<(), Error> {
         if !is_plain_file_name(name) {
             return Err(Error::Insecure {
@@ -176,7 +200,7 @@ impl ProtectedDir {
             });
         }
         let target = self.path.join(name);
-        if let Some(previous) = read_existing(&target)? {
+        if let Some(previous) = retry_while_busy(|| read_existing(&target))? {
             let prev = self.path.join(format!("{name}.prev"));
             self.write_via_temporary(&format!("{name}.prev"), &prev, &previous)?;
         }
@@ -188,24 +212,38 @@ impl ProtectedDir {
     /// `target`. The temporary file is removed again on failure.
     fn write_via_temporary(&self, name: &str, target: &Path, bytes: &[u8]) -> Result<(), Error> {
         let temporary = self.path.join(format!("{name}.tmp-{}", new_uuid()?));
-        let result =
-            write_durably(&temporary, bytes).and_then(|()| move_replacing(&temporary, target));
+        let result = write_durably(&temporary, bytes)
+            .and_then(|()| retry_while_busy(|| move_replacing(&temporary, target)));
         if result.is_err() {
             let _ = std::fs::remove_file(&temporary);
         }
         result
     }
 
-    /// `FlushFileBuffers` on the pinned handle of this directory.
+    /// `FlushFileBuffers` on a short-lived handle of this directory. The pins ask for no data
+    /// access (see [`PIN_ACCESS`]), and flushing needs write access; the pinned levels cannot be
+    /// renamed by anyone but SYSTEM and Administrators, so the path still names this directory.
     fn flush(&self) -> Result<(), Error> {
-        let Some(directory) = self.handles.last() else {
+        if self.handles.is_empty() {
             return Err(Error::Insecure {
                 path: self.path.display().to_string(),
                 reason: "the directory is not open".to_string(),
             });
-        };
+        }
+        let share = FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0);
+        let directory = retry_while_busy(|| {
+            open(
+                &self.path,
+                FLUSH_ACCESS,
+                share,
+                None,
+                OPEN_EXISTING,
+                NO_FOLLOW,
+            )
+            .map_err(|error| win32("CreateFileW", &error))
+        })?;
         // SAFETY: `directory` is an open directory handle with FILE_ADD_FILE access.
-        unsafe { FlushFileBuffers(raw(directory)) }
+        unsafe { FlushFileBuffers(raw(&directory)) }
             .map_err(|error| win32("FlushFileBuffers", &error))
     }
 }
@@ -529,6 +567,25 @@ fn move_replacing(from: &Path, to: &Path) -> Result<(), Error> {
     .map_err(|error| win32("MoveFileExW", &error))
 }
 
+/// Runs `attempt` again every [`BUSY_RETRY_EVERY`] for up to [`BUSY_RETRY_FOR`] while it fails
+/// with `ERROR_SHARING_VIOLATION` or `ERROR_ACCESS_DENIED` (what `MoveFileExW` returns when the
+/// file it replaces is open without `FILE_SHARE_DELETE`); the last error otherwise.
+fn retry_while_busy<T>(mut attempt: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
+    let deadline = Instant::now() + BUSY_RETRY_FOR;
+    loop {
+        match attempt() {
+            Err(error)
+                if error.win32_code().is_some_and(|code| {
+                    code == ERROR_SHARING_VIOLATION.0 || code == ERROR_ACCESS_DENIED.0
+                }) && Instant::now() < deadline =>
+            {
+                thread::sleep(BUSY_RETRY_EVERY);
+            }
+            other => return other,
+        }
+    }
+}
+
 /// The machine-wide write lock (plan 2.2: `LockFileEx`, not a `Global\` mutex).
 #[derive(Debug)]
 pub struct FileLock {
@@ -658,6 +715,8 @@ fn lock_exclusive(handle: &OwnedHandle, timeout: Duration) -> Result<(), Error> 
 
 #[cfg(test)]
 mod tests {
+    use windows::Win32::Storage::FileSystem::{FILE_LIST_DIRECTORY, FILE_TRAVERSE};
+
     use super::*;
 
     /// A scratch directory under the user's temp folder, removed on drop. Only for the parts that
@@ -763,6 +822,99 @@ mod tests {
         assert!(is_plain_file_name("mklm-baseline.reg"));
     }
 
+    /// Users may list the protected folders. Whatever share mode a user's handle uses, it must not
+    /// make pinning fail, because every write (recovery included) pins the base levels first.
+    #[test]
+    fn a_folder_held_open_by_a_user_can_still_be_pinned() {
+        let scratch = Scratch::new();
+        for share in [FILE_SHARE_READ, FILE_SHARE_MODE(0)] {
+            let holder = open(
+                &scratch.0,
+                FILE_LIST_DIRECTORY.0 | FILE_TRAVERSE.0 | SYNCHRONIZE.0,
+                share,
+                None,
+                OPEN_EXISTING,
+                NO_FOLLOW,
+            )
+            .expect("hold");
+            let pinned = open(
+                &scratch.0,
+                PIN_ACCESS,
+                PIN_SHARE,
+                None,
+                OPEN_EXISTING,
+                NO_FOLLOW,
+            );
+            assert!(pinned.is_ok(), "share {share:?}: {pinned:?}");
+            drop(holder);
+        }
+    }
+
+    /// A reader that holds a recovery file open without `FILE_SHARE_DELETE` for a moment (the
+    /// preview pane, antivirus) only delays the replace.
+    #[test]
+    fn a_briefly_held_file_is_replaced_after_a_retry() {
+        let scratch = Scratch::new();
+        let dir = scratch.as_protected();
+        dir.replace_file("README.txt", b"first")
+            .expect("first write");
+        let reader = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .open(scratch.0.join("README.txt"))
+            .expect("reader");
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(400));
+            drop(reader);
+        });
+        dir.replace_file("README.txt", b"second")
+            .expect("replaced after the reader let go");
+        releaser.join().expect("releaser");
+        assert_eq!(
+            std::fs::read(scratch.0.join("README.txt")).ok(),
+            Some(b"second".to_vec())
+        );
+    }
+
+    /// A reader that keeps holding the file makes the replace fail after the retries, and leaves
+    /// the previous content complete and no temporary file behind.
+    #[test]
+    fn a_file_held_for_long_keeps_its_content() {
+        let scratch = Scratch::new();
+        let dir = scratch.as_protected();
+        dir.replace_file("README.txt", b"first")
+            .expect("first write");
+        let reader = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .open(scratch.0.join("README.txt"))
+            .expect("reader");
+        let started = Instant::now();
+        let error = dir
+            .replace_file("README.txt", b"second")
+            .expect_err("held open");
+        assert!(started.elapsed() >= BUSY_RETRY_FOR, "{error:?}");
+        assert!(
+            matches!(
+                error.win32_code(),
+                Some(code) if code == ERROR_ACCESS_DENIED.0 || code == ERROR_SHARING_VIOLATION.0
+            ),
+            "{error:?}"
+        );
+        drop(reader);
+        assert_eq!(
+            std::fs::read(scratch.0.join("README.txt")).ok(),
+            Some(b"first".to_vec())
+        );
+        let names: Vec<String> = std::fs::read_dir(&scratch.0)
+            .expect("list")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(names.is_empty(), "{names:?}");
+    }
+
     #[test]
     fn a_user_owned_directory_fails_validation_and_is_moved_aside() {
         let scratch = Scratch::new();
@@ -781,11 +933,22 @@ mod tests {
         // Owned by the test user, DACL inherited from the temp folder.
         assert!(validate(&handle, Kind::Directory, DIRECTORY_POLICY).is_err());
         assert!(validate(&handle, Kind::File, LOCK_FILE_POLICY).is_err());
-        // Pinned without FILE_SHARE_DELETE: it cannot be moved while the handle is open.
+        // The squatter holds it open without FILE_SHARE_DELETE: it cannot be moved aside while
+        // that handle is open (residual risk, design I.18).
+        let holder = open(
+            &squatted,
+            FILE_LIST_DIRECTORY.0 | SYNCHRONIZE.0,
+            FILE_SHARE_READ,
+            None,
+            OPEN_EXISTING,
+            NO_FOLLOW,
+        )
+        .expect("hold");
         assert!(matches!(
             quarantine(&squatted, "test"),
             Err(Error::Insecure { .. })
         ));
+        drop(holder);
         drop(handle);
 
         let moved = quarantine(&squatted, "test").expect("quarantine");

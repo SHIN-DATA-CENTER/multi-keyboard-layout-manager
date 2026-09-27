@@ -130,6 +130,13 @@ enum Forward {
     },
 }
 
+/// Records of an entry whose current value could not be read (index, error), so recovery cannot
+/// judge the entry.
+#[derive(Debug)]
+struct Unobservable {
+    records: Vec<(usize, BackendError)>,
+}
+
 /// Keyboards that came back after a reset, whether all did, and what each arrived one reports.
 type ResetOutcome = (Vec<String>, bool, Vec<(String, Option<KeyboardType>)>);
 
@@ -224,6 +231,18 @@ fn retryable(error: &BackendError) -> bool {
 fn needs_recovery(entry: &JournalEntry) -> bool {
     entry.state.is_in_flight()
         || (entry.state == OpState::AwaitingConfirm && entry.countdown.is_some())
+}
+
+/// True when the entry's `RevertPending` was entered from `Conflict`: an `undo` of a conflict
+/// (D.10; a resolution also comes from there, but carries `RevertMode::Resolution`). Read from
+/// the persisted history, so that recovery continues the undo the way it was started (I4).
+fn reverts_a_conflict(entry: &JournalEntry) -> bool {
+    entry
+        .history
+        .iter()
+        .rev()
+        .find(|line| line.to == OpState::RevertPending && line.from != Some(OpState::RevertPending))
+        .is_some_and(|line| line.from == Some(OpState::Conflict))
 }
 
 fn is_restore(entry: &JournalEntry) -> bool {
@@ -690,7 +709,16 @@ where
             OpState::PendingReboot if entry.boot_id != s.boot => {
                 // The recovery transition first (INV-PS2 and the values included).
                 self.refresh(&mut s)?;
-                let current = self.observe_values(&entry)?;
+                // Not in flight: an unreadable value only fails this request.
+                let current = match self.observe_values(&entry)? {
+                    Ok(current) => current,
+                    Err(Unobservable { records }) => {
+                        return Err(records
+                            .into_iter()
+                            .next()
+                            .map_or_else(|| internal("no unreadable value"), |(_, e)| e.into()));
+                    }
+                };
                 let context = RecoveryContext {
                     current_boot: s.boot,
                     inv_ps2: check_inv_ps2(&s.global, &s.keyboards).err(),
@@ -1260,44 +1288,123 @@ where
         for warning in self.host.drain_warnings() {
             s.warn(warning);
         }
+        // A quarantine moved `Recovery` aside with the base directory: put the recovery files
+        // back where the documentation points (G.1), or WinRE finds nothing there. Only a warning
+        // when that fails; the values are not being changed yet.
+        if self.host.take_recovery_assets_moved() && !s.journal.baselines.is_empty() {
+            let baselines = s.journal.baselines.clone();
+            self.write_assets(&mut s, &baselines, false)?;
+        }
         self.housekeeping(&mut s)?;
         Ok(s)
     }
 
     /// D.1 step 5: every value is re-read through the backend (the single source of truth);
     /// a value of another type reads as absent for the model (`RegValue::Other`).
+    ///
+    /// Only a crash fails it (design review C3): it also runs after an entry went in flight, and a
+    /// read error must not leave that entry behind, nor let one unreadable key (a phantom, a key
+    /// an EDR product locked) stop every request. A value that cannot be read is reported once as
+    /// a warning. A PS/2 value (a pin, or the global pair) then counts as absent, so that INV-PS2
+    /// is judged on the safe side; any other value keeps what the model had. Whatever is written
+    /// is read again right before (compare-and-swap), so a stale model value is never written
+    /// over.
     fn refresh(&self, s: &mut Session<'_>) -> Result<(), EngineError> {
-        let read = |target: &WriteTarget, name: &str| -> Result<RegValue, EngineError> {
-            match self.registry.read_value(target, name) {
-                Ok(value) => Ok(value),
-                Err(BackendError::DeviceRemoved { .. }) => Ok(RegValue::Absent),
-                Err(error) => Err(error.into()),
-            }
-        };
+        let mut unreadable: Vec<(WriteTarget, BackendError)> = Vec::new();
+        let mut read =
+            |target: &WriteTarget, name: &str| -> Result<Option<RegValue>, EngineError> {
+                match self.registry.read_value(target, name) {
+                    Ok(value) => Ok(Some(value)),
+                    Err(BackendError::DeviceRemoved { .. }) => Ok(Some(RegValue::Absent)),
+                    Err(BackendError::Crashed) => Err(BackendError::Crashed.into()),
+                    Err(error) => {
+                        if !unreadable.iter().any(|(t, _)| t == target) {
+                            unreadable.push((target.clone(), error));
+                        }
+                        Ok(None)
+                    }
+                }
+            };
         for kb in &mut s.keyboards {
             let target = device_target(&kb.instance_id);
-            let dword = |name: &str| read(&target, name).map(|v| as_dword(&v));
+            let old = kb.overrides.clone();
+            // `ps2`: an unreadable value counts as absent rather than as the old value.
+            let mut dword = |name: &str, previous: Option<u32>, ps2: bool| {
+                read(&target, name).map(|value| match value {
+                    Some(value) => as_dword(&value),
+                    None if ps2 => None,
+                    None => previous,
+                })
+            };
             kb.overrides = DeviceOverrides {
-                keyboard_type_override: dword(value_names::HID_TYPE)?,
-                keyboard_subtype_override: dword(value_names::HID_SUBTYPE)?,
-                override_keyboard_type: dword(value_names::PS2_TYPE)?,
-                override_keyboard_subtype: dword(value_names::PS2_SUBTYPE)?,
-                number_total_keys_override: dword(value_names::HID_TOTAL_KEYS)?,
-                number_function_keys_override: dword(value_names::HID_FUNCTION_KEYS)?,
-                number_indicators_override: dword(value_names::HID_INDICATORS)?,
+                keyboard_type_override: dword(
+                    value_names::HID_TYPE,
+                    old.keyboard_type_override,
+                    false,
+                )?,
+                keyboard_subtype_override: dword(
+                    value_names::HID_SUBTYPE,
+                    old.keyboard_subtype_override,
+                    false,
+                )?,
+                override_keyboard_type: dword(
+                    value_names::PS2_TYPE,
+                    old.override_keyboard_type,
+                    true,
+                )?,
+                override_keyboard_subtype: dword(
+                    value_names::PS2_SUBTYPE,
+                    old.override_keyboard_subtype,
+                    true,
+                )?,
+                number_total_keys_override: dword(
+                    value_names::HID_TOTAL_KEYS,
+                    old.number_total_keys_override,
+                    false,
+                )?,
+                number_function_keys_override: dword(
+                    value_names::HID_FUNCTION_KEYS,
+                    old.number_function_keys_override,
+                    false,
+                )?,
+                number_indicators_override: dword(
+                    value_names::HID_INDICATORS,
+                    old.number_indicators_override,
+                    false,
+                )?,
             };
         }
         let global = WriteTarget::Global;
-        s.global = GlobalSettings {
-            layer_driver_jpn: as_string(&read(&global, value_names::LAYER_DRIVER_JPN)?),
-            layer_driver_kor: as_string(&read(&global, value_names::LAYER_DRIVER_KOR)?),
-            override_keyboard_identifier: as_string(&read(
-                &global,
-                value_names::KEYBOARD_IDENTIFIER,
-            )?),
-            override_keyboard_type: as_dword(&read(&global, value_names::PS2_TYPE)?),
-            override_keyboard_subtype: as_dword(&read(&global, value_names::PS2_SUBTYPE)?),
+        let old = s.global.clone();
+        let mut string = |name: &str, previous: Option<String>| {
+            read(&global, name).map(|value| value.map_or(previous, |value| as_string(&value)))
         };
+        let layer_driver_jpn = string(value_names::LAYER_DRIVER_JPN, old.layer_driver_jpn)?;
+        let layer_driver_kor = string(value_names::LAYER_DRIVER_KOR, old.layer_driver_kor)?;
+        let override_keyboard_identifier = string(
+            value_names::KEYBOARD_IDENTIFIER,
+            old.override_keyboard_identifier,
+        )?;
+        let mut pair =
+            |name: &str| read(&global, name).map(|value| value.and_then(|value| as_dword(&value)));
+        s.global = GlobalSettings {
+            layer_driver_jpn,
+            layer_driver_kor,
+            override_keyboard_identifier,
+            override_keyboard_type: pair(value_names::PS2_TYPE)?,
+            override_keyboard_subtype: pair(value_names::PS2_SUBTYPE)?,
+        };
+        for (target, error) in unreadable {
+            let path = ValueKey {
+                target,
+                name: String::new(),
+            }
+            .key_path();
+            let message = format!("{path}: the values could not be read ({error})");
+            if !s.warnings.contains(&message) {
+                s.warn(message);
+            }
+        }
         Ok(())
     }
 
@@ -1343,16 +1450,42 @@ where
             })
     }
 
-    /// Only the operation that last changed a value may put it back (C.8).
+    /// Only the operation that last changed a value may put it back (C.8). A later operation
+    /// that was itself put back (`Reverted`, `RevertedPendingReboot`, `Failed`) and left the
+    /// value where this one had left it made no net change, so it does not count: otherwise a
+    /// `set` whose countdown ran out would make the confirmed change before it impossible to
+    /// revert.
     fn check_latest(s: &Session<'_>, entry: &JournalEntry) -> Result<(), EngineError> {
-        for record in entry.records.iter().filter(|r| r.last_written.is_some()) {
-            if let Some((later, _)) = s.journal.latest_record(&record.key())
-                && later.op_id != entry.op_id
+        let this = (entry.seq, &entry.op_id);
+        for record in entry.records.iter() {
+            let Some(ours) = &record.last_written else {
+                continue;
+            };
+            let key = record.key().canonical();
+            for later in s
+                .journal
+                .entries
+                .iter()
+                .filter(|e| e.op_id != entry.op_id && (e.seq, &e.op_id) > this)
             {
-                return Err(EngineError::NotLatest {
-                    op_id: entry.op_id.clone(),
-                    later: later.op_id.clone(),
-                });
+                let changed = later
+                    .records
+                    .iter()
+                    .filter(|r| r.key().canonical().eq_ignore_ascii_case(&key))
+                    .filter_map(|r| r.last_written.as_ref().map(|written| (r, written)))
+                    .any(|(r, written)| {
+                        let put_back = matches!(
+                            later.state,
+                            OpState::Reverted | OpState::RevertedPendingReboot | OpState::Failed
+                        );
+                        !(put_back && value_eq(&r.name, written, ours))
+                    });
+                if changed {
+                    return Err(EngineError::NotLatest {
+                        op_id: entry.op_id.clone(),
+                        later: later.op_id.clone(),
+                    });
+                }
             }
         }
         Ok(())
@@ -1386,19 +1519,86 @@ where
     }
 
     /// The current value of every record, `None` for a removed devnode or a record a restore
-    /// skipped on purpose (recovery leaves both out of the observation).
-    fn observe_values(&self, entry: &JournalEntry) -> Result<Vec<Option<RegValue>>, EngineError> {
-        entry
+    /// skipped on purpose (recovery leaves both out of the observation). A value that cannot be
+    /// read (not a crash; read twice) fails with [`Unobservable`], naming the records.
+    fn observe_values(
+        &self,
+        entry: &JournalEntry,
+    ) -> Result<Result<Vec<Option<RegValue>>, Unobservable>, EngineError> {
+        let mut values = Vec::with_capacity(entry.records.len());
+        let mut unreadable = Vec::new();
+        for (index, record) in entry.records.iter().enumerate() {
+            if record.skipped.is_some() {
+                values.push(None);
+                continue;
+            }
+            let read = || self.read_current(&record.target, &record.name);
+            match read().or_else(|error| {
+                if retryable(&error) {
+                    read()
+                } else {
+                    Err(error)
+                }
+            }) {
+                Ok(value) => values.push(value),
+                Err(BackendError::Crashed) => return Err(BackendError::Crashed.into()),
+                Err(error) => {
+                    values.push(None);
+                    unreadable.push((index, error));
+                }
+            }
+        }
+        Ok(if unreadable.is_empty() {
+            Ok(values)
+        } else {
+            Err(Unobservable {
+                records: unreadable,
+            })
+        })
+    }
+
+    /// An open entry whose values cannot be read (design review C3 and I7): recovery cannot
+    /// decide anything about it. One that needs recovery (in flight or counting down) goes to
+    /// `Conflict` with the read errors in `write_error`, so that it no longer blocks every other
+    /// request and the user decides (`undo`, `resolve`); any other entry is left as it is.
+    /// Returns true when the entry moved.
+    fn unobservable(
+        &mut self,
+        s: &mut Session<'_>,
+        entry: &mut JournalEntry,
+        unobservable: &Unobservable,
+        reason: &str,
+    ) -> Result<bool, EngineError> {
+        let names: Vec<String> = unobservable
             .records
             .iter()
-            .map(|record| {
-                if record.skipped.is_some() {
-                    Ok(None)
-                } else {
-                    Ok(self.read_current(&record.target, &record.name)?)
-                }
+            .filter_map(|(index, error)| {
+                entry
+                    .records
+                    .get(*index)
+                    .map(|r| format!(r"{}\{}: {error}", r.key_path, r.name))
             })
-            .collect()
+            .collect();
+        if !needs_recovery(entry) {
+            s.warn(format!(
+                "{}: left as it is, because a value could not be read: {}",
+                entry.op_id,
+                names.join("; ")
+            ));
+            return Ok(false);
+        }
+        for (index, error) in &unobservable.records {
+            if let Some(record) = entry.records.get_mut(*index) {
+                record.write_error = Some(format!("could not be read: {error}"));
+            }
+        }
+        s.warn(format!(
+            "{}: a value could not be read, so it waits for your decision: {}",
+            entry.op_id,
+            names.join("; ")
+        ));
+        self.transition(s, entry, OpState::Conflict, reason)?;
+        Ok(true)
     }
 
     /// J → FJ of one entry (no state change implied).
@@ -1579,7 +1779,13 @@ where
                     }))
                 }
                 Err(BackendError::DeviceRemoved { .. }) => {}
-                Err(error) => return Err(error.into()),
+                Err(BackendError::Crashed) => return Err(BackendError::Crashed.into()),
+                // The context is a record for the user; a key MKLM cannot read (a phantom, a key
+                // an EDR product locked) must not stop the request. The values this operation
+                // writes are read on their own before it starts.
+                Err(error) => s.warn(format!(
+                    "{key_path}: not recorded in the operation's context ({error})"
+                )),
             }
         }
         Ok(context)
@@ -2222,6 +2428,7 @@ where
             &|i| expect(&chosen[i]),
             &s.keyboards,
             &s.global,
+            &s.journal.baselines,
         )
     }
 
@@ -2678,7 +2885,20 @@ where
             if record.skipped.is_some() {
                 continue;
             }
-            match self.read_current(&record.target, &record.name)? {
+            let current = match self.read_current(&record.target, &record.name) {
+                Ok(current) => current,
+                Err(BackendError::Crashed) => return Err(BackendError::Crashed.into()),
+                // Nothing written yet: this entry stays in `Conflict`, and `undo` goes on with
+                // the others (it is the way out, design review C7).
+                Err(error) => {
+                    s.warn(format!(
+                        r"{}: not undone: {}\{} could not be read ({error})",
+                        entry.op_id, record.key_path, record.name
+                    ));
+                    return Ok(());
+                }
+            };
+            match current {
                 None => entry.records[index].skipped = Some(SkipReason::DeviceRemoved),
                 Some(current) if value_eq(&record.name, &current, &record.before) => {}
                 Some(current)
@@ -2748,14 +2968,42 @@ where
         apply: Option<&ApplyOptions>,
         in_effect: bool,
     ) -> Result<(), EngineError> {
-        let mut values = Vec::new();
+        // Every value first: a resolution may be in flight here (`RevertPending`), and a value that
+        // cannot be read must not leave it there (C3). The user decides again.
+        let mut observed = Vec::with_capacity(entry.records.len());
         for index in 0..entry.records.len() {
             let record = &entry.records[index];
-            let now = if record.skipped == Some(SkipReason::DeviceRemoved) {
-                None
-            } else {
-                self.read_current(&record.target, &record.name)?
-            };
+            if record.skipped == Some(SkipReason::DeviceRemoved) {
+                observed.push(None);
+                continue;
+            }
+            let read = || self.read_current(&record.target, &record.name);
+            match read().or_else(|error| {
+                if retryable(&error) {
+                    read()
+                } else {
+                    Err(error)
+                }
+            }) {
+                Ok(now) => observed.push(now),
+                Err(BackendError::Crashed) => return Err(BackendError::Crashed.into()),
+                // Still in `Conflict` (nothing was written): only this request fails.
+                Err(error) if entry.state == OpState::Conflict => return Err(error.into()),
+                Err(error) => {
+                    s.warn(format!(
+                        r"{}\{}: could not be read after the resolution ({error})",
+                        record.key_path, record.name
+                    ));
+                    entry.records[index].write_error = Some(format!("could not be read: {error}"));
+                    for record in &mut entry.records {
+                        record.resolve_to = None;
+                    }
+                    return self.transition(s, entry, OpState::Conflict, reason);
+                }
+            }
+        }
+        let mut values = Vec::new();
+        for (index, now) in observed.into_iter().enumerate() {
             let record = &mut entry.records[index];
             match now {
                 None => {
@@ -2819,8 +3067,11 @@ where
             {
                 continue;
             }
-            match self.read_current(&record.target, &record.name)? {
-                Some(current) if value_eq(&record.name, &current, &baseline.value) => {}
+            // A value that cannot be read keeps its baseline (the clean-up runs again on the next
+            // request); it must not stop the request (design review C3).
+            match self.read_current(&record.target, &record.name) {
+                Ok(Some(current)) if value_eq(&record.name, &current, &baseline.value) => {}
+                Err(BackendError::Crashed) => return Err(BackendError::Crashed.into()),
                 _ => continue,
             }
             let canonical = baseline.key.canonical();
@@ -2919,9 +3170,23 @@ where
                 current_boot: s.boot,
                 inv_ps2: check_inv_ps2(&s.global, &s.keyboards).err(),
             };
-            let current = self.observe_values(&entry)?;
-            let decision = decide_recovery_with_removed(&entry, &current, &context);
             let from = entry.state;
+            let current = match self.observe_values(&entry)? {
+                Ok(current) => current,
+                Err(unobservable) => {
+                    // Design review C3 / I7: an unreadable value ends in `Conflict` once.
+                    if self.unobservable(s, &mut entry, &unobservable, "recover:unreadable")? {
+                        result.recovered.push(RecoveredOp {
+                            op_id: id,
+                            from,
+                            to: entry.state,
+                            decision: "conflict".to_string(),
+                        });
+                    }
+                    continue;
+                }
+            };
+            let decision = decide_recovery_with_removed(&entry, &current, &context);
             if let Some(label) = self.execute(s, &mut entry, decision, &current)? {
                 result.recovered.push(RecoveredOp {
                     op_id: id,
@@ -2934,6 +3199,42 @@ where
         Ok(())
     }
 
+    /// Before recovery acts on the values an abandoned entry left, one `flush_target` makes them
+    /// durable (`RegFlushKey` flushes the whole SYSTEM hive). The process may have died between
+    /// a T and its FT, and recovery must not journal a state that names those values, nor write
+    /// a later step after them, while they may still be lost on a power failure (C.5: "エントリは、
+    /// 永続化された値より先の状態を名乗らない"; I.2). Any target of the entry will do. A failure is a
+    /// warning only: the lazy writer flushes the hive anyway, and failing here would leave the
+    /// entry in flight (C3).
+    fn flush_inherited(
+        &mut self,
+        s: &mut Session<'_>,
+        entry: &JournalEntry,
+    ) -> Result<(), EngineError> {
+        let mut targets: Vec<WriteTarget> = Vec::new();
+        for record in &entry.records {
+            if !targets.contains(&record.target) {
+                targets.push(record.target.clone());
+            }
+        }
+        let mut failure = None;
+        for target in targets {
+            match self.with_retry(|r| r.flush_target(&target)) {
+                Ok(()) => return Ok(()),
+                Err(BackendError::Crashed) => return Err(BackendError::Crashed.into()),
+                Err(BackendError::DeviceRemoved { .. }) => {}
+                Err(error) => failure = Some(error),
+            }
+        }
+        if let Some(error) = failure {
+            s.warn(format!(
+                "{}: the values found could not be flushed to disk: {error}",
+                entry.op_id
+            ));
+        }
+        Ok(())
+    }
+
     /// Carries out one recovery decision. Returns its label, `None` for `Leave`.
     fn execute(
         &mut self,
@@ -2942,6 +3243,9 @@ where
         decision: RecoveryDecision,
         current: &[Option<RegValue>],
     ) -> Result<Option<&'static str>, EngineError> {
+        if !matches!(decision, RecoveryDecision::Leave { .. }) {
+            self.flush_inherited(s, entry)?;
+        }
         match decision {
             RecoveryDecision::Leave { .. } => Ok(None),
             RecoveryDecision::MarkNothingWritten => {
@@ -3152,9 +3456,28 @@ where
                 }
             }
             mode => {
-                let subset: Vec<usize> = (0..entry.records.len())
-                    .filter(|&i| entry.records[i].skipped.is_none())
-                    .collect();
+                // An undo of a `Conflict` entry (D.10) writes only the values it can and leaves
+                // the ones changed outside MKLM alone, then goes back to `Conflict`. Recovery
+                // continues it the same way (I4): the values that are neither back at `before`
+                // nor at what MKLM wrote are left out, as `undo_conflict` left them out.
+                let undoing_conflict = mode == RevertMode::Revert && reverts_a_conflict(entry);
+                let mut left_out = false;
+                let mut subset: Vec<usize> = Vec::new();
+                for (i, record) in entry.records.iter_mut().enumerate() {
+                    if record.skipped.is_some() {
+                        continue;
+                    }
+                    if undoing_conflict
+                        && let Some(Some(value)) = current.get(i)
+                        && !value_eq(&record.name, value, &record.before)
+                        && !expect_matches(&expect_written(record), &record.name, value)
+                    {
+                        record.conflict = Some(value.clone());
+                        left_out = true;
+                        continue;
+                    }
+                    subset.push(i);
+                }
                 let plan = match self.plan_subset(
                     s,
                     &entry.records,
@@ -3165,7 +3488,7 @@ where
                     Ok(plan) => plan,
                     Err(error) => return self.conflict_from_plan(s, entry, error, label),
                 };
-                if !self.run_restore(s, entry, &plan, &subset, false)? {
+                if !self.run_restore(s, entry, &plan, &subset, false)? || left_out {
                     return self.transition(s, entry, OpState::Conflict, label);
                 }
                 if mode == RevertMode::Rollback && entry.failure.is_none() {

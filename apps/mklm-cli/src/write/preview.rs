@@ -294,6 +294,7 @@ pub fn preview_restore(
         &|_| Expect::Any,
         &snapshot.keyboards,
         &snapshot.global,
+        &journal.baselines,
     )
     .map(|plan| plan.restores_inv_ps2_violation);
     preview.apply = Some(if records.iter().any(ValueRecord::is_boot_time) {

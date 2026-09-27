@@ -7,6 +7,9 @@
 //!   CM_REGISTRY_HARDWARE)`, never through an `Enum\…` path (plan 1.2), and only after checking
 //!   that the devnode's class is Keyboard.
 //! - The global key is opened with `KEY_QUERY_VALUE | KEY_SET_VALUE` and never created.
+//! - Reads go through [`open_device_key_read`] / [`open_global_key_read`] (read access only,
+//!   nothing created), so that a key that refuses writes can still be read and reading never
+//!   changes the SYSTEM hive (design review C3, I7).
 //! - [`WritableKey::write`] accepts only the value names MKLM writes on that kind of key
 //!   (`mklm_core::DEVICE_VALUE_NAMES` / `GLOBAL_VALUE_NAMES`) and refuses any other with
 //!   [`Error::ValueNotAllowed`] (design review S9). Checking the *values* stays the engine's job
@@ -25,10 +28,10 @@ use windows::Win32::System::Registry::{HKEY, KEY_QUERY_VALUE, KEY_SET_VALUE};
 use windows_registry::{Key, LOCAL_MACHINE};
 
 use crate::devices::KEYBOARD_CLASS_GUID;
-use crate::error::Error;
+use crate::error::{Error, is_not_found};
 use crate::global::I8042PRT_PARAMETERS;
 use crate::props::{DevNode, config_ret};
-use crate::regraw;
+use crate::{hwkey, regraw};
 
 /// A registry key opened for reading and writing values.
 #[derive(Debug)]
@@ -95,6 +98,73 @@ impl WritableKey {
     }
 }
 
+/// A registry key opened for reading values only (`KEY_READ` / `KEY_QUERY_VALUE`), never created.
+///
+/// The engine reads through this rather than through a [`WritableKey`] (design review C3, I7): a
+/// key whose DACL denies `KEY_SET_VALUE` (EDR or tamper protection) can still be read, and reading
+/// never creates a missing "Device Parameters" key, which would be an unjournaled write to the
+/// SYSTEM hive.
+#[derive(Debug)]
+pub struct ReadOnlyKey {
+    key: Key,
+    /// For error messages, like [`WritableKey::path`].
+    path: String,
+}
+
+impl ReadOnlyKey {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Like [`WritableKey::read`].
+    pub fn read(&self, name: &str) -> Result<RegValue, Error> {
+        Ok(
+            regraw::query_value(HKEY(self.key.as_raw()), &self.path, name)?
+                .map_or(RegValue::Absent, regraw::to_reg_value),
+        )
+    }
+
+    /// Like [`WritableKey::list`].
+    pub fn list(&self) -> Result<Vec<(String, RegValue)>, Error> {
+        Ok(regraw::enum_values(HKEY(self.key.as_raw()), &self.path)?
+            .into_iter()
+            .map(|(name, raw)| (name, regraw::to_reg_value(raw)))
+            .collect())
+    }
+}
+
+/// Opens a Keyboard-class devnode's hardware key for reading only (`CM_Open_DevNode_Key` with
+/// `KEY_READ` and `RegDisposition_OpenExisting`, works for phantom devnodes too). `Ok(None)` when
+/// "Device Parameters" does not exist: every value is absent. Fails with [`Error::NotKeyboard`]
+/// for any other class, and with `CR_NO_SUCH_DEVNODE` when the devnode is gone.
+pub fn open_device_key_read(instance_id: &str) -> Result<Option<ReadOnlyKey>, Error> {
+    let node = DevNode::locate(instance_id)?;
+    check_keyboard(node, instance_id)?;
+    Ok(hwkey::open_hardware_key(node)?.map(|key| ReadOnlyKey {
+        key,
+        path: device_key_path(instance_id),
+    }))
+}
+
+/// Opens `HKLM\SYSTEM\CurrentControlSet\Services\i8042prt\Parameters` for reading only.
+/// `Ok(None)` when it does not exist.
+pub fn open_global_key_read() -> Result<Option<ReadOnlyKey>, Error> {
+    let path = format!(r"HKLM\{I8042PRT_PARAMETERS}");
+    match LOCAL_MACHINE
+        .options()
+        .access(KEY_QUERY_VALUE.0)
+        .open(I8042PRT_PARAMETERS)
+    {
+        Ok(key) => Ok(Some(ReadOnlyKey { key, path })),
+        Err(error) if is_not_found(&error) => Ok(None),
+        Err(error) => Err(Error::registry(&path, &error)),
+    }
+}
+
+fn device_key_path(instance_id: &str) -> String {
+    format!(r"HKLM\SYSTEM\CurrentControlSet\Enum\{instance_id}\Device Parameters")
+}
+
 /// Opens a Keyboard-class devnode's hardware key for writing, creating "Device Parameters" if it
 /// does not exist yet (works for phantom devnodes too). Fails with [`Error::NotKeyboard`] for any
 /// other class.
@@ -124,7 +194,7 @@ pub fn open_device_key_rw(instance_id: &str) -> Result<WritableKey, Error> {
         // SAFETY: on success the API returned a registry handle that this process owns and that
         // must be closed with RegCloseKey, which `Key` does on drop.
         key: unsafe { Key::from_raw(hkey.0) },
-        path: format!(r"HKLM\SYSTEM\CurrentControlSet\Enum\{instance_id}\Device Parameters"),
+        path: device_key_path(instance_id),
         allowed_names: &DEVICE_VALUE_NAMES,
     })
 }
@@ -231,6 +301,40 @@ mod tests {
             assert_eq!(key.read(name).as_ref(), Ok(value));
         }
         assert_eq!(key.read("MKLM no such value"), Ok(RegValue::Absent));
+    }
+
+    /// Read-only opens need no elevation and create nothing: every keyboard's hardware key and
+    /// the global key can be read by a standard user (design B.1).
+    #[test]
+    fn read_only_opens_work_unelevated() {
+        if let Some(key) = open_global_key_read().expect("open the global key read-only") {
+            let values = key.list().expect("list i8042prt parameters");
+            for (name, value) in &values {
+                assert_eq!(key.read(name).as_ref(), Ok(value));
+            }
+        }
+        let keyboards = crate::keyboard_instance_ids(true).unwrap_or_default();
+        for id in keyboards.iter().take(5) {
+            match open_device_key_read(id) {
+                Ok(Some(key)) => {
+                    assert!(key.path().ends_with(r"\Device Parameters"));
+                    let values = key.list().expect("list device parameters");
+                    for (name, value) in &values {
+                        assert_eq!(key.read(name).as_ref(), Ok(value), "{id} {name}");
+                    }
+                    assert_eq!(key.read("MKLM no such value"), Ok(RegValue::Absent));
+                }
+                // No "Device Parameters" key: nothing was created to find out.
+                Ok(None) => {}
+                Err(error) => panic!("{id}: {error:?}"),
+            }
+        }
+        if DevNode::locate(r"HTREE\ROOT\0").is_ok() {
+            assert!(matches!(
+                open_device_key_read(r"HTREE\ROOT\0"),
+                Err(Error::NotKeyboard { .. })
+            ));
+        }
     }
 
     #[test]

@@ -33,7 +33,7 @@ use mklm_win::devctl::{self, DeviceArrival, PendingRestart, RestartResult, Timed
 use mklm_win::global::I8042PRT_PARAMETERS;
 use mklm_win::journal_store::{self, JournalStore, JournalSubkey};
 use mklm_win::protected_dir::{self, DataDir, FileLock, ProtectedDir};
-use mklm_win::regwrite::{self, WritableKey};
+use mklm_win::regwrite::{self, ReadOnlyKey, WritableKey};
 use mklm_win::{Error as WinError, ReadIssue, ReadIssueKind, elevation, proc_identity, session};
 
 use crate::backend::{BackendError, JournalDump, JournalSlot, RegistryBackend};
@@ -87,8 +87,11 @@ const RECOVERY_DIR_SUBJECT: &str = r"%ProgramData%\SHIN DATA CENTER\MKLM\Recover
 /// [`RegistryBackend`] over `mklm_win::regwrite` and `mklm_win::journal_store`. Opens each device
 /// and global key per call (no cached handles survive a devnode removal).
 ///
-/// Reads also go through `regwrite::open_device_key_rw`, as design A.3 specifies: opening a
-/// devnode whose "Device Parameters" key does not exist yet creates that (empty) key.
+/// Reads open the key read-only (`regwrite::open_device_key_read` / `open_global_key_read`),
+/// never through the read-write open that A.3 lists for `WritableKey::read`: a key whose DACL
+/// refuses writes can still be read, so recovery can judge it and end it in `Conflict` (design
+/// review C3, I7), and a read never creates a missing "Device Parameters" key. Only writes and
+/// flushes use `regwrite::open_device_key_rw`, which creates that (empty) key when it is missing.
 #[derive(Debug)]
 pub struct WinRegistry {
     /// The journal keys, opened and validated on the first journal write and kept afterwards
@@ -128,14 +131,14 @@ impl Default for WinRegistry {
 
 impl RegistryBackend for WinRegistry {
     fn read_value(&self, target: &WriteTarget, name: &str) -> Result<RegValue, BackendError> {
-        match open_target(target)? {
+        match open_target_read(target)? {
             Some(key) => key.read(name).map_err(|error| target_error(target, error)),
             None => Ok(RegValue::Absent),
         }
     }
 
     fn list_values(&self, target: &WriteTarget) -> Result<Vec<(String, RegValue)>, BackendError> {
-        match open_target(target)? {
+        match open_target_read(target)? {
             Some(key) => key.list().map_err(|error| target_error(target, error)),
             None => Ok(Vec::new()),
         }
@@ -235,6 +238,17 @@ fn allowed_name(target: &WriteTarget, name: &str) -> Option<&'static str> {
 /// `HKLM\SYSTEM\CurrentControlSet\Services\i8042prt\Parameters`.
 fn global_key_label() -> String {
     format!(r"HKLM\{I8042PRT_PARAMETERS}")
+}
+
+/// Opens the target's key for reading only, creating nothing. `Ok(None)` when the key does not
+/// exist (a devnode without "Device Parameters", or no global key): its values all read as
+/// absent. A devnode that is gone is [`BackendError::DeviceRemoved`].
+fn open_target_read(target: &WriteTarget) -> Result<Option<ReadOnlyKey>, BackendError> {
+    match target {
+        WriteTarget::Device { instance_id } => regwrite::open_device_key_read(instance_id),
+        WriteTarget::Global => regwrite::open_global_key_read(),
+    }
+    .map_err(|error| target_error(target, error))
 }
 
 /// Opens the target's key for reading and writing. `Ok(None)` only when the global key does not
@@ -524,6 +538,8 @@ pub struct WinHost {
     started: Instant,
     /// Quarantine notices not drained yet (design review S1).
     warnings: Vec<String>,
+    /// A base level was quarantined, `Recovery` with it (see [`Host::take_recovery_assets_moved`]).
+    assets_moved: bool,
 }
 
 impl WinHost {
@@ -535,6 +551,7 @@ impl WinHost {
             base: None,
             started: Instant::now(),
             warnings: Vec::new(),
+            assets_moved: false,
         };
         host.validate_base()?;
         Ok(host)
@@ -542,12 +559,13 @@ impl WinHost {
 
     /// Runs `ensure_protected_dir(Base)` again and keeps the result.
     fn validate_base(&mut self) -> Result<&ProtectedDir, HostError> {
-        // Release the old pins first: they are held without FILE_SHARE_DELETE, so they would stop
-        // the quarantine rename of a level that fails validation now.
+        // Release the old pins first: the new validation pins every level again.
         self.base = None;
         let base = protected_dir::ensure_protected_dir(DataDir::Base)
             .map_err(|error| host_error(BASE_DIR_SUBJECT, error))?;
         self.note_quarantined(base.quarantined());
+        // A quarantined base level took `Recovery` (and the recovery files) with it.
+        self.assets_moved |= !base.quarantined().is_empty();
         Ok(self.base.insert(base))
     }
 
@@ -621,13 +639,17 @@ impl Host for WinHost {
             (README_FILE, assets.readme.as_bytes()),
         ] {
             dir.replace_file(name, bytes)
-                .map_err(|error| host_error(&format!(r"{RECOVERY_DIR_SUBJECT}\{name}"), error))?;
+                .map_err(|error| recovery_file_error(name, error))?;
         }
         Ok(())
     }
 
     fn drain_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.warnings)
+    }
+
+    fn take_recovery_assets_moved(&mut self) -> bool {
+        std::mem::take(&mut self.assets_moved)
     }
 }
 
@@ -645,6 +667,29 @@ fn quarantine_warning(path: &Path) -> String {
          was moved to {} and created again with protected permissions",
         path.display()
     )
+}
+
+/// Maps a failed replace of the recovery file `name`. `ERROR_ACCESS_DENIED` and
+/// `ERROR_SHARING_VIOLATION` (after `replace_file`'s retries) almost always mean that another
+/// program holds the file or the folder open: Users may read them, and `MoveFileExW` cannot
+/// replace a file that is open without `FILE_SHARE_DELETE` (residual risk, design I.18).
+fn recovery_file_error(name: &str, error: WinError) -> HostError {
+    const ERROR_SHARING_VIOLATION: u32 = 32;
+    let subject = format!(r"{RECOVERY_DIR_SUBJECT}\{name}");
+    match error.win32_code() {
+        Some(code) if code == ERROR_ACCESS_DENIED || code == ERROR_SHARING_VIOLATION => {
+            HostError::Os {
+                what: format!(
+                    "{} could not be replaced; another program (an editor, a copy in progress, \
+                     the Explorer preview pane or antivirus software) probably has it or its \
+                     folder open. Close it and try again",
+                    describe(&subject, &error)
+                ),
+                code,
+            }
+        }
+        _ => host_error(&subject, error),
+    }
 }
 
 /// Maps a `mklm_win` error; `subject` names what was being done, for errors that do not say.
@@ -688,6 +733,7 @@ mod tests {
             base: None,
             started: Instant::now(),
             warnings: Vec::new(),
+            assets_moved: false,
         }
     }
 
@@ -1112,6 +1158,72 @@ mod tests {
             })
         );
         assert!(devices.join_pending(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_recovery_file_held_open_is_named_with_the_likely_cause() {
+        for code in [5, 32] {
+            let error = recovery_file_error(
+                "restore-offline.cmd",
+                WinError::Win32 {
+                    function: "MoveFileExW",
+                    code,
+                },
+            );
+            assert!(
+                matches!(
+                    &error,
+                    HostError::Os { what, code: c }
+                        if *c == code
+                            && what.contains(r"Recovery\restore-offline.cmd")
+                            && what.contains("another program")
+                ),
+                "{error:?}"
+            );
+        }
+        let other = recovery_file_error(
+            "README.txt",
+            WinError::Win32 {
+                function: "WriteFile",
+                code: 112,
+            },
+        );
+        assert!(
+            matches!(&other, HostError::Os { what, code: 112 } if !what.contains("another program")),
+            "{other:?}"
+        );
+    }
+
+    /// The backend reads through read-only opens (design review C3, I7): a standard user can read
+    /// every keyboard's values and the global key, which a read-write open would refuse, and a
+    /// devnode that does not exist is `DeviceRemoved`, not "absent".
+    #[test]
+    fn values_read_unelevated_through_read_only_keys() {
+        let registry = WinRegistry::new();
+        let global = registry
+            .list_values(&WriteTarget::Global)
+            .expect("list the global key");
+        for (name, value) in &global {
+            assert_eq!(
+                registry.read_value(&WriteTarget::Global, name).as_ref(),
+                Ok(value)
+            );
+        }
+        if let Ok(inventory) = WinDevices::new().keyboards() {
+            for keyboard in inventory.keyboards.iter().take(5) {
+                let target = device(&keyboard.instance_id);
+                let listed = registry
+                    .list_values(&target)
+                    .unwrap_or_else(|error| panic!("{}: {error:?}", keyboard.instance_id));
+                for (name, value) in &listed {
+                    assert_eq!(registry.read_value(&target, name).as_ref(), Ok(value));
+                }
+            }
+        }
+        assert!(matches!(
+            registry.read_value(&device(NO_SUCH_DEVICE), "KeyboardTypeOverride"),
+            Err(BackendError::DeviceRemoved { .. })
+        ));
     }
 
     #[test]

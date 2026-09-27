@@ -419,9 +419,13 @@ pub fn helper_path() -> Result<PathBuf, Error> {
 /// `VerQueryValueW`). The caller compares it with its own before launching the helper, so that a
 /// stale helper fails before the UAC prompt (design review S11).
 ///
-/// Reads the file's own resources (`FILE_VER_GET_NEUTRAL`, no MUI redirection) and looks for the
-/// string in every translation the file lists, then in `040904B0`. A file without it fails with
-/// `ERROR_RESOURCE_TYPE_NOT_FOUND`.
+/// Uses `FILE_VER_GET_NEUTRAL` and looks for the string in every translation the file lists, then
+/// in `040904B0`. A file without it fails with `ERROR_RESOURCE_TYPE_NOT_FOUND`. Note that the
+/// version APIs take the *strings* from a matching `<language>\<file>.mui` when one exists (only
+/// `VS_FIXEDFILEINFO` comes from the file itself), so this is a pre-UAC staleness check, not a
+/// guarantee: the authoritative check is the build ID compiled into the helper, compared in the
+/// handshake (design E.3). Whoever can place such a `.mui` next to the helper can replace the
+/// helper itself.
 pub fn file_build_id(exe: &Path) -> Result<String, Error> {
     let path = wide_os(exe.as_os_str());
     let mut ignored = 0u32;

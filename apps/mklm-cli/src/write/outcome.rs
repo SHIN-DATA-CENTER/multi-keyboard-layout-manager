@@ -1,6 +1,6 @@
 //! Exit codes of the write commands (design F.5).
 
-use mklm_core::{ErrorCode, FailureReason, OperationResult, Outcome, PendingAction};
+use mklm_core::{ErrorCode, FailureReason, OpState, OperationResult, Outcome, PendingAction};
 
 use super::exit_code;
 
@@ -40,6 +40,31 @@ pub fn result_exit_code(result: &OperationResult) -> i32 {
                 exit_code::OK
             }
         }
+    }
+}
+
+/// The exit code after the helper was lost and the CLI recovered at once (design E.7, review
+/// C8), judged by where recovery left the interrupted operations (C.7 rolls forward as well as
+/// back): a conflict 5; any operation now waiting for the restart 3010; any waiting for
+/// `keep` / `revert` 10; operations put back (`Reverted`, `RevertedPendingReboot`) 4, as an
+/// automatic revert; one that never wrote anything (`Failed`) 1; a restore written through to
+/// `Confirmed` 0. When nothing was recovered, the recovery's own code.
+pub fn lost_recovery_exit_code(result: &OperationResult) -> i32 {
+    let ended = |states: &[OpState]| result.recovered.iter().any(|op| states.contains(&op.to));
+    if !result.conflicts.is_empty() || ended(&[OpState::Conflict]) {
+        exit_code::CONFLICT
+    } else if result.recovered.is_empty() {
+        result_exit_code(result)
+    } else if ended(&[OpState::PendingReboot]) {
+        exit_code::RESTART_REQUIRED
+    } else if ended(&[OpState::AwaitingConfirm]) {
+        exit_code::AWAITING_CONFIRM
+    } else if ended(&[OpState::Reverted, OpState::RevertedPendingReboot]) {
+        exit_code::REVERTED
+    } else if ended(&[OpState::Failed]) {
+        exit_code::FAILURE
+    } else {
+        exit_code::OK
     }
 }
 
@@ -192,6 +217,35 @@ mod tests {
             write_error: None,
         });
         assert_eq!(result_exit_code(&recovered), 5);
+    }
+
+    #[test]
+    fn recovery_after_a_lost_helper_reports_where_the_operation_ended() {
+        let with = |ends: &[OpState]| {
+            let mut result = result(Outcome::Recovered, None);
+            result.recovered = ends
+                .iter()
+                .map(|to| mklm_core::RecoveredOp {
+                    op_id: op(),
+                    from: OpState::Written,
+                    to: *to,
+                    decision: "test".into(),
+                })
+                .collect();
+            lost_recovery_exit_code(&result)
+        };
+        // Rolled forward (C.7): the change waits for the restart or for keep / revert.
+        assert_eq!(with(&[OpState::PendingReboot]), 3010);
+        assert_eq!(with(&[OpState::AwaitingConfirm]), 10);
+        // Put back: an automatic revert.
+        assert_eq!(with(&[OpState::Reverted]), 4);
+        assert_eq!(with(&[OpState::RevertedPendingReboot]), 4);
+        assert_eq!(with(&[OpState::Failed]), 1);
+        assert_eq!(with(&[OpState::Conflict]), 5);
+        assert_eq!(with(&[OpState::Confirmed]), 0);
+        assert_eq!(with(&[OpState::Reverted, OpState::PendingReboot]), 3010);
+        // Nothing recovered: the recovery's own code.
+        assert_eq!(with(&[]), 0);
     }
 
     #[test]

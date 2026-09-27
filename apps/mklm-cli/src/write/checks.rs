@@ -117,17 +117,19 @@ pub enum RunOnce {
     NotNeeded,
     /// Register `mklm-cli post-reboot` for the current user.
     Register,
-    /// Needed, but this process runs elevated in-process and may be another administrator's:
-    /// tell the user to run `mklm-cli post-reboot` after the restart instead.
+    /// Needed, but this process runs elevated (an elevated console, or `--in-process`) and may
+    /// belong to another administrator than the signed-in user (a standard user who typed an
+    /// administrator's credentials): tell the user to run `mklm-cli post-reboot` after the restart
+    /// instead of writing another account's `RunOnce`.
     TellUser,
 }
 
 /// The rule of design F.4: decided by the journal (`Journal::needs_post_reboot_check`), not by the
-/// result the caller happened to receive.
-pub fn run_once(journal: &Journal, boot: BootId, in_process: bool) -> RunOnce {
+/// result the caller happened to receive. Only an unelevated caller registers (F.4).
+pub fn run_once(journal: &Journal, boot: BootId, elevated: bool) -> RunOnce {
     if !journal.needs_post_reboot_check(boot) {
         RunOnce::NotNeeded
-    } else if in_process {
+    } else if elevated {
         RunOnce::TellUser
     } else {
         RunOnce::Register

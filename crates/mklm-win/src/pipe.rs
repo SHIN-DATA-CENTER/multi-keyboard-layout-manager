@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
     DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND,
-    ERROR_INVALID_NAME, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY,
-    ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE,
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_INVALID_NAME, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NO_DATA,
+    ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
+    ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE,
@@ -213,6 +214,8 @@ impl PipeServer {
         let remaining = deadline.saturating_duration_since(Instant::now());
         // SAFETY: every handle in `handles` is open (the event and the helper process).
         let woke = unsafe { WaitForMultipleObjects(&handles, false, wait_millis(remaining)) };
+        // Taken now: the cancellation below overwrites the thread's last error.
+        let wait_error = (woke == WAIT_FAILED).then(|| last_error("WaitForMultipleObjects"));
         if woke == WAIT_OBJECT_0 {
             let mut ignored = 0u32;
             // SAFETY: the operation completed (its event is signalled); `overlapped` is the one
@@ -247,7 +250,10 @@ impl PipeServer {
                 pid: helper.pid(),
                 exit_code: helper.exit_code()?.unwrap_or(u32::MAX),
             }),
-            _ => Err(last_error("WaitForMultipleObjects")),
+            _ => Err(wait_error.unwrap_or(Error::Win32 {
+                function: "WaitForMultipleObjects",
+                code: woke.0,
+            })),
         }
     }
 }
@@ -408,24 +414,31 @@ impl PipeConnection {
             Err(error) => return Err(io_error(&error)),
         }
         let mut transferred = 0u32;
-        let millis = timeout.map_or(INFINITE, wait_millis);
+        let millis = timeout.map_or(INFINITE, overlapped_wait_millis);
         // SAFETY: `overlapped` is the structure the operation was started with.
-        match unsafe { GetOverlappedResultEx(handle, &overlapped, &mut transferred, millis, false) }
-        {
+        let waited =
+            unsafe { GetOverlappedResultEx(handle, &overlapped, &mut transferred, millis, false) };
+        let Err(wait_error) = waited else {
+            return Ok(transferred as usize);
+        };
+        // The wait ran out (`WAIT_TIMEOUT`, or `ERROR_IO_INCOMPLETE` for a zero wait), or failed
+        // for another reason. In every case the operation may still be in flight, so cancel it
+        // and wait for it before `overlapped` and the caller's buffer go out of scope. If it had
+        // already completed, the cancellation finds nothing and the wait returns its result.
+        let timed_out = [WAIT_TIMEOUT.0, ERROR_IO_INCOMPLETE.0].contains(&win32_code(&wait_error));
+        // SAFETY: cancels only this operation on our own handle.
+        let _ = unsafe { CancelIoEx(handle, Some(&overlapped)) };
+        // SAFETY: waits until the cancelled (or completed) operation has finished.
+        match unsafe { GetOverlappedResult(handle, &overlapped, &mut transferred, true) } {
             Ok(()) => Ok(transferred as usize),
-            Err(error) if win32_code(&error) == WAIT_TIMEOUT.0 => {
-                // SAFETY: cancels only this operation on our own handle.
-                let _ = unsafe { CancelIoEx(handle, Some(&overlapped)) };
-                // SAFETY: waits until the cancelled (or just completed) operation has finished.
-                match unsafe { GetOverlappedResult(handle, &overlapped, &mut transferred, true) } {
-                    Ok(()) => Ok(transferred as usize),
-                    Err(error) if win32_code(&error) == ERROR_OPERATION_ABORTED.0 => {
-                        Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            format!("pipe {operation} timed out"),
-                        ))
-                    }
-                    Err(error) => Err(io_error(&error)),
+            Err(error) if win32_code(&error) == ERROR_OPERATION_ABORTED.0 => {
+                if timed_out {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("pipe {operation} timed out"),
+                    ))
+                } else {
+                    Err(io_error(&wait_error))
                 }
             }
             Err(error) => Err(io_error(&error)),
@@ -461,6 +474,16 @@ fn wait_for_instance(name: &[u16], deadline: Instant) -> Result<(), Error> {
     // Another client may take the instance first; do not spin while it does.
     thread::sleep(BUSY_RETRY.min(deadline.saturating_duration_since(Instant::now())));
     Ok(())
+}
+
+/// Milliseconds to wait for an overlapped read or write: a positive timeout under 1 ms waits
+/// 1 ms rather than being truncated to a zero-length poll.
+fn overlapped_wait_millis(timeout: Duration) -> u32 {
+    if timeout.is_zero() {
+        0
+    } else {
+        wait_millis(timeout).max(1)
+    }
 }
 
 fn io_error(error: &windows::core::Error) -> io::Error {
@@ -630,6 +653,44 @@ mod tests {
         let error = server.bytes_available().expect_err("closed");
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
         assert_eq!(server.read(&mut [0u8; 4]).expect("end of stream"), 0);
+    }
+
+    /// A read with a timeout under 1 ms (or zero) times out cleanly: nothing stays in flight, so
+    /// bytes written afterwards reach the next read instead of the abandoned buffer.
+    #[test]
+    fn sub_millisecond_reads_time_out_without_losing_data() {
+        let path = pipe_path();
+        let server = PipeServer::create(&path, &test_sddl()).expect("create pipe");
+        let me = std::process::id();
+        let client_path = path.clone();
+        let client = thread::spawn(move || {
+            PipeConnection::connect(&client_path, me, Duration::from_secs(10)).expect("connect")
+        });
+        let mut server = server
+            .accept(me, Duration::from_secs(10), None)
+            .expect("accept");
+        let mut client = client.join().expect("client thread");
+
+        for timeout in [Duration::from_micros(500), Duration::ZERO] {
+            server.set_read_timeout(Some(timeout));
+            let mut abandoned = [0u8; 6];
+            let error = server.read(&mut abandoned).expect_err("nothing to read");
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{timeout:?}");
+            client.write_all(b"abcdef").expect("write");
+            // Give a still-pending read the chance to take the bytes (it must not exist).
+            thread::sleep(Duration::from_millis(20));
+            assert_eq!(abandoned, [0u8; 6], "{timeout:?}");
+            server.set_read_timeout(Some(Duration::from_secs(5)));
+            assert_eq!(read_exact_string(&mut server, 6), "abcdef", "{timeout:?}");
+        }
+    }
+
+    #[test]
+    fn overlapped_waits_round_up_to_one_millisecond() {
+        assert_eq!(overlapped_wait_millis(Duration::ZERO), 0);
+        assert_eq!(overlapped_wait_millis(Duration::from_micros(1)), 1);
+        assert_eq!(overlapped_wait_millis(Duration::from_micros(999)), 1);
+        assert_eq!(overlapped_wait_millis(Duration::from_millis(7)), 7);
     }
 
     #[test]

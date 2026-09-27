@@ -449,7 +449,8 @@ mod windows_session {
                 if remaining.is_zero() {
                     return DecisionPoll::NoDecision;
                 }
-                if let Some(decision) = self.inbox.poll(remaining) {
+                // At least 1 ms, so that a sub-millisecond rest is a real wait, not a poll.
+                if let Some(decision) = self.inbox.poll(remaining.max(Duration::from_millis(1))) {
                     return DecisionPoll::Decided(decision);
                 }
             }

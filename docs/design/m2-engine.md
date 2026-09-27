@@ -125,7 +125,7 @@
 
 | モジュール | 公開 API | 使う Win32 API と要点 |
 |---|---|---|
-| `regwrite` | `open_device_key_rw(instance_id)`、`open_global_key_rw()`、`WritableKey::{read, list, write, flush}` | `CM_Locate_DevNodeW(CM_LOCATE_DEVNODE_PHANTOM)` → クラスが Keyboard であることを確認（違えば `Error::NotKeyboard`）→ `CM_Open_DevNode_Key(KEY_QUERY_VALUE \| KEY_SET_VALUE, 0, RegDisposition_OpenAlways, &hkey, CM_REGISTRY_HARDWARE)`。全体のキーは `RegOpenKeyExW(KEY_QUERY_VALUE \| KEY_SET_VALUE)` で、作成はしない。値は `RegQueryValueExW`、`RegEnumValueW`、`RegSetValueExW`、`RegDeleteValueW`（存在しなくても成功扱い）、`RegFlushKey`。**`write` は値の名前を静的な一覧で確かめ、それ以外は `Error::ValueNotAllowed`**（S9）。devnode が消えていれば `CR_NO_SUCH_DEVNODE` を返し、エンジンはそれを `DeviceRemoved` にする（「値なし」とは区別する。C3） |
+| `regwrite` | `open_device_key_rw(instance_id)`、`open_global_key_rw()`、`WritableKey::{read, list, write, flush}`、読み取り専用の `open_device_key_read(instance_id)`、`open_global_key_read()`、`ReadOnlyKey::{read, list}`（`KEY_READ` と `RegDisposition_OpenExisting`。作らない。エンジンの読み取りはこちら。I7） | `CM_Locate_DevNodeW(CM_LOCATE_DEVNODE_PHANTOM)` → クラスが Keyboard であることを確認（違えば `Error::NotKeyboard`）→ `CM_Open_DevNode_Key(KEY_QUERY_VALUE \| KEY_SET_VALUE, 0, RegDisposition_OpenAlways, &hkey, CM_REGISTRY_HARDWARE)`。全体のキーは `RegOpenKeyExW(KEY_QUERY_VALUE \| KEY_SET_VALUE)` で、作成はしない。値は `RegQueryValueExW`、`RegEnumValueW`、`RegSetValueExW`、`RegDeleteValueW`（存在しなくても成功扱い）、`RegFlushKey`。**`write` は値の名前を静的な一覧で確かめ、それ以外は `Error::ValueNotAllowed`**（S9）。devnode が消えていれば `CR_NO_SUCH_DEVNODE` を返し、エンジンはそれを `DeviceRemoved` にする（「値なし」とは区別する。C3） |
 | `journal_store` | `read_journal_store()`（非昇格でも可）、`JournalStore::{open_or_create, write, delete, flush}`、`JOURNAL_KEY_SDDL` | 作成は `RegCreateKeyExW`＋`SECURITY_ATTRIBUTES`（`ConvertStringSecurityDescriptorToSecurityDescriptorW`）。既存のキーは `RegGetKeySecurity` で所有者と DACL を検証する（C.1） |
 | `devctl` | `restart_device(instance_id) -> RestartResult`、`devnode_state(instance_id)` | `SetupDiCreateDeviceInfoList(GUID_DEVCLASS_KEYBOARD)` → `SetupDiOpenDeviceInfoW` → `SetupDiSetClassInstallParamsW(SP_PROPCHANGE_PARAMS{DIF_PROPERTYCHANGE, DICS_PROPCHANGE, DICS_FLAG_CONFIGSPECIFIC, 0})` → `SetupDiCallClassInstaller(DIF_PROPERTYCHANGE)` → `SetupDiGetDeviceInstallParamsW` の `Flags` に `DI_NEEDREBOOT` か `DI_NEEDRESTART` があれば `NeedsReboot`。状態は `CM_Get_DevNode_Status`。**`restart_device` は期限を持たない同期呼び出しなので、エンジンの Windows 実装が別スレッドで期限付きで呼ぶ**（C18） |
 | `pipe` | `PipeServer::{create, accept}`、`PipeConnection::{connect, peer_pid, set_read_timeout}`、`Read`/`Write`、`HELPER_PIPE_SDDL` | `CreateNamedPipeW`、`ConnectNamedPipe`（overlapped）、`GetNamedPipeClientProcessId`、`DisconnectNamedPipe`（PID が違う相手を切って待ち直す）、`CreateFileW(SECURITY_SQOS_PRESENT \| SECURITY_IDENTIFICATION)`、`WaitNamedPipeW`（`ERROR_PIPE_BUSY` の再試行）、`GetNamedPipeServerProcessId`、`PeekNamedPipe`（切断の検出）、`ReadFile`/`WriteFile`（overlapped）、`GetOverlappedResultEx`（タイムアウト）、`CancelIoEx`（E 章） |
@@ -612,6 +612,8 @@ open な状態の操作がある間は、`set` と `migrate`、更新（M5）、
 - **ロールバックも `plan_restore` を通す。** INV-PS2 を壊す場合（外部の変更で状態が変わっているなど）は、書かずに `Conflict` にする。
 - **ロールバックの最終状態**: HID だけなら `Reverted`、起動時の値を含めば `RevertedPendingReboot`。どちらも `failure` に理由を残す。途中まで書かれた起動時の値は、電源断の後の起動ですでに読まれているかもしれないので、閉じた後も再起動を求める（C1）。
 
+**死んだプロセスの書き込みのフラッシュ**: 回復は、何かを決めて動く前（`Leave` 以外）に、そのエントリの対象で `flush_target` を 1 回呼ぶ（`RegFlushKey` はハイブ全体をフラッシュする）。死んだプロセスが T の後、FT の前に止まっていると、回復が見た値はまだディスクにないかもしれない。それに頼って J を書いたり、後のステップを書いたりする前に永続化する（C.5「エントリは、永続化された値より先の状態を名乗らない」、I.2）。失敗は警告にとどめる（遅延書き込みがいずれフラッシュし、ここで失敗させると書き込み中のエントリが残るため）。読めない値（クラッシュ以外のエラー）があるエントリは判定できないので、回復が必要なもの（書き込み中かカウントダウン中）は `write_error` 付きで `Conflict` にし、それ以外はそのまま残して警告する（I7）。
+
 **冪等性**: 回復の判定は、エントリと現在の値だけから決まる。回復が途中で止まっても、エントリは `RevertPending`（`revert_mode` 付き）か `Planned` として残る。次の回復は同じ判定で同じ最終状態にたどり着く。**クラッシュ以外の失敗は `Conflict` で止まる**ので、同じ失敗を繰り返す回復の無限ループにはならない（C3）。
 
 **非昇格の判断**（`attention`。ロックを取らず、対象の値も読まない）
@@ -644,7 +646,7 @@ open な状態の操作がある間は、`set` と `migrate`、更新（M5）、
 - devnode が消えた記録は `skipped = DeviceRemoved` で済んだものとする（C3）。
 - どちらでもなければ Conflict。`baseline`、`before`、`intended`、`last_written`、現在の値を `ConflictInfo` で返す（計画 2.3）。サイレントモード（`ConflictPolicy::Skip`）では `skipped = ConflictSkipped` にしてログに残す。
 - 読んで比べてから書くまでの間は原子的ではない。MKLM 同士はロックで直列化されるが、設定アプリなど MKLM 以外の書き手との競合は、ごく短い時間だけ残る。これは受け入れる。
-- 取り消せるのは、その値を最後に変えた操作だけ（`latest_record` がその操作であること）。そうでなければ `NotLatest` を返し、「導入前に戻す」を案内する。
+- 取り消せるのは、その値を最後に変えた操作だけ（`latest_record` がその操作であること）。そうでなければ `NotLatest` を返し、「導入前に戻す」を案内する。ただし、後の操作が自分自身も戻されて（`Reverted`、`RevertedPendingReboot`、`Failed`）、値をこの操作が残した値（`last_written`）に戻しているなら、正味の変更はないので数えない（カウントダウン切れの `set` の後でも、その前の確定した変更を取り消せるように）。「導入前に戻す」の `Expect` は引き続き `latest_record` を使う。
 - **解決は `Any` を使わない**（C5）。回復がクラッシュ後に解決を続けるとき、その間に利用者が設定アプリで変えた値を上書きしないため。合わなければもう一度 `Conflict` にする。
 
 ### C.9 整理（pruning）
@@ -694,7 +696,7 @@ C15 の指摘: 計画 2.2 は、サービスが再適用し直すループを防
    - `restore --baseline`: 書き込み中ではない open なエントリは拒否せず、置き換える（D.5）。
    - 既存の操作に対する要求（`revert`、`confirm`、`resolve`）: その操作の状態が要求を受け付けなければ `InvalidState`。
 4. `DeviceController::keyboards()`。`Incomplete`（書き込みを止める読み取りの問題）なら `InventoryIncomplete`（何も書かない）。`warnings` は結果の警告に入れる。
-5. すべてのキーボードについて 7 つの override 値を `read_value` で読み直し、`overrides` を置き換える。全体の 5 つの値も同様。以降の判断はこの読み直した値だけを使う。型違いの値は `RegValue::Other` として読め、止まらない（S2）。
+5. すべてのキーボードについて 7 つの override 値を `read_value` で読み直し、`overrides` を置き換える。全体の 5 つの値も同様。以降の判断はこの読み直した値だけを使う。型違いの値は `RegValue::Other` として読め、止まらない（S2）。読めない値（クラッシュ以外のエラー）も止めずに警告にする。i8042prt の固定と全体のペアは「ない」とみなし（INV-PS2 を安全側で判断する）、それ以外の値は直前のモデルの値を残す。書く値は書く直前に読み直す（CAS）ので、古い値を書くことはない。この読み直しは書き込み中のエントリがある間にも走るので、ここで失敗して書き込み中のエントリを残してはならない（C3、K の確認事項）。Windows 実装は値を読み取り専用で開く（`regwrite::open_device_key_read` / `open_global_key_read`。書き込みを拒否された鍵も読め、読むだけで "Device Parameters" を作らない。I7）。
 6. `Host::drain_warnings()` を結果の警告に入れる。
 7. 前処理の掃除（それぞれ J → FJ）: 有効でなくなった `apply_pending` を消す（状態は変えない）。起動 ID が変わった `RevertedPendingReboot` を `Reverted` に遷移させる（C.11）。
 8. 要求に `expected`（`ExpectedPlan`）があれば、自分の計画の `steps` と `apply` の両方と比べる。違えば `PlanChanged`（何も書かない）。反映方法が変わった場合（例: 下見ではリセットだったのに、UAC を待つ間にドングルを挿し直して未開始になり、再起動が必要になった）も止める（S6）。
@@ -704,7 +706,7 @@ C15 の指摘: 計画 2.2 は、サービスが再適用し直すループを防
 | 場所 | 内容 |
 |---|---|
 | `check_plan`（`set`、`migrate`） | 各ステップの後と最後で INV-PS2 を確かめる。保たれていた状態を壊すステップも、違反が残る計画も拒否する |
-| `plan_restore`（取り消し、ロールバック、undo、導入前に戻す、解決） | 変化の向きで決めた段階の順（C.5）で、各ステップの後に同じ確認をする。例外は、戻した後の状態が「i8042prt と全体の値がすべて baseline どおり」で、その baseline がもともと INV-PS2 に違反していた場合だけ。このときは `restores_inv_ps2_violation` に入れて警告する |
+| `plan_restore`（取り消し、ロールバック、undo、導入前に戻す、解決） | 変化の向きで決めた段階の順（C.5）で、各ステップの後に同じ確認をする。例外は、戻した後の状態が「i8042prt と全体の値がすべて baseline どおり」で、その baseline がもともと INV-PS2 に違反していた場合だけ。このときは `restores_inv_ps2_violation` に入れて警告する。「すべて」は計画の外の値も含む（`plan_restore` は `Journal::baselines` を受け取り、すべての i8042prt キーボードの固定と全体のペアを baseline と比べる。baseline のない値は MKLM が変えていない）。たとえばキーボードを指定した `restore --baseline` で PS/2 の固定だけを外し、移行で消したペアが消えたまま、という状態は拒否する。INV-PS2 が読む値（固定とペア）を 1 つも書かない計画（HID だけなど）は違反を変えられないので、見つかった違反を示すだけで拒否しない |
 | 回復 | ロールバックも `plan_restore` を通す。拒否されたら書かずに `Conflict`。ロールフォワードと再起動の観測は、今の値で INV-PS2 が成り立つときだけ（C12） |
 | 解決の `KeepCurrent` | 解決後の値で INV-PS2 が成り立たなければ拒否する（C12。D.8） |
 | 書き込みの途中の失敗 | 書けなかった値があるステップの後は、残りのステップを書かない（C.5） |
@@ -931,7 +933,7 @@ C7 の指摘: 再起動した後に内蔵キーボードの配列がおかしい
   1. D.1。書き込み中のエントリがあれば、まず D.7 の回復を行う（どの状態からでも効くように）。
   2. 書き込み中ではない open なエントリ（`AwaitingConfirm`、`PendingReboot`、`Conflict`）を**新しい順に**取り消す。
      - `AwaitingConfirm`、`PendingReboot`: D.4 と同じ（`revert_mode = Revert`、`Expect = last_written`）。
-     - `Conflict`: 現在の値が `last_written`（なければ `intended`）の記録だけを `before` に戻す。衝突している記録は書かずに `ConflictInfo` で示す（`Report` と同じ）。衝突が残ればエントリは `Conflict` のまま。
+     - `Conflict`: 現在の値が `last_written`（なければ `intended`）の記録だけを `before` に戻す。衝突している記録は書かずに `ConflictInfo` で示す（`Report` と同じ）。衝突が残ればエントリは `Conflict` のまま。この取り消しが途中で止まった場合、回復の `ContinueRevert` も同じ分け方をする（`RevertPending` に `Conflict` から入ったことを履歴で見分け、`before` でも `last_written` でもない記録は書かずに `Conflict` に戻す。I4）。
   3. HID のリセットは D.4 の 9 と同じ（`apply` に従う）。
   4. 結果は `Outcome::Recovered`（`decision = "undo"`）。戻した操作、残った衝突、`pending_action` を返す。
 - `Confirmed` の操作は undo の対象にしない（取り消しは `revert <op>`）。
@@ -1181,7 +1183,7 @@ Keep this layout? [y/N]  reverting automatically in 20 s
   - 登録するのは非昇格の呼び出し元。`HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce` に `SHINDATACENTER.MKLM.PostReboot` = `"<絶対パス>\mklm-cli.exe" post-reboot`。
   - **登録の条件はジャーナルで決める**（結果を受け取ったかどうかではない。C17）: 同じ起動の `PendingReboot`、または再起動で反映する操作の `AwaitingConfirm`（`apply = RestartPc`）があれば登録する。確かめる時点は、helper のセッションが終わるたび（エラーや切断でも）、`recover` の後、書き込みのコマンドを始めるとき（F.2 の 2）。回復のロールフォワードで `PendingReboot` になった場合や、helper が `PendingReboot` をフラッシュした直後に死んだ場合も、これで拾える。
   - helper は HKCU に触れない（計画 2.2）。
-  - 標準ユーザーが別の管理者の資格情報で昇格した場合も、登録するのは非昇格の呼び出し元（正しいユーザー）なので問題ない。`--in-process` で昇格したまま動いた場合は、別の管理者アカウントで動いている可能性があるので、登録せずに「再起動後に `mklm-cli post-reboot` を実行してください」と表示する。
+  - 標準ユーザーが別の管理者の資格情報で昇格した場合も、登録するのは非昇格の呼び出し元（正しいユーザー）なので問題ない。`--in-process` で昇格したまま動いた場合は、別の管理者アカウントで動いている可能性があるので、登録せずに「再起動後に `mklm-cli post-reboot` を実行してください」と表示する。昇格したコンソールで実行した場合（`--in-process` でなくても）も CLI 自身が昇格したアカウントで動くので、同じく登録せずに表示する。昇格しているかを確かめられないときも登録しない。
   - 計画 3.6 では GUI が `mklm.exe --post-reboot` を登録する。CLI から操作した場合は CLI を登録する（M3 では、GUI がインストールされていれば GUI を登録する）。
 - **`post-reboot`**: D.7 の「再起動後の確認」。
 
@@ -1189,8 +1191,8 @@ Keep this layout? [y/N]  reverting automatically in 20 s
 
 | コード | 意味 |
 |---|---|
-| 0 | 完了（確定、依頼どおりの取り消し・undo、変更なし、回復済み） |
-| 1 | 失敗（何も変わっていないか、エラーのためにすべて戻した。メッセージで区別する） |
+| 0 | 完了（確定、依頼どおりの取り消し・undo、変更なし、回復済み）。すでにキーボードごとモードの PC での `migrate`（`--also` なし）も「変更なし」 |
+| 1 | 失敗（何も変わっていないか、エラーのためにすべて戻した。メッセージで区別する）。`--also` 付きの `migrate` がキーボードごとモードの PC で `NotFixedMode` になった場合も 1（割り当ては `set` で行う） |
 | 2 | 使い方の誤り（clap。`--yes` の制約を含む） |
 | 3 | 取り消した（UAC を断った、書く前の確認で「いいえ」、呼び出し元が去った `Cancelled`） |
 | 4 | 自動で元に戻した（カウントダウン切れ、確認の失敗、キーボードが戻らない。`failure` が `CountdownExpired`、`KeyboardDidNotReturn` など） |
@@ -1212,7 +1214,7 @@ Keep this layout? [y/N]  reverting automatically in 20 s
 | 場所 | `%ProgramData%\SHIN DATA CENTER\MKLM\Recovery\` |
 | DACL | `RECOVERY_DIR_SDDL`: SY と BA がフルコントロール、Users が読み取り |
 | ファイル | `restore-offline.cmd`、`mklm-baseline.reg`、`README.txt`（それぞれ直前の版を `*.prev` として残す） |
-| 書く時点 | 新しい baseline を記録する操作の `Planned` より前（C.5 の 2）と、baseline を消したとき |
+| 書く時点 | 新しい baseline を記録する操作の `Planned` より前（C.5 の 2）と、baseline を消したとき。加えて、隔離（D.9）で `SHIN DATA CENTER` か `MKLM` が改名され、`Recovery` ごと動いたとき（`Host::take_recovery_assets_moved`）は、`Baselines` が空でなければ同じ要求の前処理（D.1 の 6 の後）で書き直す（失敗しても警告だけ） |
 | 内容のもと | `Baselines` のすべてと、その操作で新しく記録する baseline（その PC の実際のインスタンスパス） |
 | 書き方 | `WriteFile` → 一時ファイルの `FlushFileBuffers` → 今のファイルを `*.prev` に → 一時ファイルを `MoveFileExW(REPLACE_EXISTING \| WRITE_THROUGH)` で置き換え → フォルダーのハンドルの `FlushFileBuffers`（C10） |
 | 失敗したとき | i8042prt の値か全体の値を変える操作は、**対象の値を書く前に中止する**（`RecoveryAssetsUnavailable`。何も書かず、ジャーナルにも書かない）。HID だけの操作は警告にとどめる |
@@ -1514,6 +1516,8 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 16. **ARM64**: コードは同じだが、実機での試験は M6。
 17. **windows クレートのバインディング**: `NtQuerySystemInformation` の `SystemBootEnvironmentInformation`（90）と `SystemProcessIdInformation`（88）の構造体が見つからなければ、自前で定義する（A.3）。
 18. **ProgramData の先回り作成の残るリスク**（S1）: 先回りして作ったフォルダーを、攻撃者が `FILE_SHARE_DELETE` なしで開いたままにすると、隔離の改名ができない。自動起動で開き続けられると、再起動しても止まったままになり得る。M2 では案内付きで止めるにとどめる。M5 ではインストーラーが昇格してフォルダーを作るので窓は狭まるが、インストールより前の先回りは残る。根本策の候補は、ロックをファイルではなく、境界記述子に Administrators を入れたプライベート名前空間のミューテックスにすること（標準ユーザーは同じ名前空間を作れない）。計画 2.2 の「`LockFileEx`」からの変更になるので、M5 の前に判断する。
+    - 各階層を固定するハンドルはデータへのアクセス（`FILE_LIST_DIRECTORY`、`FILE_ADD_FILE` など）を求めない（`READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE`）。それらは共有モードの検査に加わり、Users はフォルダーを開けるので、ユーザーが開いたままにするだけで固定（したがって recover を含むすべての書き込み）を止められてしまうため。検証済みの階層の改名は、DACL が SY と BA にしか `DELETE` / `FILE_DELETE_CHILD` を与えないことで防ぐ。フォルダーのフラッシュ（C10）には、その時だけ `FILE_ADD_FILE` の短命なハンドルを開く。
+    - **復旧用ファイルの置き換えを読み手が止める**: Users は `Recovery` とそのファイルを読めるので、`FILE_SHARE_DELETE` なしでファイルを開いたまま（またはフォルダーを書き込み共有なしで開いたまま）にすると、`MoveFileExW(REPLACE_EXISTING)` とフォルダーのフラッシュが失敗する。ウイルス対策やエクスプローラーのプレビューのような短時間の保持は、約 2 秒の再試行で吸収する。それでも失敗すれば、エラーにファイル名と「ほかのプログラムが開いている」旨を示し、ファイルは直前の完全な版のまま残る。起動時の値を変える操作は C10 どおり `RecoveryAssetsUnavailable` で止まり、HID だけの操作は警告で続く。根本策（読み手が止められない配置、たとえば世代ごとのファイル名と索引）は M5 の前に判断する。
 19. **対話の「導入前に戻す」の回復は確定しない**（C14）: 前へ書き切るが、利用者が一度も確認していないので、`AwaitingConfirm` / `PendingReboot` で止める。利用者が気付かないと open のまま残り、`set` を止める。GUI と CLI の起動時の `attention` で必ず尋ねる。
 20. **`undo` は衝突を残すことがある**: `Conflict` のエントリで、外部に変えられた値は `undo` でも書かない（CAS の原則）。その場合は `resolve` で決める。
 21. **置き換えられた操作は開き直さない**: 「導入前に戻す」が `PendingReboot` の移行を置き換えた後、その「導入前に戻す」を取り消すと、値は移行の値に戻るが、移行のエントリは `Failed(Superseded)` のまま。起動時の値なので `RevertedPendingReboot` として再起動が必要と表示されるが、移行の確認画面は出ない。利用者が自分で戻した結果として受け入れる。
