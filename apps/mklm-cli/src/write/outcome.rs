@@ -1,7 +1,7 @@
 //! Exit codes of the write commands (design F.5): the outcome classes of `mklm_client::outcome`
 //! (shared with the GUI, design m3 A.2) mapped onto numbers.
 
-use mklm_client::{HelperExit, OutcomeClass};
+use mklm_client::OutcomeClass;
 use mklm_core::{ErrorCode, OperationResult};
 
 use super::exit_code;
@@ -47,11 +47,6 @@ pub fn lost_recovery_exit_code(result: &OperationResult) -> i32 {
 /// was written, 1 otherwise (nothing was written).
 pub fn error_exit_code(code: ErrorCode) -> i32 {
     class_exit_code(mklm_client::outcome::classify_error(code))
-}
-
-/// What the helper's exit code (design E.8) means, when it exited before answering.
-pub fn helper_exit_text(code: u32) -> String {
-    HelperExit(code).to_string()
 }
 
 #[cfg(test)]
@@ -204,7 +199,5 @@ mod tests {
         ] {
             assert_eq!(error_exit_code(failed), 1);
         }
-        assert!(helper_exit_text(3).contains("build ID"));
-        assert!(helper_exit_text(99).contains("exit code 99"));
     }
 }

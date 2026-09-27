@@ -9,17 +9,22 @@
 //! runs `mklm_engine::Engine` inside the CLI (elevated only, with a console control handler that
 //! turns Ctrl+C / close into "revert now"; DLL hardening failures are fatal there).
 //!
-//! After every helper session, whatever its end, the CLI reads the journal unelevated and
-//! registers the post-reboot RunOnce entry when an entry waits for a restart (design review C17).
+//! A request runs through `mklm_client::run_once::run_request` (shared with the GUI, design m3
+//! A.2.3): the helper session, the immediate recovery when the helper is lost after journaling,
+//! and, whatever the end, the post-reboot RunOnce rule: the CLI reads the journal unelevated and
+//! registers the post-reboot check when an entry waits for a restart (design review C17). The
+//! check opens in the GUI when a `mklm.exe` of the same build sits next to the CLI, otherwise in
+//! the CLI (`PostRebootCommand::preferred`, m3 F.2).
 //!
 //! `set`, `migrate`, `restore`, `undo` and `recover` take `--dry-run`: they print the checked
 //! plan (steps, how it takes effect, INV-PS2) and stop before anything is launched or written.
 //!
 //! Modules: [`target`] (`#n` and instance IDs), [`preview`] (the unelevated plan), [`checks`]
-//! (journal rules: what blocks a command, RunOnce, reboot), [`relay`] (the pipe relay and the
-//! countdown), [`input`] (answers), [`render`] / [`outcome`] (text and exit codes),
-//! [`journal_view`] (`journal`), and on Windows `launch` (helper start and handshake),
-//! `in_process` and `commands` (the commands themselves).
+//! (journal rules: what blocks a command, RunOnce, reboot), [`relay`] (the CLI front end of a
+//! request: events, the countdown, notices), [`input`] (answers), [`report`] (how a request
+//! ended), [`render`] / [`outcome`] (text and exit codes), [`journal_view`] (`journal`), and on
+//! Windows `launch` (the launch configuration), `in_process` and `commands` (the commands
+//! themselves).
 
 use std::str::FromStr;
 
@@ -39,6 +44,7 @@ mod outcome;
 mod preview;
 mod relay;
 mod render;
+mod report;
 mod target;
 
 /// This build's ID (apps/build_id.rs): the helper must carry the same (design E.3, review S11).
