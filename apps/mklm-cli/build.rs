@@ -1,8 +1,13 @@
-//! Embeds VERSIONINFO and the application manifest (res/mklm-cli.rc) into mklm-cli.exe.
+//! Embeds VERSIONINFO and the application manifest (res/mklm-cli.rc) into mklm-cli.exe, and the
+//! build ID (design E.3, review S11) both as `env!("MKLM_BUILD_ID")` and as the VERSIONINFO string
+//! `MKLMBuildId`. apps/build_id.rs computes it; the helper's build.rs uses the same file.
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+#[path = "../build_id.rs"]
+mod build_id;
 
 const RC_FILE: &str = "res/mklm-cli.rc";
 const MANIFEST_FILE: &str = "res/mklm-cli.exe.manifest";
@@ -12,12 +17,16 @@ const VERSION_HEADER: &str = "mklm-cli-version.rch";
 fn main() {
     println!("cargo:rerun-if-changed={RC_FILE}");
     println!("cargo:rerun-if-changed={MANIFEST_FILE}");
+
+    // On every target, so that `env!("MKLM_BUILD_ID")` always compiles.
+    let build_id = embed_build_id();
+
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
-    fs::write(out_dir.join(VERSION_HEADER), version_header())
+    fs::write(out_dir.join(VERSION_HEADER), version_header(&build_id))
         .expect("failed to write the version header");
     embed_resource::compile(RC_FILE, embed_resource::NONE)
         .manifest_required()
@@ -42,8 +51,29 @@ fn main() {
     }
 }
 
-/// Version macros for the .rc, from `CARGO_PKG_VERSION*` (e.g. `0,1,0,0` and `"0.1.0"`).
-fn version_header() -> String {
+/// Computes the build ID, passes it to rustc as `MKLM_BUILD_ID` and returns it.
+fn embed_build_id() -> String {
+    let manifest_dir = PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
+    );
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .expect("the app lives two levels below the workspace root");
+    println!("cargo:rerun-if-changed=../build_id.rs");
+    for path in build_id::watched_paths(workspace_root) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    let version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION is set by Cargo");
+    let id =
+        build_id::build_id(workspace_root, &version).expect("failed to hash the shared crates");
+    println!("cargo:rustc-env=MKLM_BUILD_ID={id}");
+    id
+}
+
+/// Version macros for the .rc, from `CARGO_PKG_VERSION*` (e.g. `0,1,0,0` and `"0.1.0"`), and the
+/// build ID string (digits, hex letters, `.` and `+` only, so it needs no escaping).
+fn version_header(build_id: &str) -> String {
     let part = |name: &str| -> u16 {
         env::var(name)
             .ok()
@@ -65,6 +95,7 @@ fn version_header() -> String {
     format!(
         "#define MKLM_VERSION_NUM {major},{minor},{patch},0\n\
          #define MKLM_VERSION_STR \"{version}\"\n\
-         #define MKLM_FILEFLAGS {flags}\n"
+         #define MKLM_FILEFLAGS {flags}\n\
+         #define MKLM_BUILD_ID_STR \"{build_id}\"\n"
     )
 }

@@ -1,6 +1,6 @@
 // Version information and application manifest of mklm-cli.exe, compiled by build.rs.
-// build.rs generates mklm-cli-version.rch (MKLM_VERSION_NUM, MKLM_VERSION_STR, MKLM_FILEFLAGS)
-// in OUT_DIR, which embed-resource puts on the include path.
+// build.rs generates mklm-cli-version.rch (MKLM_VERSION_NUM, MKLM_VERSION_STR, MKLM_FILEFLAGS,
+// MKLM_BUILD_ID_STR) in OUT_DIR, which embed-resource puts on the include path.
 #pragma code_page(65001)
 
 #include <winresrc.h>
@@ -29,6 +29,8 @@ BEGIN
             VALUE "OriginalFilename", "mklm-cli.exe"
             VALUE "ProductName", "Multi Keyboard Layout Manager"
             VALUE "ProductVersion", MKLM_VERSION_STR
+            // Build ID (design E.3): the caller compares it with its own before launching the helper.
+            VALUE "MKLMBuildId", MKLM_BUILD_ID_STR
         END
     END
     BLOCK "VarFileInfo"

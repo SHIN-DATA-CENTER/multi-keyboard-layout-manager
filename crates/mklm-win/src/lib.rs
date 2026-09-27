@@ -23,6 +23,7 @@
 //! Session plumbing (M2, either side of the pipe):
 //! - [`pipe`], [`elevation`]: the helper pipe and the UAC launch.
 //! - [`session`]: boot ID, randomness, PC restart and the post-reboot RunOnce entry.
+//! - [`console`]: console control events for the in-process fallback of `mklm-cli`.
 //!
 //! HKLM keys are opened with `KEY_SET_VALUE` only in [`regwrite`] and [`journal_store`] (which
 //! write through the private `regraw` value I/O), and the HKCU RunOnce value is written only in
@@ -30,6 +31,7 @@
 
 #![cfg(windows)]
 
+pub mod console;
 pub mod devctl;
 pub mod devices;
 pub mod elevation;

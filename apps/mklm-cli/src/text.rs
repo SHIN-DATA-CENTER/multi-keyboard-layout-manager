@@ -482,7 +482,7 @@ fn standard_text(standard: &LayoutTable) -> String {
     }
 }
 
-fn table_name(table: &LayoutTable) -> &str {
+pub(crate) fn table_name(table: &LayoutTable) -> &str {
     match table {
         LayoutTable::Jis => "JIS",
         LayoutTable::Us => "US",
@@ -529,7 +529,7 @@ fn pending_name(action: PendingAction) -> &'static str {
     }
 }
 
-fn pending_name_long(action: PendingAction) -> &'static str {
+pub(crate) fn pending_name_long(action: PendingAction) -> &'static str {
     match action {
         PendingAction::ResetKeyboard => "reset the keyboard (restart the device)",
         PendingAction::Reconnect => {
@@ -555,7 +555,7 @@ fn vid_pid(kb: &KeyboardDevice) -> String {
     }
 }
 
-fn type_text(ty: Option<KeyboardType>) -> String {
+pub(crate) fn type_text(ty: Option<KeyboardType>) -> String {
     ty.map_or_else(|| "-".to_string(), |ty| ty.to_string())
 }
 
@@ -567,7 +567,7 @@ fn reported_text(ka: &KeyboardAssessment) -> String {
     }
 }
 
-fn dword_text(value: u32) -> String {
+pub(crate) fn dword_text(value: u32) -> String {
     if value < 10 {
         value.to_string()
     } else {

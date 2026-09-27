@@ -11,14 +11,38 @@
 //!
 //! After every helper session, whatever its end, the CLI reads the journal unelevated and
 //! registers the post-reboot RunOnce entry when an entry waits for a restart (design review C17).
-
-// Skeleton (M2): the handlers below are not implemented yet; remove these allows with them.
-#![allow(dead_code, unused_variables)]
+//!
+//! `set`, `migrate`, `restore`, `undo` and `recover` take `--dry-run`: they print the checked
+//! plan (steps, how it takes effect, INV-PS2) and stop before anything is launched or written.
+//!
+//! Modules: [`target`] (`#n` and instance IDs), [`preview`] (the unelevated plan), [`checks`]
+//! (journal rules: what blocks a command, RunOnce, reboot), [`relay`] (the pipe relay and the
+//! countdown), [`input`] (answers), [`render`] / [`outcome`] (text and exit codes),
+//! [`journal_view`] (`journal`), and on Windows `launch` (helper start and handshake),
+//! `in_process` and `commands` (the commands themselves).
 
 use std::str::FromStr;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{Args, ValueEnum};
+
+mod checks;
+#[cfg(windows)]
+mod commands;
+#[cfg(windows)]
+mod in_process;
+mod input;
+mod journal_view;
+#[cfg(windows)]
+mod launch;
+mod outcome;
+mod preview;
+mod relay;
+mod render;
+mod target;
+
+/// This build's ID (apps/build_id.rs): the helper must carry the same (design E.3, review S11).
+pub const BUILD_ID: &str = env!("MKLM_BUILD_ID");
 
 /// Process exit codes of the write commands (section F.5). Read-only commands keep 0 / 1 / 2.
 pub mod exit_code {
@@ -33,7 +57,8 @@ pub mod exit_code {
     /// The change was reverted automatically: countdown expired, no answer, verification failed,
     /// or the keyboard did not come back.
     pub const REVERTED: i32 = 4;
-    /// A value is in conflict; run `mklm-cli recover` or resolve it in the GUI.
+    /// A value is in conflict: decide with `mklm-cli resolve <op>` or put it back with
+    /// `mklm-cli undo`.
     pub const CONFLICT: i32 = 5;
     /// Another operation holds the lock, an open operation blocks this one, or recovery is needed.
     pub const BLOCKED: i32 = 6;
@@ -197,6 +222,10 @@ pub struct SetArgs {
     /// Answer the keep/revert question without a prompt (for scripted tests).
     #[arg(long, value_enum)]
     pub answer: Option<AnswerArg>,
+    /// Print the checked plan (steps, how it takes effect, INV-PS2) and stop: nothing is written
+    /// and the helper is not started.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `mklm-cli revert`.
@@ -239,6 +268,10 @@ pub struct RecoverArgs {
     /// the helper cannot start.
     #[arg(long, hide = true)]
     pub in_process: bool,
+    /// Print the checked plan (steps, how it takes effect, INV-PS2) and stop: nothing is written
+    /// and the helper is not started.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `mklm-cli migrate`.
@@ -252,6 +285,10 @@ pub struct MigrateArgs {
     pub also: Vec<AlsoArg>,
     #[arg(long)]
     pub yes: bool,
+    /// Print the checked plan (steps, how it takes effect, INV-PS2) and stop: nothing is written
+    /// and the helper is not started.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `mklm-cli restore`.
@@ -279,66 +316,133 @@ pub struct RestoreArgs {
     /// See [`RecoverArgs::in_process`].
     #[arg(long, hide = true)]
     pub in_process: bool,
+    /// Print the checked plan (steps, how it takes effect, INV-PS2) and stop: nothing is written
+    /// and the helper is not started.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Runs `set`.
 pub fn set(args: &SetArgs) -> Result<i32> {
-    bail!("`set` is not implemented yet (milestone M2)")
+    if let Err(message) = target::check_yes_with_rows(args.yes, [&args.keyboard]) {
+        eprintln!("error: {message}");
+        return Ok(exit_code::USAGE);
+    }
+    platform::set(args)
 }
 
 /// Runs `migrate`.
 pub fn migrate(args: &MigrateArgs) -> Result<i32> {
-    bail!("`migrate` is not implemented yet (milestone M2)")
+    if let Err(message) =
+        target::check_yes_with_rows(args.yes, args.also.iter().map(|also| &also.keyboard))
+    {
+        eprintln!("error: {message}");
+        return Ok(exit_code::USAGE);
+    }
+    platform::migrate(args)
 }
 
 /// Runs `revert <op>`.
 pub fn revert(args: &RevertArgs) -> Result<i32> {
-    bail!("`revert` is not implemented yet (milestone M2)")
+    platform::revert(args)
 }
 
 /// Runs `undo`: undoes every open entry that is not in flight (waiting for keep/revert, for a
 /// restart, or for a conflict decision), newest first (design D.10). The first thing
 /// docs/recovery.md tells a user to run.
 pub fn undo(args: &RecoverArgs) -> Result<i32> {
-    bail!("`undo` is not implemented yet (milestone M2)")
+    platform::undo(args)
 }
 
 /// Runs `resolve <op>`.
 pub fn resolve(args: &ResolveArgs) -> Result<i32> {
-    bail!("`resolve` is not implemented yet (milestone M2)")
+    platform::resolve(args)
 }
 
 /// Runs `restore --baseline`.
 pub fn restore(args: &RestoreArgs) -> Result<i32> {
-    bail!("`restore` is not implemented yet (milestone M2)")
+    if let Err(message) = target::check_yes_with_rows(args.yes, args.keyboard.iter()) {
+        eprintln!("error: {message}");
+        return Ok(exit_code::USAGE);
+    }
+    platform::restore(args)
 }
 
 /// Runs `recover`. When nothing was rolled back but an entry still waits for the user, says so
 /// and points to `undo` (design review C7).
 pub fn recover(args: &RecoverArgs) -> Result<i32> {
-    bail!("`recover` is not implemented yet (milestone M2)")
+    platform::recover(args)
 }
 
 /// Runs `keep <op>`. For an operation that took effect through a PC restart (a migration, a PS/2
 /// assignment) it shows the same Raw Input table and Shift+2 test as `post-reboot` and asks
 /// before sending `Confirm` (design review C2).
 pub fn keep(op: &str) -> Result<i32> {
-    bail!("`keep` is not implemented yet (milestone M2)")
+    platform::keep(op)
 }
 
 /// Runs `reboot`.
 pub fn reboot(yes: bool) -> Result<i32> {
-    bail!("`reboot` is not implemented yet (milestone M2)")
+    platform::reboot(yes)
 }
 
 /// Runs `post-reboot` (started by the RunOnce entry).
 pub fn post_reboot() -> Result<i32> {
-    bail!("`post-reboot` is not implemented yet (milestone M2)")
+    platform::post_reboot()
 }
 
 /// Runs `journal` (read-only).
 pub fn journal(json: bool) -> Result<String> {
-    bail!("`journal` is not implemented yet (milestone M2)")
+    platform::journal(json)
+}
+
+#[cfg(windows)]
+use commands as platform;
+
+/// Everything but Windows: MKLM cannot change anything there.
+#[cfg(not(windows))]
+mod platform {
+    use anyhow::{Result, bail};
+
+    use super::{MigrateArgs, RecoverArgs, ResolveArgs, RestoreArgs, RevertArgs, SetArgs};
+
+    fn unsupported<T>() -> Result<T> {
+        bail!("mklm-cli runs on Windows only")
+    }
+
+    pub fn set(_: &SetArgs) -> Result<i32> {
+        unsupported()
+    }
+    pub fn migrate(_: &MigrateArgs) -> Result<i32> {
+        unsupported()
+    }
+    pub fn revert(_: &RevertArgs) -> Result<i32> {
+        unsupported()
+    }
+    pub fn undo(_: &RecoverArgs) -> Result<i32> {
+        unsupported()
+    }
+    pub fn resolve(_: &ResolveArgs) -> Result<i32> {
+        unsupported()
+    }
+    pub fn restore(_: &RestoreArgs) -> Result<i32> {
+        unsupported()
+    }
+    pub fn recover(_: &RecoverArgs) -> Result<i32> {
+        unsupported()
+    }
+    pub fn keep(_: &str) -> Result<i32> {
+        unsupported()
+    }
+    pub fn reboot(_: bool) -> Result<i32> {
+        unsupported()
+    }
+    pub fn post_reboot() -> Result<i32> {
+        unsupported()
+    }
+    pub fn journal(_: bool) -> Result<String> {
+        unsupported()
+    }
 }
 
 #[cfg(test)]

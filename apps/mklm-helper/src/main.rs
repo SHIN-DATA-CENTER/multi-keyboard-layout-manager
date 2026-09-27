@@ -1,9 +1,10 @@
 //! `mklm-helper`: the elevated, short-lived process that performs MKLM's writes (plan 2.1).
 //!
-//! Started only by the MKLM GUI or CLI through UAC (`ShellExecuteExW` "runas") with the fixed
-//! command line of `mklm_ipc::HelperArgs`. It connects to the caller's pipe, runs `mklm_engine`
-//! for each request and exits on `Bye`, a closed pipe or an idle timeout. No UI toolkit, no
-//! network, never reads HKCU or `%APPDATA%` (plan 2.2). Design: docs/design/m2-engine.md, E.
+//! Started only by the MKLM GUI or CLI, through UAC (`ShellExecuteExW` "runas") or, from an
+//! elevated caller, with `CreateProcessW`, with the fixed command line of `mklm_ipc::HelperArgs`.
+//! It connects to the caller's pipe, runs `mklm_engine` for each request and exits on `Bye`, a
+//! closed pipe or an idle timeout. No UI toolkit, no network, never reads HKCU or `%APPDATA%`
+//! (plan 2.2). Design: docs/design/m2-engine.md, sections A.6 and E.
 //!
 //! The M5 uninstall custom action will add a second, equally fixed command line
 //! (`--uninstall-restore`) that runs a silent restore-to-baseline without a pipe.
@@ -15,17 +16,16 @@ mod session;
 
 use std::process::ExitCode;
 
-/// Process exit codes. The caller reads them from the process handle when the pipe never came up.
-// Skeleton (M2): most codes are used once `session::run` is implemented.
-#[allow(dead_code)]
+/// Process exit codes (design E.8). The caller reads them from the process handle when the pipe
+/// never came up.
 mod exit {
-    /// The session ended normally.
+    /// The session ended normally (`Bye`, a closed pipe, the idle timeout).
     pub const OK: u8 = 0;
-    /// Any other failure (logged).
+    /// Any other failure.
     pub const FAILURE: u8 = 1;
     /// The command line is not in the fixed format.
     pub const BAD_ARGUMENTS: u8 = 2;
-    /// Pipe connection or handshake failed (PID, nonce or version mismatch, timeout).
+    /// Pipe connection or handshake failed (PID, nonce, version or build mismatch, timeout).
     pub const HANDSHAKE: u8 = 3;
     /// Not elevated (the manifest should make this impossible).
     pub const NOT_ELEVATED: u8 = 4;

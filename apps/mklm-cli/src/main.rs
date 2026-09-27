@@ -20,6 +20,7 @@ mod write;
 use std::borrow::Cow;
 use std::io::{self, Write as _};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
@@ -134,11 +135,20 @@ enum GlobalCommand {
     },
 }
 
+/// Whether `restrict_dll_search` succeeded at startup. A failure is only a warning here, but the
+/// elevated `--in-process` fallback refuses to run without it (design A.7).
+static DLL_SEARCH_RESTRICTED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn dll_search_restricted() -> bool {
+    DLL_SEARCH_RESTRICTED.load(Ordering::SeqCst)
+}
+
 fn main() -> ExitCode {
     // Plan 2.2: before anything else can load a DLL.
     #[cfg(windows)]
-    if let Err(error) = mklm_win::restrict_dll_search() {
-        eprintln!("warning: could not restrict DLL loading to System32: {error}");
+    match mklm_win::restrict_dll_search() {
+        Ok(()) => DLL_SEARCH_RESTRICTED.store(true, Ordering::SeqCst),
+        Err(error) => eprintln!("warning: could not restrict DLL loading to System32: {error}"),
     }
     let cli = Cli::parse();
     if let Some(result) = cli.command.run_m2() {
@@ -430,5 +440,73 @@ mod tests {
             parse(&["mklm-cli", "journal", "--json"]),
             Ok(Command::Journal { json: true })
         ));
+    }
+
+    #[test]
+    fn parses_dry_runs() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|cli| cli.command);
+        assert!(matches!(
+            parse(&["mklm-cli", "set", "#2", "--layout", "jis", "--dry-run"]),
+            Ok(Command::Set(write::SetArgs { dry_run: true, .. }))
+        ));
+        assert!(matches!(
+            parse(&["mklm-cli", "migrate", "--dry-run"]),
+            Ok(Command::Migrate(write::MigrateArgs { dry_run: true, .. }))
+        ));
+        assert!(matches!(
+            parse(&["mklm-cli", "restore", "--baseline", "--all", "--dry-run"]),
+            Ok(Command::Restore(write::RestoreArgs { dry_run: true, .. }))
+        ));
+        assert!(matches!(
+            parse(&["mklm-cli", "undo", "--dry-run"]),
+            Ok(Command::Undo(write::RecoverArgs { dry_run: true, .. }))
+        ));
+        assert!(matches!(
+            parse(&["mklm-cli", "recover", "--dry-run"]),
+            Ok(Command::Recover(write::RecoverArgs { dry_run: true, .. }))
+        ));
+        // Not on the commands that have nothing to plan.
+        assert!(parse(&["mklm-cli", "revert", "0f8c2d4e", "--dry-run"]).is_err());
+        assert!(parse(&["mklm-cli", "keep", "0f8c2d4e", "--dry-run"]).is_err());
+    }
+
+    /// `--yes` with `#n` is a usage error (exit code 2), refused before anything is read or
+    /// launched (design F.1, review S12).
+    #[test]
+    fn yes_with_list_rows_is_a_usage_error() {
+        let command = |args: &[&str]| Cli::try_parse_from(args).map(|cli| cli.command).unwrap();
+        for args in [
+            &[
+                "mklm-cli",
+                "set",
+                "#2",
+                "--layout",
+                "jis",
+                "--yes",
+                "--other-input",
+            ][..],
+            &[
+                "mklm-cli",
+                "set",
+                "#2",
+                "--layout",
+                "jis",
+                "--yes",
+                "--no-reset",
+                "--dry-run",
+            ][..],
+            &["mklm-cli", "migrate", "--also", "#2=us", "--yes"][..],
+            &[
+                "mklm-cli",
+                "restore",
+                "--baseline",
+                "#2",
+                "--yes",
+                "--no-reset",
+            ][..],
+        ] {
+            let result = command(args).run_m2().expect("a write command");
+            assert_eq!(result.ok(), Some(write::exit_code::USAGE), "{args:?}");
+        }
     }
 }
