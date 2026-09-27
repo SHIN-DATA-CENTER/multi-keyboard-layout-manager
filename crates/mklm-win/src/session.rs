@@ -1,5 +1,6 @@
 //! Machine- and session-level actions of M2: boot ID, randomness, PC restart and the post-reboot
-//! RunOnce entry.
+//! RunOnce entry; and the GUI's autostart Run value (M3). The two HKCU values are the only
+//! registry values MKLM writes outside HKLM, and this module is the only one that writes them.
 
 use std::path::Path;
 
@@ -252,39 +253,53 @@ fn enable_shutdown_privilege() -> Result<(), Error> {
 /// A command line that is not a quoted absolute path, contains a NUL or is longer than Windows
 /// runs (260 characters) fails with `ERROR_INVALID_PARAMETER` before anything is written.
 pub fn register_post_reboot(command_line: &str) -> Result<(), Error> {
-    let path = format!(r"HKCU\{RUN_ONCE_KEY}");
-    if !is_run_once_command(command_line) {
-        return Err(Error::Registry {
-            path: format!(r"{path}\{RUN_ONCE_VALUE}"),
-            code: ERROR_INVALID_PARAMETER.0,
-        });
-    }
-    let key = CURRENT_USER
-        .options()
-        .access(KEY_SET_VALUE.0)
-        .create()
-        .open(RUN_ONCE_KEY)
-        .map_err(|error| Error::registry(&path, &error))?;
-    key.set_string(RUN_ONCE_VALUE, command_line)
-        .map_err(|error| Error::registry(format!(r"{path}\{RUN_ONCE_VALUE}"), &error))
+    set_user_string(
+        RUN_ONCE_KEY,
+        RUN_ONCE_VALUE,
+        command_line,
+        is_run_once_command(command_line),
+    )
 }
 
 /// Removes [`RUN_ONCE_VALUE`] (missing is fine).
 pub fn unregister_post_reboot() -> Result<(), Error> {
-    let path = format!(r"HKCU\{RUN_ONCE_KEY}");
-    let key = match CURRENT_USER
+    remove_user_value(RUN_ONCE_KEY, RUN_ONCE_VALUE)
+}
+
+/// Writes the `REG_SZ` value `name` = `data` under `HKCU\<key>` (created if missing), or fails
+/// with `ERROR_INVALID_PARAMETER` before anything is written when `valid` is false. The only
+/// HKCU writer (design m2 K, m3 A.5).
+fn set_user_string(key: &str, name: &str, data: &str, valid: bool) -> Result<(), Error> {
+    let path = format!(r"HKCU\{key}");
+    if !valid {
+        return Err(Error::Registry {
+            path: format!(r"{path}\{name}"),
+            code: ERROR_INVALID_PARAMETER.0,
+        });
+    }
+    let opened = CURRENT_USER
         .options()
         .access(KEY_SET_VALUE.0)
-        .open(RUN_ONCE_KEY)
-    {
-        Ok(key) => key,
+        .create()
+        .open(key)
+        .map_err(|error| Error::registry(&path, &error))?;
+    opened
+        .set_string(name, data)
+        .map_err(|error| Error::registry(format!(r"{path}\{name}"), &error))
+}
+
+/// Removes the value `name` under `HKCU\<key>`; a missing key or value is fine.
+fn remove_user_value(key: &str, name: &str) -> Result<(), Error> {
+    let path = format!(r"HKCU\{key}");
+    let opened = match CURRENT_USER.options().access(KEY_SET_VALUE.0).open(key) {
+        Ok(opened) => opened,
         Err(error) if is_not_found(&error) => return Ok(()),
         Err(error) => return Err(Error::registry(&path, &error)),
     };
-    match key.remove_value(RUN_ONCE_VALUE) {
+    match opened.remove_value(name) {
         Ok(()) => Ok(()),
         Err(error) if is_not_found(&error) => Ok(()),
-        Err(error) => Err(Error::registry(format!(r"{path}\{RUN_ONCE_VALUE}"), &error)),
+        Err(error) => Err(Error::registry(format!(r"{path}\{name}"), &error)),
     }
 }
 
@@ -338,20 +353,52 @@ pub fn autostart_state() -> Result<AutostartState, Error> {
     })
 }
 
-/// Registers `command_line` (checked like the RunOnce command line) as [`AUTOSTART_VALUE`]. The
-/// GUI writes its own per-user value (allowed: HKCU, plan 3.9); `session` stays the only module
-/// that writes HKCU (design m2 K).
+/// The GUI's executable, the only program the autostart value may start.
+const AUTOSTART_EXE: &str = "mklm.exe";
+
+/// The only arguments the autostart value may carry: start in the taskbar corner.
+const AUTOSTART_ARGUMENTS: &str = " --tray";
+
+/// Registers `command_line` as [`AUTOSTART_VALUE`] under the current user's Run key. The GUI
+/// writes its own per-user value (allowed: HKCU, plan 3.9); `session` stays the only module that
+/// writes HKCU (design m2 K).
 ///
-/// Implementation (WP-W3): as [`register_post_reboot`], on [`RUN_KEY`].
+/// `command_line` must be `"<absolute path>\mklm.exe" --tray` and fit what Windows runs (checked
+/// like the RunOnce command line, plus the file name and the arguments); anything else fails with
+/// `ERROR_INVALID_PARAMETER` before anything is written. The Task Manager state
+/// (`StartupApproved\Run`) is never touched: a value the user turned off stays off
+/// (design m3 F.3).
 pub fn register_autostart(command_line: &str) -> Result<(), Error> {
-    let _ = command_line;
-    todo!("WP-W3: HKCU Run value SHINDATACENTER.MKLM")
+    set_user_string(
+        RUN_KEY,
+        AUTOSTART_VALUE,
+        command_line,
+        is_autostart_command(command_line),
+    )
 }
 
-/// Removes [`AUTOSTART_VALUE`] (missing is fine). Implementation (WP-W3): as
-/// [`unregister_post_reboot`], on [`RUN_KEY`].
+/// Removes [`AUTOSTART_VALUE`] from the current user's Run key (missing is fine). The Task
+/// Manager state is left to Windows.
 pub fn unregister_autostart() -> Result<(), Error> {
-    todo!("WP-W3: remove the HKCU Run value")
+    remove_user_value(RUN_KEY, AUTOSTART_VALUE)
+}
+
+/// A RunOnce-style command line ([`is_run_once_command`]) that starts `mklm.exe` (any case) with
+/// exactly `--tray`.
+fn is_autostart_command(command_line: &str) -> bool {
+    if !is_run_once_command(command_line) {
+        return false;
+    }
+    let Some((exe, arguments)) = command_line
+        .strip_prefix('"')
+        .and_then(|tail| tail.split_once('"'))
+    else {
+        return false;
+    };
+    arguments == AUTOSTART_ARGUMENTS
+        && Path::new(exe)
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case(AUTOSTART_EXE))
 }
 
 /// `"<absolute path>"` followed by nothing or by a space and arguments; no NUL; at most
@@ -457,5 +504,36 @@ mod tests {
         assert!(!is_run_once_command("\"C:\\a.exe\" x\0"));
         let long = format!(r#""C:\{}.exe" post-reboot"#, "a".repeat(250));
         assert!(!is_run_once_command(&long));
+    }
+
+    /// Only `"<absolute path>\mklm.exe" --tray` is ever written to the Run key (design m3 F.3).
+    /// The writes themselves are checked on the real machine (T-AUTO-1), never in tests.
+    #[test]
+    fn autostart_commands_are_checked_before_writing() {
+        assert!(is_autostart_command(
+            r#""C:\Program Files\MKLM\mklm.exe" --tray"#
+        ));
+        assert!(is_autostart_command(r#""D:\Tools\MKLM.EXE" --tray"#));
+        for bad in [
+            // Not quoted, relative, or no executable.
+            r"C:\Program Files\MKLM\mklm.exe --tray",
+            r#""mklm.exe" --tray"#,
+            r#""" --tray"#,
+            // Another program, or another file name.
+            r#""C:\Program Files\MKLM\mklm-cli.exe" --tray"#,
+            r#""C:\Windows\System32\cmd.exe" --tray"#,
+            r#""C:\MKLM\mklm.exe.bat" --tray"#,
+            // Other arguments.
+            r#""C:\MKLM\mklm.exe""#,
+            r#""C:\MKLM\mklm.exe" --post-reboot"#,
+            r#""C:\MKLM\mklm.exe" --tray --quit"#,
+            r#""C:\MKLM\mklm.exe"  --tray"#,
+            r#""C:\MKLM\mklm.exe" --TRAY"#,
+            "\"C:\\MKLM\\mklm.exe\" --tray\0",
+        ] {
+            assert!(!is_autostart_command(bad), "{bad}");
+        }
+        let long = format!(r#""C:\{}\mklm.exe" --tray"#, "a".repeat(250));
+        assert!(!is_autostart_command(&long));
     }
 }

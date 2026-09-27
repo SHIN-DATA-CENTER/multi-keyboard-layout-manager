@@ -8,7 +8,8 @@
 //!   and power resume.
 //! - Here: the active input language of the GUI thread, the Windows display language, the
 //!   per-user settings folder, foreground hand-over for the single instance, opening an
-//!   allowlisted settings page, and copying diagnostics to the clipboard.
+//!   allowlisted settings page, copying diagnostics to the clipboard, and the start-up error
+//!   message box.
 
 pub mod shell_window;
 pub mod theme;
@@ -16,14 +17,21 @@ pub mod theme;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::time::Duration;
 
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::Globalization::GetUserDefaultUILanguage;
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, SetClipboardData};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
 use windows::Win32::UI::Shell::{
     FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW,
 };
-use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, SW_SHOWNORMAL};
+use windows::Win32::UI::WindowsAndMessaging::{
+    AllowSetForegroundWindow, CreateWindowExW, DestroyWindow, HWND_MESSAGE, MB_ICONERROR, MB_OK,
+    MB_SETFOREGROUND, MessageBoxW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE,
+};
 use windows::core::{PCWSTR, w};
 
 use crate::elevation::ComApartment;
@@ -148,12 +156,178 @@ fn shell_open(file: PCWSTR, parameters: PCWSTR, directory: PCWSTR) -> bool {
 
 /// Puts `text` on the clipboard as `CF_UNICODETEXT` (the result screen's "copy details", design
 /// m3 B.17): English diagnostics, the short operation ID and the build ID — never key contents.
+/// A NUL in `text` ends the copied text there.
 ///
-/// Implementation (WP-W2): `OpenClipboard(None)` (retry a few times for 100 ms: another process
-/// may hold it), `EmptyClipboard`, a `GlobalAlloc(GMEM_MOVEABLE)` copy of the NUL-terminated
-/// UTF-16 text, `SetClipboardData(CF_UNICODETEXT)` (the clipboard owns the memory on success, it
-/// is freed on failure), `CloseClipboard`.
+/// The clipboard is opened for a message-only window made for this call (`EmptyClipboard` after
+/// `OpenClipboard(NULL)` leaves the clipboard without an owner, which the documentation says
+/// makes `SetClipboardData` fail). Opening is retried for about 100 ms, because another program
+/// may hold the clipboard for a moment. The text
+/// is a `GlobalAlloc(GMEM_MOVEABLE)` copy that the clipboard owns once `SetClipboardData`
+/// succeeds (it is freed here when it fails). Blocks for at most about 100 ms; any thread.
 pub fn copy_text_to_clipboard(text: &str) -> Result<(), Error> {
-    let _ = text;
-    todo!("WP-W2: CF_UNICODETEXT on the clipboard")
+    let units = wide_text(text);
+    let owner = MessageWindow::new()?;
+    open_clipboard(owner.0)?;
+    let _open = ClipboardOpen;
+    // SAFETY: this thread opened the clipboard above.
+    unsafe { EmptyClipboard() }.map_err(|error| win32("EmptyClipboard", &error))?;
+    let memory = GlobalText::new(&units)?;
+    // SAFETY: the clipboard is open and owned by `owner`; `memory` is a movable global block
+    // holding NUL-terminated UTF-16, unlocked.
+    match unsafe { SetClipboardData(CF_UNICODETEXT, Some(HANDLE(memory.0.0))) } {
+        Ok(_) => {
+            // The clipboard owns the memory now.
+            std::mem::forget(memory);
+            Ok(())
+        }
+        Err(error) => Err(win32("SetClipboardData", &error)),
+    }
+}
+
+/// `CF_UNICODETEXT` (winuser.h; the `windows` crate keeps it in `Win32_System_Ole`).
+const CF_UNICODETEXT: u32 = 13;
+
+/// How many times [`copy_text_to_clipboard`] tries to open the clipboard.
+const CLIPBOARD_ATTEMPTS: u32 = 10;
+
+/// Pause between two attempts to open the clipboard.
+const CLIPBOARD_RETRY: Duration = Duration::from_millis(10);
+
+/// The NUL-terminated UTF-16 the clipboard gets for `text`: up to the first NUL.
+fn wide_text(text: &str) -> Vec<u16> {
+    let text = text.split('\0').next().unwrap_or_default();
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// `OpenClipboard(owner)`, retried while another program holds the clipboard.
+fn open_clipboard(owner: HWND) -> Result<(), Error> {
+    let mut attempt = 1;
+    loop {
+        // SAFETY: `owner` is a window of this thread that lives until the clipboard is closed.
+        match unsafe { windows::Win32::System::DataExchange::OpenClipboard(Some(owner)) } {
+            Ok(()) => return Ok(()),
+            Err(_) if attempt < CLIPBOARD_ATTEMPTS => {
+                attempt += 1;
+                std::thread::sleep(CLIPBOARD_RETRY);
+            }
+            Err(error) => return Err(win32("OpenClipboard", &error)),
+        }
+    }
+}
+
+/// Closes the clipboard this thread opened, when dropped.
+struct ClipboardOpen;
+
+impl Drop for ClipboardOpen {
+    fn drop(&mut self) {
+        // SAFETY: this thread opened the clipboard before creating this guard.
+        let _ = unsafe { CloseClipboard() };
+    }
+}
+
+/// A message-only window (the predefined `STATIC` class under `HWND_MESSAGE`) that owns the
+/// clipboard for one copy; destroyed when dropped, after the clipboard was closed. The text stays
+/// on the clipboard: it was rendered at once, not delayed.
+struct MessageWindow(HWND);
+
+impl MessageWindow {
+    fn new() -> Result<Self, Error> {
+        // SAFETY: a predefined class and static strings; no parameters; the window is destroyed
+        // by `Drop` on this thread.
+        let window = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                PCWSTR::null(),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            )
+        }
+        .map_err(|error| win32("CreateWindowExW", &error))?;
+        Ok(Self(window))
+    }
+}
+
+impl Drop for MessageWindow {
+    fn drop(&mut self) {
+        // SAFETY: the window was created by this thread in `new` and is destroyed once.
+        let _ = unsafe { DestroyWindow(self.0) };
+    }
+}
+
+/// A movable global memory block with a copy of UTF-16 text, freed when dropped (unless handed
+/// to the clipboard and forgotten).
+struct GlobalText(HGLOBAL);
+
+impl GlobalText {
+    fn new(units: &[u16]) -> Result<Self, Error> {
+        let bytes = std::mem::size_of_val(units);
+        // SAFETY: plain allocation of `bytes` (> 0: `units` ends in a NUL) movable bytes.
+        let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) }
+            .map_err(|error| win32("GlobalAlloc", &error))?;
+        let block = Self(memory);
+        // SAFETY: `memory` is a live movable block; the pointer is valid until GlobalUnlock.
+        let pointer = unsafe { GlobalLock(memory) }.cast::<u16>();
+        if pointer.is_null() {
+            return Err(last_error("GlobalLock"));
+        }
+        // SAFETY: the locked block holds at least `bytes` bytes, suitably aligned for u16
+        // (global memory is 8-byte aligned); `units` does not overlap it.
+        unsafe { std::ptr::copy_nonoverlapping(units.as_ptr(), pointer, units.len()) };
+        // SAFETY: balances the GlobalLock above. It reports "failure" with NO_ERROR once the
+        // lock count reaches zero, which is the expected outcome.
+        let _ = unsafe { GlobalUnlock(memory) };
+        Ok(block)
+    }
+}
+
+impl Drop for GlobalText {
+    fn drop(&mut self) {
+        // SAFETY: the block was allocated by GlobalAlloc, is unlocked, and was not handed to the
+        // clipboard (that path forgets this guard).
+        let _ = unsafe { GlobalFree(Some(self.0)) };
+    }
+}
+
+/// Shows `text` in a modal error message box titled `title` (`MessageBoxW` with `MB_OK |
+/// MB_ICONERROR | MB_SETFOREGROUND`, no owner) and returns when the user closes it: start-up
+/// errors before the window exists, since release builds have no console (design m3 F.6). The
+/// caller passes the texts in the UI language. A NUL in either text ends it there.
+pub fn error_dialog(title: &str, text: &str) {
+    let title = wide_text(title);
+    let text = wide_text(text);
+    // SAFETY: both strings are NUL-terminated and outlive the call; no owner window.
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+        )
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The clipboard and the message box get NUL-terminated UTF-16 that ends at the first NUL.
+    /// (Neither is shown or written in tests: the clipboard belongs to the user.)
+    #[test]
+    fn texts_are_nul_terminated_utf16() {
+        assert_eq!(wide_text("MKLM"), vec![77, 75, 76, 77, 0]);
+        assert_eq!(wide_text(""), vec![0]);
+        assert_eq!(wide_text("a\0b"), vec![97, 0]);
+        let japanese = wide_text("管理用プログラム");
+        assert_eq!(japanese.len(), 9);
+        assert_eq!(japanese.last(), Some(&0));
+        assert_eq!(String::from_utf16_lossy(&japanese[..8]), "管理用プログラム");
+    }
 }

@@ -31,9 +31,12 @@
 //! - [`time`]: journal timestamps in local time.
 //! - [`machine_settings`]: `HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Settings` (read by anyone,
 //!   written by the helper only).
+//! - `devices`: also the override values on the other HID collections of a keyboard's device
+//!   (read only, for the wizard).
 //! - `session`: also the GUI's HKCU autostart value.
 //! - `ui` (feature `gui`, only `apps/mklm`): theme, high contrast, title bar, the hidden shell
-//!   window, the tray balloon, the active input language, allowlisted settings pages.
+//!   window, the active input language, allowlisted settings pages, the clipboard and the
+//!   start-up error message box.
 //!
 //! HKLM keys are opened with `KEY_SET_VALUE` only in [`regwrite`], [`journal_store`] (which
 //! write through the private `regraw` value I/O) and [`machine_settings`], and the HKCU RunOnce
@@ -73,7 +76,10 @@ pub mod ui;
 
 use mklm_core::SystemSnapshot;
 
-pub use devices::{KEYBOARD_CLASS_GUID, keyboard_instance_ids, read_keyboard, read_keyboards};
+pub use devices::{
+    KEYBOARD_CLASS_GUID, NonKeyboardValues, keyboard_instance_ids, read_keyboard, read_keyboards,
+    read_non_keyboard_values,
+};
 pub use error::{Error, ReadIssue, ReadIssueKind};
 pub use global::read_global_settings;
 pub use input_lang::{loaded_layouts, read_input_methods};
