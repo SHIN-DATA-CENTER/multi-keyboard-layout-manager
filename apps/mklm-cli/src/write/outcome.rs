@@ -1,10 +1,26 @@
-//! Exit codes of the write commands (design F.5).
+//! Exit codes of the write commands (design F.5): the outcome classes of `mklm_client::outcome`
+//! (shared with the GUI, design m3 A.2) mapped onto numbers.
 
-use mklm_core::{ErrorCode, FailureReason, OpState, OperationResult, Outcome, PendingAction};
+use mklm_client::{HelperExit, OutcomeClass};
+use mklm_core::{ErrorCode, OperationResult};
 
 use super::exit_code;
 
-/// The exit code of a request that ended with a result.
+/// The exit code of an outcome class (design F.5).
+pub fn class_exit_code(class: OutcomeClass) -> i32 {
+    match class {
+        OutcomeClass::Done => exit_code::OK,
+        OutcomeClass::Failed => exit_code::FAILURE,
+        OutcomeClass::Cancelled => exit_code::CANCELLED,
+        OutcomeClass::RevertedAutomatically => exit_code::REVERTED,
+        OutcomeClass::Conflict => exit_code::CONFLICT,
+        OutcomeClass::Blocked => exit_code::BLOCKED,
+        OutcomeClass::AwaitingConfirm => exit_code::AWAITING_CONFIRM,
+        OutcomeClass::RestartRequired => exit_code::RESTART_REQUIRED,
+    }
+}
+
+/// The exit code of a request that ended with a result (`mklm_client::outcome::classify_result`):
 ///
 /// - `NoChange`, `Confirmed`: 0. A resolution that kept outside values (`Failed` with
 ///   `ConflictKeptCurrent`) did what the user chose: 0.
@@ -16,112 +32,31 @@ use super::exit_code;
 /// - `Failed` otherwise: 1. `Conflict`: 5.
 /// - `Recovered` (`recover`, `undo`): 5 with conflicts left, 3010 when a restart is needed, else 0.
 pub fn result_exit_code(result: &OperationResult) -> i32 {
-    match result.outcome {
-        Outcome::NoChange | Outcome::Confirmed => exit_code::OK,
-        Outcome::AwaitingConfirm => exit_code::AWAITING_CONFIRM,
-        Outcome::PendingReboot => exit_code::RESTART_REQUIRED,
-        Outcome::Conflict => exit_code::CONFLICT,
-        Outcome::Failed => match result.failure {
-            Some(FailureReason::ConflictKeptCurrent) => exit_code::OK,
-            _ => exit_code::FAILURE,
-        },
-        Outcome::Reverted | Outcome::RevertedPendingReboot => match &result.failure {
-            None if result.outcome == Outcome::RevertedPendingReboot => exit_code::RESTART_REQUIRED,
-            None => exit_code::OK,
-            Some(failure) if reverted_automatically(failure) => exit_code::REVERTED,
-            Some(_) => exit_code::FAILURE,
-        },
-        Outcome::Recovered => {
-            if !result.conflicts.is_empty() {
-                exit_code::CONFLICT
-            } else if result.pending_action == Some(PendingAction::RestartPc) {
-                exit_code::RESTART_REQUIRED
-            } else {
-                exit_code::OK
-            }
-        }
-    }
+    class_exit_code(mklm_client::outcome::classify_result(result))
 }
 
 /// The exit code after the helper was lost and the CLI recovered at once (design E.7, review
-/// C8), judged by where recovery left the interrupted operations (C.7 rolls forward as well as
-/// back): a conflict 5; any operation now waiting for the restart 3010; any waiting for
-/// `keep` / `revert` 10; operations put back (`Reverted`, `RevertedPendingReboot`) 4, as an
-/// automatic revert; one that never wrote anything (`Failed`) 1; a restore written through to
-/// `Confirmed` 0. When nothing was recovered, the recovery's own code.
+/// C8), judged by where recovery left the interrupted operations
+/// (`mklm_client::outcome::classify_lost_recovery`).
 pub fn lost_recovery_exit_code(result: &OperationResult) -> i32 {
-    let ended = |states: &[OpState]| result.recovered.iter().any(|op| states.contains(&op.to));
-    if !result.conflicts.is_empty() || ended(&[OpState::Conflict]) {
-        exit_code::CONFLICT
-    } else if result.recovered.is_empty() {
-        result_exit_code(result)
-    } else if ended(&[OpState::PendingReboot]) {
-        exit_code::RESTART_REQUIRED
-    } else if ended(&[OpState::AwaitingConfirm]) {
-        exit_code::AWAITING_CONFIRM
-    } else if ended(&[OpState::Reverted, OpState::RevertedPendingReboot]) {
-        exit_code::REVERTED
-    } else if ended(&[OpState::Failed]) {
-        exit_code::FAILURE
-    } else {
-        exit_code::OK
-    }
-}
-
-/// The reasons F.5 calls "reverted automatically" (exit code 4), as opposed to errors (1).
-fn reverted_automatically(failure: &FailureReason) -> bool {
-    matches!(
-        failure,
-        FailureReason::CountdownExpired
-            | FailureReason::KeyboardDidNotReturn
-            | FailureReason::LiveResetUnconfirmed
-            | FailureReason::CallerDisconnected
-    )
+    class_exit_code(mklm_client::outcome::classify_lost_recovery(result))
 }
 
 /// The exit code of a request the engine refused or failed: 6 when something else holds the way
 /// (the lock, an open operation, a needed recovery), 3 when the caller went away before anything
 /// was written, 1 otherwise (nothing was written).
 pub fn error_exit_code(code: ErrorCode) -> i32 {
-    match code {
-        ErrorCode::Busy | ErrorCode::OpInProgress | ErrorCode::RecoveryNeeded => exit_code::BLOCKED,
-        ErrorCode::Cancelled => exit_code::CANCELLED,
-        ErrorCode::JournalUnreadable
-        | ErrorCode::PlanRejected
-        | ErrorCode::PlanChanged
-        | ErrorCode::MigrationRequired
-        | ErrorCode::NotFixedMode
-        | ErrorCode::UnknownKeyboard
-        | ErrorCode::UnknownOp
-        | ErrorCode::NotLatest
-        | ErrorCode::InvalidState
-        | ErrorCode::InventoryIncomplete
-        | ErrorCode::RecoveryAssetsUnavailable
-        | ErrorCode::Registry
-        | ErrorCode::Device
-        | ErrorCode::Host
-        | ErrorCode::Protocol
-        | ErrorCode::Internal => exit_code::FAILURE,
-    }
+    class_exit_code(mklm_client::outcome::classify_error(code))
 }
 
 /// What the helper's exit code (design E.8) means, when it exited before answering.
 pub fn helper_exit_text(code: u32) -> String {
-    let meaning = match code {
-        0 => "ended the session",
-        1 => "failed",
-        2 => "refused its command line",
-        3 => "could not verify the connection (PID, nonce, protocol version or build ID)",
-        4 => "is not running as administrator",
-        5 => "does not support this version of Windows (build 26100 or later is needed)",
-        _ => "stopped unexpectedly",
-    };
-    format!("the helper {meaning} (exit code {code})")
+    HelperExit(code).to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use mklm_core::{ConflictInfo, OpId, RegValue};
+    use mklm_core::{ConflictInfo, FailureReason, OpId, OpState, Outcome, PendingAction, RegValue};
 
     use super::*;
 

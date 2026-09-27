@@ -1,0 +1,22 @@
+[package]
+name = "mklm-client"
+description = "Caller side of MKLM's helper sessions (launch, relay, previews, journal rules), shared by the GUI and the CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+mklm-core.workspace = true
+mklm-ipc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+mklm-win.workspace = true
+
+[dev-dependencies]
+mklm-core = { workspace = true, features = ["test-fixtures"] }
+
+[lints]
+workspace = true

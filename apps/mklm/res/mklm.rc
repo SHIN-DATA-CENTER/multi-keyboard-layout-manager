@@ -1,0 +1,41 @@
+// Version information and application manifest of mklm.exe, compiled by build.rs.
+// build.rs generates mklm-version.rch (MKLM_VERSION_NUM, MKLM_VERSION_STR, MKLM_FILEFLAGS,
+// MKLM_BUILD_ID_STR) in OUT_DIR, which embed-resource puts on the include path.
+// The executable's icon is added in WP-U7 (design m3 F.7).
+#pragma code_page(65001)
+
+#include <winresrc.h>
+#include "mklm-version.rch"
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "mklm.exe.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION MKLM_VERSION_NUM
+ PRODUCTVERSION MKLM_VERSION_NUM
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS MKLM_FILEFLAGS
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "SHIN DATA CENTER"
+            VALUE "FileDescription", "Multi Keyboard Layout Manager"
+            VALUE "FileVersion", MKLM_VERSION_STR
+            VALUE "InternalName", "mklm"
+            VALUE "LegalCopyright", "© 2026 SHIN DATA CENTER"
+            VALUE "OriginalFilename", "mklm.exe"
+            VALUE "ProductName", "Multi Keyboard Layout Manager"
+            VALUE "ProductVersion", MKLM_VERSION_STR
+            // Build ID (design m2 E.3): must equal the helper's; the GUI launches it.
+            VALUE "MKLMBuildId", MKLM_BUILD_ID_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

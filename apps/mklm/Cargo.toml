@@ -1,0 +1,39 @@
+[package]
+name = "mklm"
+description = "Multi Keyboard Layout Manager: the GUI (Slint)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[lib]
+name = "mklm_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mklm"
+path = "src/main.rs"
+
+[dependencies]
+mklm-core.workspace = true
+mklm-ipc.workspace = true
+mklm-client.workspace = true
+serde.workspace = true
+toml.workspace = true
+slint.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+mklm-win = { workspace = true, features = ["gui"] }
+
+[dev-dependencies]
+mklm-core = { workspace = true, features = ["test-fixtures"] }
+
+[build-dependencies]
+slint-build.workspace = true
+embed-resource.workspace = true
+
+[lints]
+workspace = true

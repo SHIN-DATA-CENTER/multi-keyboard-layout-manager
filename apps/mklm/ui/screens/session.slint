@@ -1,0 +1,362 @@
+// Overlays of a helper session (design m3 B.6, B.7, B.16, B.17, A.2.3): progress, the
+// keep-or-revert countdown with its key test, the reconnect wait, the result, the question after
+// a lost helper, the first close-to-tray notice and the quit confirmation. Every dialog is a
+// title, a scrolling `DialogBody` and a `DialogButtons` row that stays visible (review U11).
+
+import { Button, CheckBox, ProgressIndicator } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { CountdownVm, KeyTestVm, ProgressVm, ReconnectVm, ResultVm, Tone } from "../structs.slint";
+import {
+    Banner, Body, Caption, DialogBody, DialogButtons, DialogFrame, KeyTestArea,
+} from "../widgets.slint";
+
+export component ProgressDialog inherits DialogFrame {
+    in property <ProgressVm> vm;
+    title: vm.title;
+
+    DialogBody {
+        Body {
+            text: root.vm.step;
+            accessible-live-region: polite;
+        }
+
+        ProgressIndicator {
+            indeterminate: true;
+        }
+
+        if root.vm.detail != "": Caption {
+            text: root.vm.detail;
+        }
+    }
+}
+
+// The countdown after a live reset (plan 3.5 step 3; design m2 D.2 a). No answer reverts. The key
+// test takes the focus when the dialog opens; the whole instruction — the time limit and how to
+// keep — is its accessible description and is announced once (design m3 E.3, review U10). Esc,
+// which the key test passes on, reverts.
+export component CountdownDialog inherits DialogFrame {
+    in property <CountdownVm> vm;
+    in property <KeyTestVm> key-test;
+    callback key-pressed(string, bool);
+    callback keep();
+    callback revert();
+    title: vm.title;
+    escape => {
+        root.revert();
+    }
+
+    public function focus-test() {
+        test.focus-test();
+    }
+
+    DialogBody {
+        Body {
+            text: root.vm.message;
+            accessible-live-region: assertive;
+        }
+
+        Banner {
+            text: root.vm.recognition;
+            tone: root.vm.recognition-tone;
+        }
+
+        test := KeyTestArea {
+            vm: root.key-test;
+            description: root.vm.message;
+            init => {
+                self.focus-test();
+            }
+            key-pressed(text, shift) => {
+                root.key-pressed(text, shift);
+            }
+        }
+
+        ProgressIndicator {
+            progress: root.vm.total > 0 ? root.vm.remaining / root.vm.total : 0;
+            accessible-label: @tr("Seconds left: {}", root.vm.remaining);
+        }
+
+        Text {
+            text: @tr("Reverting automatically in {} s", root.vm.remaining);
+            font-size: Theme.font-body;
+            color: Theme.text;
+            horizontal-alignment: center;
+        }
+
+        // Announced politely at 10 and 5 seconds only (design m3 E.3).
+        Text {
+            text: root.vm.reminder;
+            font-size: Theme.font-caption;
+            color: Theme.text-secondary;
+            horizontal-alignment: center;
+            accessible-live-region: polite;
+        }
+    }
+
+    DialogButtons {
+        Button {
+            text: @tr("Revert");
+            clicked => {
+                root.revert();
+            }
+        }
+
+        Button {
+            text: @tr("Keep this layout");
+            primary: true;
+            clicked => {
+                root.keep();
+            }
+        }
+    }
+}
+
+// The reconnect path (design m2 D.2 b): no countdown; "decide later" leaves it waiting.
+export component ReconnectDialog inherits DialogFrame {
+    in property <ReconnectVm> vm;
+    in property <KeyTestVm> key-test;
+    callback key-pressed(string, bool);
+    callback keep();
+    callback revert();
+    callback later();
+    title: vm.title;
+
+    DialogBody {
+        Body {
+            text: root.vm.instructions;
+        }
+
+        Banner {
+            text: root.vm.status;
+            tone: root.vm.status-tone;
+            accessible-live-region: polite;
+        }
+
+        KeyTestArea {
+            vm: root.key-test;
+            key-pressed(text, shift) => {
+                root.key-pressed(text, shift);
+            }
+        }
+
+        Caption {
+            text: @tr("Until you decide, no keyboard's layout can be changed.");
+        }
+    }
+
+    DialogButtons {
+        Button {
+            text: @tr("Decide later");
+            clicked => {
+                root.later();
+            }
+        }
+
+        Button {
+            text: @tr("Revert");
+            clicked => {
+                root.revert();
+            }
+        }
+
+        Button {
+            text: @tr("Keep this layout");
+            primary: true;
+            enabled: root.vm.can-keep;
+            clicked => {
+                root.keep();
+            }
+        }
+    }
+}
+
+export component ResultDialog inherits DialogFrame {
+    in property <ResultVm> vm;
+    in-out property <bool> show-details: false;
+    callback close();
+    callback next-step();
+    callback copy-details();
+    title: vm.title;
+    escape => {
+        root.close();
+    }
+
+    DialogBody {
+        // "今の状態" first: what the keyboards do now (review U7).
+        if root.vm.current-state.length > 0: VerticalLayout {
+            spacing: 2px;
+            Caption {
+                text: @tr("Now");
+            }
+
+            for line in root.vm.current-state: Body {
+                text: line;
+            }
+        }
+        Banner {
+            text: root.vm.message;
+            tone: root.vm.tone;
+            accessible-live-region: assertive;
+        }
+
+        if root.vm.ime-note != "": Banner {
+            text: root.vm.ime-note;
+            tone: Tone.info;
+        }
+        if root.vm.run-once-note != "": Banner {
+            text: root.vm.run-once-note;
+            tone: Tone.warning;
+        }
+        if root.vm.details != "": CheckBox {
+            text: @tr("Show the technical details");
+            checked <=> root.show-details;
+        }
+        if root.show-details: Caption {
+            text: root.vm.details;
+        }
+    }
+
+    DialogButtons {
+        if root.vm.details != "": Button {
+            text: @tr("Copy details");
+            clicked => {
+                root.copy-details();
+            }
+        }
+        if root.vm.next-step != "": Button {
+            text: root.vm.next-step;
+            clicked => {
+                root.next-step();
+            }
+        }
+        Button {
+            text: @tr("Close");
+            primary: true;
+            clicked => {
+                root.close();
+            }
+        }
+    }
+}
+
+// The helper was lost; recovering needs another UAC prompt, which MKLM never shows unasked
+// (design m3 A.2.3, K.6).
+export component RecoveryConfirmDialog inherits DialogFrame {
+    in property <bool> countdown;
+    callback answer(bool);
+    title: @tr("MKLM's administrator program stopped");
+    escape => {
+        root.answer(false);
+    }
+
+    DialogBody {
+        Body {
+            text: root.countdown ? @tr("MKLM's administrator program (mklm-helper.exe) stopped while you were trying the new layout. To put the keyboard back now, Windows asks for administrator permission once more (the publisher shows as \"Unknown\").") : @tr("MKLM's administrator program (mklm-helper.exe) stopped before it finished. To finish or undo the change now, Windows asks for administrator permission once more (the publisher shows as \"Unknown\").");
+        }
+
+        Caption {
+            text: @tr("If you choose Later, MKLM offers the recovery again; until then no keyboard's layout can be changed.");
+        }
+    }
+
+    DialogButtons {
+        Button {
+            text: @tr("Later");
+            clicked => {
+                root.answer(false);
+            }
+        }
+
+        Button {
+            text: @tr("Put it back now");
+            primary: true;
+            clicked => {
+                root.answer(true);
+            }
+        }
+    }
+}
+
+// The first time the window closes (plan 3.9; design m3 B.16, review U13): always in the
+// window, because Windows 11 may swallow a balloon and hides new icons behind "^".
+export component CloseNoticeDialog inherits DialogFrame {
+    callback to-tray();
+    callback quit();
+    callback taskbar-settings();
+    title: @tr("MKLM keeps running on the taskbar");
+    escape => {
+        root.to-tray();
+    }
+
+    DialogBody {
+        Body {
+            text: @tr("MKLM keeps running inside \"^\" (the hidden icons) at the right end of the taskbar. Click its icon to come back to this window. To end MKLM, right-click the icon and choose Quit.");
+        }
+    }
+
+    DialogButtons {
+        Button {
+            text: @tr("Open the taskbar settings");
+            clicked => {
+                root.taskbar-settings();
+            }
+        }
+
+        Button {
+            text: @tr("Quit MKLM");
+            clicked => {
+                root.quit();
+            }
+        }
+
+        Button {
+            text: @tr("OK");
+            primary: true;
+            clicked => {
+                root.to-tray();
+            }
+        }
+    }
+}
+
+// Quitting while a change waits for keep or revert on the reconnect path (design m3 F.5).
+export component QuitConfirmDialog inherits DialogFrame {
+    in property <string> message;
+    callback revert-and-quit();
+    callback quit-leaving-it();
+    callback cancel();
+    title: @tr("A change is still waiting for you");
+    escape => {
+        root.cancel();
+    }
+
+    DialogBody {
+        Body {
+            text: root.message;
+        }
+    }
+
+    DialogButtons {
+        Button {
+            text: @tr("Cancel");
+            clicked => {
+                root.cancel();
+            }
+        }
+
+        Button {
+            text: @tr("Quit and decide later");
+            clicked => {
+                root.quit-leaving-it();
+            }
+        }
+
+        Button {
+            text: @tr("Revert and quit");
+            primary: true;
+            clicked => {
+                root.revert-and-quit();
+            }
+        }
+    }
+}

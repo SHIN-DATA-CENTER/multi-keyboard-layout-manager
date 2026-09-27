@@ -1,0 +1,253 @@
+// Changing a keyboard's layout (plan 3.3 to 3.5; design m3 B.3 to B.5; review U14): one page
+// from "変更…" to the Windows prompt — the layout choices, the in-place layout detection, the
+// apply method (switch now / at the restart, review U1), what happens, and the one-line UAC
+// explanation next to the button. The standalone UAC explanation is shown the first time only.
+
+import { Button, CheckBox } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { ChangeVm, ChoiceVm, KeyTestVm, PlanLineVm, Tone } from "../structs.slint";
+import {
+    Banner, Body, Caption, DialogBody, DialogButtons, KeyTestArea, PageHeader, RadioList,
+} from "../widgets.slint";
+
+component PlanLine inherits HorizontalLayout {
+    in property <PlanLineVm> line;
+    spacing: 8px;
+    Caption {
+        text: line.key;
+        horizontal-stretch: 1;
+    }
+
+    Body {
+        text: line.name + ": " + line.now + " → " + line.after;
+    }
+}
+
+export component ChangeScreen inherits VerticalLayout {
+    in property <string> keyboard-name;
+    in property <[ChoiceVm]> choices;
+    in-out property <int> selected: -1;
+    // 0 = switch now, 1 = at the restart (review U1).
+    in-out property <int> method: -1;
+    in property <ChangeVm> vm;
+    in property <KeyTestVm> key-test;
+    in-out property <bool> show-details: false;
+    callback choose(int);
+    callback choose-method(int);
+    callback key-pressed(string, bool);
+    callback restart-detection();
+    callback restore-baseline();
+    callback apply();
+    callback cancel();
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: @tr("Layout of {}", root.keyboard-name);
+    }
+
+    DialogBody {
+        RadioList {
+            label: @tr("Layout");
+            choices: root.choices;
+            selected <=> root.selected;
+            chosen(index) => {
+                root.choose(index);
+            }
+        }
+
+        // In-place detection: only this keyboard's keys count (design m3 B.3).
+        Caption {
+            text: root.vm.detect-instruction;
+        }
+
+        KeyTestArea {
+            vm: root.key-test;
+            key-pressed(text, shift) => {
+                root.key-pressed(text, shift);
+            }
+        }
+
+        if root.vm.detect-feedback != "": Banner {
+            text: root.vm.detect-feedback;
+            tone: root.vm.detect-feedback-tone;
+            accessible-live-region: polite;
+        }
+        if root.vm.detect-verdict != "": HorizontalLayout {
+            spacing: 8px;
+            Body {
+                text: root.vm.detect-verdict;
+                horizontal-stretch: 1;
+                accessible-live-region: polite;
+            }
+
+            Button {
+                text: @tr("Start again");
+                clicked => {
+                    root.restart-detection();
+                }
+            }
+        }
+        if root.vm.preparing: Caption {
+            text: @tr("Checking…");
+            accessible-live-region: polite;
+        }
+        if root.vm.method-visible: RadioList {
+            label: @tr("How the change takes effect");
+            choices: [
+                { text: root.vm.live-text, detail: root.vm.live-detail, enabled: true },
+                { text: root.vm.restart-text, detail: root.vm.restart-detail, enabled: true },
+            ];
+            selected <=> root.method;
+            chosen(index) => {
+                root.choose-method(index);
+            }
+        }
+        if root.vm.takes-effect != "": Body {
+            text: root.vm.takes-effect;
+        }
+        if root.vm.migration-note != "": Banner {
+            text: root.vm.migration-note;
+            tone: Tone.warning;
+        }
+        for warning in root.vm.warnings: Banner {
+            text: warning;
+            tone: Tone.warning;
+        }
+        if root.vm.ime-note != "": Banner {
+            text: root.vm.ime-note;
+            tone: Tone.info;
+        }
+        if root.vm.all-users-note != "": Banner {
+            text: root.vm.all-users-note;
+            tone: Tone.info;
+        }
+        if root.vm.lines.length > 0: CheckBox {
+            text: @tr("Show the technical details");
+            checked <=> root.show-details;
+        }
+        if root.show-details: VerticalLayout {
+            spacing: 4px;
+            for line in root.vm.lines: PlanLine {
+                line: line;
+            }
+        }
+        if root.vm.uac-line != "": Caption {
+            text: root.vm.uac-line;
+        }
+    }
+
+    DialogButtons {
+        alignment: stretch;
+        Button {
+            text: @tr("Back to before MKLM…");
+            clicked => {
+                root.restore-baseline();
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        Button {
+            text: @tr("Cancel");
+            clicked => {
+                root.cancel();
+            }
+        }
+
+        Button {
+            text: root.vm.apply-text != "" ? root.vm.apply-text : @tr("Change");
+            primary: true;
+            enabled: root.vm.can-apply;
+            clicked => {
+                root.apply();
+            }
+        }
+    }
+}
+
+// Read before the first UAC prompt (plan 3.5 step 2; M2 R12: explain first, then prompt). Shown
+// once (settings.change.uac_notice_seen); later changes carry the one-line version next to the
+// button (review U14). The text follows the Windows 11 prompt for an unsigned program (review
+// U18); T-APPLY-1 checks it against the real prompt.
+export component UacNoticeScreen inherits VerticalLayout {
+    callback go();
+    callback cancel();
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: @tr("Windows asks for administrator permission next");
+    }
+
+    DialogBody {
+        Body {
+            text: @tr("The next screen asks \"Do you want to allow this app from an unknown publisher to make changes to your device?\". MKLM is not code-signed yet, so the verified publisher shows as \"Unknown\". Check that mklm-helper.exe is shown in the middle of the screen, then choose Yes.");
+        }
+
+        // A text mock of the prompt (review U18).
+        Rectangle {
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 6px;
+            min-height: mock.preferred-height;
+            accessible-role: AccessibleRole.groupbox;
+            accessible-label: @tr("What the Windows prompt looks like");
+            mock := VerticalLayout {
+                padding: 12px;
+                spacing: 4px;
+                Caption {
+                    text: @tr("User Account Control");
+                }
+
+                Body {
+                    text: @tr("Do you want to allow this app from an unknown publisher to make changes to your device?");
+                    font-weight: 600;
+                }
+
+                Body {
+                    text: "mklm-helper.exe";
+                }
+
+                Caption {
+                    text: @tr("Verified publisher: Unknown");
+                }
+
+                Caption {
+                    text: @tr("File origin: Hard drive on this computer");
+                }
+
+                Caption {
+                    text: @tr("[Yes] [No]");
+                }
+            }
+        }
+
+        Body {
+            text: @tr("On an account that is not an administrator, Windows asks for an administrator's password or PIN instead.");
+        }
+
+        Caption {
+            text: @tr("Nothing is changed if you choose No.");
+        }
+    }
+
+    DialogButtons {
+        Button {
+            text: @tr("Cancel");
+            clicked => {
+                root.cancel();
+            }
+        }
+
+        Button {
+            text: @tr("Continue to the prompt");
+            primary: true;
+            clicked => {
+                root.go();
+            }
+        }
+    }
+}

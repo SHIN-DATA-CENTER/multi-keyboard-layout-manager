@@ -1,0 +1,239 @@
+// The PC restart (plan 3.6, design m3 B.8) and the check after it (design m2 D.7, m3 B.9). Both
+// say what "later" costs (review U15 b) and what to prepare before the restart (U15 a, d).
+
+import { Button, CheckBox } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { CheckRowVm, KeyTestVm, Tone } from "../structs.slint";
+import {
+    Banner, Body, Caption, DialogBody, DialogButtons, KeyTestArea, PageHeader,
+} from "../widgets.slint";
+
+export component RestartScreen inherits VerticalLayout {
+    in property <[string]> reasons;
+    // The helper has flushed PendingReboot (plan 2.3): only then may the restart start.
+    in property <bool> ready;
+    // Some keyboard types differently after the restart: the password warning (review U15 d).
+    in property <bool> layout-changes;
+    in-out property <bool> acknowledged: false;
+    callback restart-now();
+    callback later();
+    callback undo();
+    callback open-settings-page(int);
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: @tr("Restart the PC to finish");
+        subtitle: @tr("Choose Restart, not Shut down: with Fast Startup a shutdown keeps the keyboard drivers as they were.");
+    }
+
+    DialogBody {
+        for reason in root.reasons: Body {
+            text: "・" + reason;
+        }
+
+        Banner {
+            tone: Tone.warning;
+            text: @tr("If you cannot type at the sign-in screen: use the on-screen keyboard (the accessibility button at the bottom right), sign in with your PIN or fingerprint, or plug in another keyboard.");
+        }
+
+        if root.layout-changes: Banner {
+            tone: Tone.warning;
+            text: @tr("If your password contains symbols: when the layout changes, the same keys type other symbols. Sign in with a PIN (digits), or set up a PIN before the restart.");
+        }
+        if root.layout-changes: HorizontalLayout {
+            alignment: start;
+            Button {
+                text: @tr("Open the sign-in options");
+                clicked => {
+                    root.open-settings-page(5);
+                }
+            }
+        }
+        CheckBox {
+            text: @tr("I know how to sign in if a keyboard types differently");
+            checked <=> root.acknowledged;
+        }
+
+        Caption {
+            text: @tr("Save your open files before you choose Restart now.");
+        }
+
+        Caption {
+            text: @tr("Until the PC restarts, no keyboard's layout can be changed.");
+        }
+    }
+
+    DialogButtons {
+        alignment: stretch;
+        Button {
+            text: @tr("Undo the change…");
+            clicked => {
+                root.undo();
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        Button {
+            text: @tr("Later");
+            clicked => {
+                root.later();
+            }
+        }
+
+        Button {
+            text: @tr("Restart now");
+            primary: true;
+            enabled: root.ready && root.acknowledged;
+            clicked => {
+                root.restart-now();
+            }
+        }
+    }
+}
+
+// One keyboard of the check, in layout names; the numbers are in the details (review U5). The
+// "typed" column is filled by the key test on that keyboard (review U2).
+component CheckRow inherits HorizontalLayout {
+    in property <CheckRowVm> check;
+    spacing: 8px;
+    accessible-role: AccessibleRole.list-item;
+    accessible-label: check.name + ": " + check.setting + ", " + check.recognized + ", " + check.typed;
+    Body {
+        text: check.name;
+        horizontal-stretch: 1;
+    }
+
+    Body {
+        text: check.setting;
+        width: 80px * Theme.font-scale;
+    }
+
+    Text {
+        text: check.recognized;
+        font-size: Theme.font-body;
+        color: Theme.tone-text(check.tone);
+        width: 160px * Theme.font-scale;
+        wrap: word-wrap;
+    }
+
+    Text {
+        text: check.typed;
+        font-size: Theme.font-body;
+        color: Theme.tone-text(check.typed-tone);
+        width: 60px * Theme.font-scale;
+    }
+}
+
+// Shown in front after sign-in (RunOnce `--post-reboot`). Never reverts by itself (plan 3.6).
+export component PostRebootScreen inherits VerticalLayout {
+    in property <string> operation;
+    in property <bool> not-restarted;
+    in property <[CheckRowVm]> rows;
+    in property <string> migration-note;
+    in property <string> keep-warning;
+    // "元に戻す", or "元に戻す（もう一度 PC の再起動が必要）" (review U15 c).
+    in property <string> revert-text;
+    in property <KeyTestVm> key-test;
+    in-out property <bool> show-details: false;
+    callback key-pressed(string, bool);
+    callback keep();
+    callback revert();
+    callback later();
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: @tr("Check the keyboards after the restart");
+        subtitle: root.operation;
+    }
+
+    DialogBody {
+        if root.not-restarted: Banner {
+            tone: Tone.warning;
+            text: @tr("Not in effect yet: the PC has not restarted since the change. Restart it with Restart, not Shut down.");
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Caption {
+                text: @tr("Keyboard");
+                horizontal-stretch: 1;
+            }
+
+            Caption {
+                text: @tr("Setting");
+                width: 80px * Theme.font-scale;
+            }
+
+            Caption {
+                text: @tr("Windows reports");
+                width: 160px * Theme.font-scale;
+            }
+
+            Caption {
+                text: @tr("Typed");
+                width: 60px * Theme.font-scale;
+            }
+        }
+
+        for row in root.rows: CheckRow {
+            check: row;
+        }
+
+        if root.migration-note != "": Caption {
+            text: root.migration-note;
+        }
+        KeyTestArea {
+            vm: root.key-test;
+            key-pressed(text, shift) => {
+                root.key-pressed(text, shift);
+            }
+        }
+
+        if root.keep-warning != "": Banner {
+            tone: Tone.danger;
+            text: root.keep-warning;
+        }
+        CheckBox {
+            text: @tr("Show the technical details");
+            checked <=> root.show-details;
+        }
+
+        if root.show-details: VerticalLayout {
+            for row in root.rows: Caption {
+                text: row.name + ": " + row.details;
+            }
+        }
+        Caption {
+            text: @tr("Until you decide, no keyboard's layout can be changed.");
+        }
+    }
+
+    DialogButtons {
+        Button {
+            text: @tr("Decide later");
+            clicked => {
+                root.later();
+            }
+        }
+
+        Button {
+            text: root.revert-text != "" ? root.revert-text : @tr("Revert");
+            clicked => {
+                root.revert();
+            }
+        }
+
+        Button {
+            text: @tr("Keep");
+            primary: true;
+            enabled: !root.not-restarted;
+            clicked => {
+                root.keep();
+            }
+        }
+    }
+}

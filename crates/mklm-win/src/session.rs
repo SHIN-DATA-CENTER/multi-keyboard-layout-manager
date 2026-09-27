@@ -288,6 +288,72 @@ pub fn unregister_post_reboot() -> Result<(), Error> {
     }
 }
 
+/// Name of the GUI's autostart value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+/// (plan 3.9; design m3 F.3): `"<absolute path>\mklm.exe" --tray`.
+pub const AUTOSTART_VALUE: &str = "SHINDATACENTER.MKLM";
+
+/// The Run key, relative to `HKEY_CURRENT_USER`.
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// Where Task Manager's "Startup apps" switch records a disabled Run value (read only).
+const STARTUP_APPROVED_RUN_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+
+/// The autostart value as the user's Windows sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AutostartState {
+    /// The registered command line, if any.
+    pub command_line: Option<String>,
+    /// Task Manager (or Settings > Apps > Startup) turned it off: the first byte of the
+    /// `StartupApproved\Run` value is odd (2 = on, 3 = off). MKLM then never turns it back on by
+    /// itself (design m3 F.3).
+    pub disabled_by_user: bool,
+}
+
+/// Reads [`AUTOSTART_VALUE`] and its Task Manager state (read only).
+pub fn autostart_state() -> Result<AutostartState, Error> {
+    let run_path = format!(r"HKCU\{RUN_KEY}");
+    let command_line = match crate::reg::open_read(CURRENT_USER, "HKCU", RUN_KEY)? {
+        Some(key) => crate::reg::read_string(&key, &run_path, AUTOSTART_VALUE)?,
+        None => None,
+    };
+    let approved_path = format!(r"HKCU\{STARTUP_APPROVED_RUN_KEY}");
+    let disabled_by_user =
+        match crate::reg::open_read(CURRENT_USER, "HKCU", STARTUP_APPROVED_RUN_KEY)? {
+            Some(key) => match key.get_value(AUTOSTART_VALUE) {
+                Ok(value) => value.first().is_some_and(|flag| flag & 1 == 1),
+                Err(error) if is_not_found(&error) => false,
+                Err(error) => {
+                    return Err(Error::registry(
+                        format!(r"{approved_path}\{AUTOSTART_VALUE}"),
+                        &error,
+                    ));
+                }
+            },
+            None => false,
+        };
+    Ok(AutostartState {
+        command_line,
+        disabled_by_user,
+    })
+}
+
+/// Registers `command_line` (checked like the RunOnce command line) as [`AUTOSTART_VALUE`]. The
+/// GUI writes its own per-user value (allowed: HKCU, plan 3.9); `session` stays the only module
+/// that writes HKCU (design m2 K).
+///
+/// Implementation (WP-W3): as [`register_post_reboot`], on [`RUN_KEY`].
+pub fn register_autostart(command_line: &str) -> Result<(), Error> {
+    let _ = command_line;
+    todo!("WP-W3: HKCU Run value SHINDATACENTER.MKLM")
+}
+
+/// Removes [`AUTOSTART_VALUE`] (missing is fine). Implementation (WP-W3): as
+/// [`unregister_post_reboot`], on [`RUN_KEY`].
+pub fn unregister_autostart() -> Result<(), Error> {
+    todo!("WP-W3: remove the HKCU Run value")
+}
+
 /// `"<absolute path>"` followed by nothing or by a space and arguments; no NUL; at most
 /// [`RUN_ONCE_MAX_CHARS`] UTF-16 units.
 fn is_run_once_command(command_line: &str) -> bool {

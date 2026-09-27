@@ -1,18 +1,20 @@
-//! The caller's side of one request (design E.1, E.7, F.3): send it, show the helper's events,
-//! turn the user's answers into decisions, and return how the request ended.
+//! The CLI's side of one request (design E.1, E.7, F.3): the text and the answers. The relay loop
+//! itself is `mklm_client::session::relay` (shared with the GUI, design m3 A.2); this module is its
+//! CLI front end.
 //!
 //! [`Presenter`] turns events into text and answers into [`Decision`]s; the pipe relay
-//! ([`relay`]) and the in-process fallback's console sink both drive it. The relay works over any
-//! [`Link`], so that tests can play the helper's part and type the user's answers
-//! ([`super::input::ScriptedInput`]).
+//! ([`relay`], through [`CliFrontend`]) and the in-process fallback's console sink both drive it.
+//! The relay works over any [`Link`], so that tests can play the helper's part and type the user's
+//! answers ([`super::input::ScriptedInput`]).
 
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
-use mklm_core::{
-    Decision, ErrorInfo, Event, ExpectedKeyboard, KeyboardType, OpId, OpState, OperationResult,
-};
-use mklm_ipc::{CallerMessage, HelperMessage, MESSAGE_TIMEOUT, Request};
+use mklm_client::session::{self, Frontend, SessionView};
+use mklm_core::{Decision, Event, ExpectedKeyboard, KeyboardType, OpId, OpState};
+use mklm_ipc::Request;
+
+pub use mklm_client::session::{Link, RelayConfig, SessionEnd};
 
 use super::AnswerArg;
 use super::input::{Input, Line, YesNo, yes_no};
@@ -25,64 +27,8 @@ const REDIRECTED_TICK_EVERY: u32 = 5;
 /// Reconnect path: a "still waiting" line after this many `WaitingForReconnect` events (10 s each).
 const RECONNECT_REMINDER_EVERY: u32 = 6;
 
-/// One side of the pipe as the relay sees it.
-pub trait Link {
-    fn send(&mut self, message: &CallerMessage) -> Result<(), String>;
-    /// The next message within `timeout`.
-    fn recv(&mut self, timeout: Duration) -> Recv;
-    /// The helper's exit code once its process has exited.
-    fn helper_exit_code(&mut self) -> Option<u32>;
-}
-
-/// What [`Link::recv`] got.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Recv {
-    Message(HelperMessage),
-    Timeout,
-    /// The pipe closed or a frame was malformed; the session is over.
-    Closed(String),
-}
-
-/// How a request ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionEnd {
-    Finished(OperationResult),
-    Failed(ErrorInfo),
-    /// The pipe closed (or broke the protocol) before the answer; usually the helper died.
-    Lost {
-        exit_code: Option<u32>,
-        detail: String,
-        /// The operation was journaled (`Planned` arrived): recovery has something to do.
-        planned: bool,
-        /// A keep-or-revert countdown was running (design review C8).
-        countdown: bool,
-    },
-    /// No frame for [`RelayConfig::silence_limit`] while the helper process still runs.
-    Unresponsive,
-}
-
-/// Timing of the relay loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RelayConfig {
-    /// Longest wait for a frame before the user's input is looked at again.
-    pub tick: Duration,
-    /// Silence after which a running helper counts as wedged (`MESSAGE_TIMEOUT`; the helper sends
-    /// a heartbeat every 10 s whatever it is doing, design review S7).
-    pub silence_limit: Duration,
-}
-
-impl Default for RelayConfig {
-    fn default() -> Self {
-        Self {
-            tick: Duration::from_millis(200),
-            silence_limit: MESSAGE_TIMEOUT,
-        }
-    }
-}
-
-/// Sends `request` and relays until the result. Decisions are sent as the user (or `--answer`)
-/// gives them; the helper's heartbeats keep the silence limit from expiring while the engine
-/// works.
+/// Sends `request` and relays until the result, showing it with `presenter` and reading answers
+/// from `input` (the shared relay with the CLI front end).
 pub fn relay(
     link: &mut dyn Link,
     request: Request,
@@ -91,72 +37,42 @@ pub fn relay(
     out: &mut dyn Write,
     config: RelayConfig,
 ) -> io::Result<SessionEnd> {
-    if let Err(detail) = link.send(&CallerMessage::Request(request)) {
-        return Ok(presenter.lost(link, detail));
+    let mut frontend = CliFrontend {
+        presenter,
+        input,
+        out,
+    };
+    session::relay(link, request, &mut frontend, config)
+}
+
+/// The CLI as a [`Frontend`]: text through the [`Presenter`], answers from an [`Input`].
+struct CliFrontend<'a> {
+    presenter: &'a mut Presenter,
+    input: &'a mut dyn Input,
+    out: &'a mut dyn Write,
+}
+
+impl Frontend for CliFrontend<'_> {
+    fn event(&mut self, event: &Event, _view: &SessionView) -> io::Result<Option<Decision>> {
+        let decision = self.presenter.event(event, self.out, Instant::now())?;
+        if self.presenter.take_question_asked() {
+            self.input.discard_typed_ahead();
+        }
+        Ok(decision)
     }
-    let mut last_frame = Instant::now();
-    loop {
-        if presenter.wants_input()
-            && let Some(line) = input.next_line(Some(Duration::ZERO))
-            && let Some(decision) = presenter.line(line, out)?
-            && let Err(detail) = link.send(&CallerMessage::Decision(decision))
+
+    fn poll(&mut self, _view: &SessionView, now: Instant) -> io::Result<Option<Decision>> {
+        if self.presenter.wants_input()
+            && let Some(line) = self.input.next_line(Some(Duration::ZERO))
+            && let Some(decision) = self.presenter.line(line, self.out)?
         {
-            presenter.finish(out)?;
-            return Ok(presenter.lost(link, detail));
+            return Ok(Some(decision));
         }
-        if let Some(decision) = presenter.tick(Instant::now(), out)?
-            && let Err(detail) = link.send(&CallerMessage::Decision(decision))
-        {
-            presenter.finish(out)?;
-            return Ok(presenter.lost(link, detail));
-        }
-        match link.recv(config.tick) {
-            Recv::Message(message) => {
-                last_frame = Instant::now();
-                match message {
-                    HelperMessage::Event(event) => {
-                        let decision = presenter.event(&event, out, last_frame)?;
-                        if presenter.take_question_asked() {
-                            input.discard_typed_ahead();
-                        }
-                        if let Some(decision) = decision
-                            && let Err(detail) = link.send(&CallerMessage::Decision(decision))
-                        {
-                            presenter.finish(out)?;
-                            return Ok(presenter.lost(link, detail));
-                        }
-                    }
-                    HelperMessage::Result(result) => {
-                        presenter.finish(out)?;
-                        return Ok(SessionEnd::Finished(result));
-                    }
-                    HelperMessage::Error(info) => {
-                        presenter.finish(out)?;
-                        return Ok(SessionEnd::Failed(info));
-                    }
-                    HelperMessage::Hello(_) => {
-                        presenter.finish(out)?;
-                        return Ok(presenter.lost(link, "unexpected hello frame".to_string()));
-                    }
-                }
-            }
-            Recv::Timeout => {
-                // The pipe normally breaks when the helper exits; its process handle tells for
-                // sure, without waiting for the silence limit (design E.7).
-                if link.helper_exit_code().is_some() {
-                    presenter.finish(out)?;
-                    return Ok(presenter.lost(link, "the helper exited".to_string()));
-                }
-                if last_frame.elapsed() >= config.silence_limit {
-                    presenter.finish(out)?;
-                    return Ok(SessionEnd::Unresponsive);
-                }
-            }
-            Recv::Closed(detail) => {
-                presenter.finish(out)?;
-                return Ok(presenter.lost(link, detail));
-            }
-        }
+        self.presenter.tick(now, self.out)
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        self.presenter.finish(self.out)
     }
 }
 
@@ -185,12 +101,9 @@ pub struct Presenter {
     answer: Option<AnswerArg>,
     /// From `Planned`: names and layouts of the keyboards involved.
     keyboards: Vec<ExpectedKeyboard>,
-    planned: bool,
     /// `(instance ID, reported, expected)` of every keyboard that came back.
     arrivals: Vec<(String, Option<KeyboardType>, KeyboardType)>,
     prompt: Prompt,
-    /// A keep-or-revert countdown started in this session (design review C8).
-    countdown_seen: bool,
     /// A keep-or-revert question has just been asked (see [`Presenter::take_question_asked`]).
     question_asked: bool,
     input_eof: bool,
@@ -205,10 +118,8 @@ impl Presenter {
             console,
             answer,
             keyboards: Vec::new(),
-            planned: false,
             arrivals: Vec::new(),
             prompt: Prompt::None,
-            countdown_seen: false,
             question_asked: false,
             input_eof: false,
             line_open: false,
@@ -230,15 +141,6 @@ impl Presenter {
                 self.prompt,
                 Prompt::Countdown { .. } | Prompt::Reconnect { .. }
             )
-    }
-
-    fn lost(&self, link: &mut dyn Link, detail: String) -> SessionEnd {
-        SessionEnd::Lost {
-            exit_code: link.helper_exit_code(),
-            detail,
-            planned: self.planned,
-            countdown: self.countdown_seen,
-        }
     }
 
     /// Ends an open countdown line.
@@ -298,7 +200,6 @@ impl Presenter {
                 keyboards,
                 ..
             } => {
-                self.planned = true;
                 self.keyboards = keyboards.clone();
                 self.say(
                     out,
@@ -438,7 +339,6 @@ impl Presenter {
         self.prompt = Prompt::Countdown {
             op_id: op_id.clone(),
         };
-        self.countdown_seen = true;
         self.question_asked = true;
         match self.answer {
             Some(AnswerArg::Keep) => {
@@ -577,10 +477,12 @@ impl Presenter {
 mod tests {
     use std::collections::VecDeque;
 
+    use mklm_client::session::Recv;
     use mklm_core::{
-        FailureReason, LayoutTable, Outcome, PendingAction, PlanStep, PlannedWrite, WriteTarget,
-        value_names,
+        ErrorInfo, FailureReason, LayoutTable, OperationResult, Outcome, PendingAction, PlanStep,
+        PlannedWrite, WriteTarget, value_names,
     };
+    use mklm_ipc::{CallerMessage, HelperMessage};
 
     use super::super::input::{Line, ScriptedInput};
     use super::*;

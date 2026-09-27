@@ -5,6 +5,8 @@ members = [
     "crates/mklm-win",
     "crates/mklm-ipc",
     "crates/mklm-engine",
+    "crates/mklm-client",
+    "apps/mklm",
     "apps/mklm-cli",
     "apps/mklm-helper",
 ]
@@ -23,6 +25,7 @@ mklm-core = { path = "crates/mklm-core" }
 mklm-win = { path = "crates/mklm-win" }
 mklm-ipc = { path = "crates/mklm-ipc" }
 mklm-engine = { path = "crates/mklm-engine" }
+mklm-client = { path = "crates/mklm-client" }
 # windows-registry stays on 0.6.x until `windows` itself moves to 0.100 (avoids duplicate windows-result/strings/link).
 windows = "0.62.2"
 windows-registry = "0.6.1"
@@ -32,6 +35,13 @@ thiserror = "2.0.21"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 embed-resource = "3.0.11"
+# GUI (apps/mklm, M3): Slint 1.18 as proven by prototypes/slint-proto (M0 #8). Default features
+# (winit backend, femtovg and software renderers, accessibility, system tray) plus the winit 0.30
+# accessors. No skia. See docs/design/m3-gui.md C.3 for the renderer choice.
+slint = { version = "~1.18", features = ["unstable-winit-030"] }
+slint-build = "~1.18"
+# settings.toml of the GUI (plan 3.7).
+toml = "1.1.6"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

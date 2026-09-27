@@ -6,21 +6,22 @@ use std::borrow::Cow;
 use std::io::{self, IsTerminal as _, Write};
 
 use anyhow::{Context as _, Result};
+use mklm_client::inventory::InventoryError;
+use mklm_client::run_once::{PostRebootCommand, RunOnceError, RunOnceOutcome, apply_run_once_rule};
 use mklm_core::{
-    ApplyOptions, BootId, ConflictPolicy, ErrorInfo, GlobalMode, Journal, JournalEntry,
-    JournalError, Layout, LayoutChoice, Liveness, OpKind, OpState, OperationError, OperationResult,
-    Outcome, PendingAction, ProcessIdentity, RegValue, ResolutionChoice, RestoreScope,
-    STORE_VERSION, STORE_VERSION_VALUE, SystemSnapshot, UnreadableEntry, ValueChoice, ValueOp,
-    ValueRecord, WriteTarget, attention, plan_migration, plan_set_layout, ps2_pin_layout,
-    value_names,
+    ApplyOptions, BootId, ConflictPolicy, ErrorInfo, GlobalMode, Journal, JournalEntry, Layout,
+    LayoutChoice, Liveness, OpKind, OpState, OperationError, OperationResult, Outcome,
+    PendingAction, ProcessIdentity, RegValue, ResolutionChoice, RestoreScope, SystemSnapshot,
+    ValueChoice, ValueOp, ValueRecord, WriteTarget, attention, plan_migration, plan_set_layout,
+    ps2_pin_layout, value_names,
 };
 use mklm_ipc::{
     Assignment, MigrateRequest, Request, ResolveConflictRequest, RestoreBaselineRequest,
     SetLayoutRequest,
 };
-use mklm_win::{ReadIssue, ReadIssueKind, elevation, journal_store, proc_identity, session};
+use mklm_win::{elevation, session};
 
-use super::checks::{self, Gate, RunOnce};
+use super::checks::{self, Gate};
 use super::in_process::{self, InProcessRequest};
 use super::input::{self, Input, Line, StdinInput, YesNo};
 use super::launch::{self, LaunchError};
@@ -105,24 +106,14 @@ impl Ui {
 }
 
 fn liveness(process: &ProcessIdentity) -> Liveness {
-    proc_identity::process_liveness(process)
+    mklm_client::journal::liveness(process)
 }
 
 /// The journal as stored, read unelevated, with a newer store layout counted as unreadable (as
-/// the engine does); and the stored `StoreVersion`.
+/// the engine does); and the stored `StoreVersion` (`mklm_client::journal::read_journal`).
 fn read_journal() -> Result<(Journal, Option<u32>)> {
-    let raw = journal_store::read_journal_store().context("reading the journal failed")?;
-    let mut journal = Journal::parse(&raw.ops, &raw.baselines);
-    if let Some(found) = raw.store_version.filter(|version| *version > STORE_VERSION) {
-        journal.unreadable.push(UnreadableEntry {
-            name: STORE_VERSION_VALUE.to_string(),
-            error: JournalError::NewerSchema {
-                found,
-                supported: STORE_VERSION,
-            },
-        });
-    }
-    Ok((journal, raw.store_version))
+    let read = mklm_client::journal::read_journal().context("reading the journal failed")?;
+    Ok((read.journal, read.store_version))
 }
 
 fn boot_id() -> Result<BootId> {
@@ -153,46 +144,46 @@ struct Inventory {
 }
 
 /// Every keyboard, phantoms included (INV-PS2 needs them). Problems that make the list incomplete
-/// stop the command, as they would stop the helper (design review S2); the others are warnings.
+/// stop the command, as they would stop the helper (design review S2); the others are warnings
+/// (`mklm_client::inventory::read_inventory`).
 fn inventory() -> Result<Inventory> {
-    let report = mklm_win::snapshot_report(mklm_win::SnapshotOptions {
-        include_non_present: true,
-    })
-    .context("reading the keyboards failed")?;
-    let (blocking, other): (Vec<&ReadIssue>, Vec<&ReadIssue>) = report
-        .issues
-        .iter()
-        .partition(|issue| issue.kind.blocks_writes());
-    for issue in &other {
-        eprintln!("warning: could not read {issue}");
+    let warn = |issues: &[mklm_win::ReadIssue]| {
+        for issue in issues {
+            eprintln!("warning: could not read {issue}");
+        }
+    };
+    match mklm_client::inventory::read_inventory() {
+        Ok(inventory) => {
+            warn(&inventory.warnings);
+            Ok(Inventory {
+                snapshot: inventory.snapshot,
+                uncertain_values: inventory.uncertain_values,
+            })
+        }
+        Err(InventoryError::Read(error)) => {
+            Err(anyhow::Error::new(error).context("reading the keyboards failed"))
+        }
+        Err(InventoryError::Incomplete { blocking, warnings }) => {
+            warn(&warnings);
+            let list: Vec<String> = blocking.iter().map(|issue| issue.to_string()).collect();
+            anyhow::bail!(
+                "the keyboards could not be read completely, so nothing may be written: {}",
+                list.join("; ")
+            );
+        }
     }
-    if !blocking.is_empty() {
-        let list: Vec<String> = blocking.iter().map(|issue| issue.to_string()).collect();
-        anyhow::bail!(
-            "the keyboards could not be read completely, so nothing may be written: {}",
-            list.join("; ")
-        );
-    }
-    Ok(Inventory {
-        uncertain_values: other
-            .iter()
-            .any(|issue| issue.kind == ReadIssueKind::Values),
-        snapshot: report.snapshot,
-    })
 }
 
 /// The keyboards for display only (current values, Raw Input): commands that plan nothing, such
 /// as `undo` (the way out when something went wrong), must not fail because a keyboard property
 /// could not be read. Every problem is a warning; the helper checks again before it writes.
 fn display_snapshot() -> Option<SystemSnapshot> {
-    match mklm_win::snapshot_report(mklm_win::SnapshotOptions {
-        include_non_present: true,
-    }) {
-        Ok(report) => {
-            for issue in &report.issues {
+    match mklm_client::inventory::read_display_snapshot() {
+        Ok((snapshot, issues)) => {
+            for issue in &issues {
                 eprintln!("warning: could not read {issue}");
             }
-            Some(report.snapshot)
+            Some(snapshot)
         }
         Err(error) => {
             eprintln!("warning: could not read the keyboards: {error}");
@@ -216,41 +207,29 @@ fn current_of(snapshot: Option<&SystemSnapshot>) -> impl Fn(&ValueRecord) -> Opt
     }
 }
 
-/// `"<this exe>" post-reboot`.
-fn post_reboot_command() -> Result<String> {
-    let exe = std::env::current_exe().context("finding mklm-cli.exe failed")?;
-    Ok(format!("\"{}\" post-reboot", exe.display()))
-}
-
 /// Design F.4 / review C17: registers the post-reboot check when the journal says a restart is
-/// pending, whatever the session returned. Problems are warnings: the journal keeps the state.
+/// pending, whatever the session returned (`mklm_client::run_once`). Problems are warnings: the
+/// journal keeps the state.
 ///
 /// Only an unelevated process registers. An elevated one (an elevated console, `--in-process`)
 /// may run as another administrator than the signed-in user, so its `HKCU` would be the wrong
 /// account's; it tells the user instead. When elevation cannot be checked, it tells the user too.
 fn post_reboot_rule(ui: &mut Ui) {
-    let elevated = elevated().unwrap_or(true);
-    let decision = read_journal()
-        .and_then(|(journal, _)| Ok(checks::run_once(&journal, boot_id()?, elevated)));
-    match decision {
-        Ok(RunOnce::NotNeeded) => {}
-        Ok(RunOnce::Register) => {
-            let registered = post_reboot_command()
-                .and_then(|command| Ok(session::register_post_reboot(&command)?));
-            if let Err(error) = registered {
-                eprintln!(
-                    "warning: could not register the check after the restart ({error:#}); run \
-                     `mklm-cli post-reboot` after signing in"
-                );
-            }
-        }
-        Ok(RunOnce::TellUser) => {
+    match apply_run_once_rule(PostRebootCommand::Cli) {
+        Ok(RunOnceOutcome::NotNeeded | RunOnceOutcome::Registered(_)) => {}
+        Ok(RunOnceOutcome::TellUser) => {
             let _ = ui.say(
                 "After the restart, run `mklm-cli post-reboot` to keep or revert the change \
                  (this elevated process may belong to another account, so it registers nothing).",
             );
         }
-        Err(error) => eprintln!("warning: could not check the journal: {error:#}"),
+        Err(RunOnceError::Register(error)) => eprintln!(
+            "warning: could not register the check after the restart ({error}); run \
+             `mklm-cli post-reboot` after signing in"
+        ),
+        Err(RunOnceError::Check(error)) => {
+            eprintln!("warning: could not check the journal: {error}");
+        }
     }
 }
 
@@ -360,7 +339,7 @@ fn session(ui: &mut Ui, request: Request, answer: Option<AnswerArg>) -> Result<E
             ui.say("Cancelled: the administrator permission was declined; nothing was changed.")?;
             return Ok(Ended::Launch(exit_code::CANCELLED));
         }
-        Err(LaunchError::Failed(message)) => {
+        Err(LaunchError::Failed { message, .. }) => {
             eprintln!("error: {message}");
             return Ok(Ended::Launch(exit_code::FAILURE));
         }
@@ -416,6 +395,12 @@ fn finish(
                  Task Manager, then run `mklm-cli recover`."
             );
             Ok(exit_code::FAILURE)
+        }
+        // The CLI's front end never asks to cancel (Ctrl+C ends the process, which closes the
+        // pipe); only the GUI leaves a session this way.
+        SessionEnd::Abandoned { .. } => {
+            ui.say("Cancelled.")?;
+            Ok(exit_code::CANCELLED)
         }
         SessionEnd::Lost {
             exit_code: helper_code,
@@ -561,7 +546,7 @@ fn dry_run_done(ui: &mut Ui) -> Result<()> {
             helper.display(),
             super::BUILD_ID
         ))?,
-        Err(LaunchError::Failed(message)) => ui.say(&format!("Note: {message}."))?,
+        Err(LaunchError::Failed { message, .. }) => ui.say(&format!("Note: {message}."))?,
         Err(LaunchError::Declined) => {}
     }
     ui.say("Dry run: nothing was written and the helper was not started.")

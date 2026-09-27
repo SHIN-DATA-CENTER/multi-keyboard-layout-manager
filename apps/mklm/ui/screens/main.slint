@@ -1,0 +1,270 @@
+// The main screen (plan 3.2, design m3 B.2): the status line and the keyboard list grouped by
+// physical device, with "identify by key press" (plan 3.3) marking the row that typed — with a
+// badge and a border, never by colour alone (review U12).
+
+import { Button, CheckBox, ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { KeyboardRowVm, StatusVm, Tone } from "../structs.slint";
+import { Badge, Banner, Body, CaptureArea, Caption, PageHeader } from "../widgets.slint";
+
+component StatusItem inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <Tone> tone: Tone.neutral;
+    spacing: 4px;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.label + ": " + root.value;
+    Caption {
+        text: root.label;
+        vertical-alignment: center;
+    }
+
+    Rectangle {
+        background: Theme.tone-background(root.tone);
+        border-color: Theme.tone-border(root.tone);
+        border-width: Theme.high-contrast ? 1px : 0px;
+        border-radius: 4px;
+        min-width: value-text.preferred-width + 10px;
+        value-text := Text {
+            text: root.value;
+            font-size: Theme.font-body;
+            color: Theme.tone-text(root.tone);
+            vertical-alignment: center;
+        }
+    }
+}
+
+// One physical device. The whole row is one focus stop; Enter / Space opens the change page
+// (design m3 E.1). The row keeps its identity across renders (the model is updated row by row,
+// design m3 A.6), so the focus survives a key press elsewhere.
+component KeyboardRow inherits Rectangle {
+    in property <KeyboardRowVm> vm;
+    callback assign();
+    callback apply-now();
+    background: vm.highlighted ? Theme.highlight-row : Theme.surface;
+    border-radius: 6px;
+    border-width: focus.has-focus || vm.highlighted ? (Theme.high-contrast && vm.highlighted ? 3px : Theme.focus-width) : 1px;
+    border-color: vm.highlighted ? Theme.highlight-row-border : (focus.has-focus ? Theme.focus-ring : Theme.border);
+    min-height: layout.preferred-height;
+
+    focus := FocusScope {
+        accessible-role: AccessibleRole.list-item;
+        accessible-label: root.vm.accessible-summary;
+        accessible-action-default => {
+            if (root.vm.can-assign) {
+                root.assign();
+            }
+        }
+        key-pressed(event) => {
+            if ((event.text == Key.Return || event.text == " ") && root.vm.can-assign) {
+                root.assign();
+                return accept;
+            }
+            reject
+        }
+
+        layout := HorizontalLayout {
+            padding: 10px;
+            spacing: 12px;
+            VerticalLayout {
+                spacing: 2px;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.vm.name;
+                    font-size: Theme.font-body;
+                    font-weight: 600;
+                    color: root.vm.highlighted ? Theme.highlight-row-text : Theme.text;
+                    wrap: word-wrap;
+                }
+
+                Caption {
+                    text: root.vm.transport + "  " + root.vm.vid-pid;
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    alignment: start;
+                    for badge in root.vm.badges: Badge {
+                        vm: badge;
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 2px;
+                width: 260px * Theme.font-scale;
+                Body {
+                    text: @tr("Assigned: {}", root.vm.assigned);
+                    color: root.vm.highlighted ? Theme.highlight-row-text : Theme.text;
+                }
+
+                if root.vm.pending != "": Caption {
+                    text: root.vm.pending;
+                }
+                if root.vm.pending-hint != "": Caption {
+                    text: root.vm.pending-hint;
+                }
+                Text {
+                    text: root.vm.current;
+                    font-size: Theme.font-body;
+                    color: root.vm.highlighted ? Theme.highlight-row-text : Theme.tone-text(root.vm.current-tone);
+                    wrap: word-wrap;
+                }
+
+                if root.vm.physical-note != "": Text {
+                    text: root.vm.physical-note;
+                    font-size: Theme.font-body;
+                    color: Theme.tone-text(Tone.warning);
+                    wrap: word-wrap;
+                }
+                if root.vm.blocked-note != "": Caption {
+                    text: root.vm.blocked-note;
+                }
+            }
+
+            VerticalLayout {
+                spacing: 4px;
+                alignment: start;
+                Button {
+                    text: @tr("Change…");
+                    enabled: root.vm.can-assign;
+                    accessible-label: root.vm.assign-label;
+                    clicked => {
+                        root.assign();
+                    }
+                }
+
+                if root.vm.apply-now: Button {
+                    text: @tr("Apply now…");
+                    clicked => {
+                        root.apply-now();
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component MainScreen inherits VerticalLayout {
+    in property <StatusVm> status;
+    in property <[KeyboardRowVm]> keyboards;
+    in property <bool> identify-active;
+    // "Keychron Receiver のキーが押されました" (polite, design m3 B.3).
+    in property <string> identify-announcement;
+    in-out property <bool> show-hidden;
+    callback assign(string);
+    callback apply-now(string);
+    callback toggle-identify();
+    callback banner-action();
+    callback refresh();
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: @tr("Keyboards");
+    }
+
+    // The status line (plan 3.2): input method, mode, standard layout, sign-in screen.
+    HorizontalLayout {
+        spacing: 16px;
+        alignment: start;
+        StatusItem {
+            label: @tr("Input method");
+            value: root.status.input-method;
+            tone: root.status.input-method-tone;
+        }
+
+        StatusItem {
+            label: @tr("Mode");
+            value: root.status.mode;
+        }
+
+        StatusItem {
+            label: @tr("Standard layout");
+            value: root.status.standard;
+        }
+
+        StatusItem {
+            label: @tr("Sign-in screen");
+            value: root.status.sign-in;
+            tone: root.status.sign-in-tone;
+        }
+    }
+
+    if root.status.mode-note != "": Caption {
+        text: root.status.mode-note;
+    }
+    if root.status.banner != "": HorizontalLayout {
+        spacing: 8px;
+        Banner {
+            text: root.status.banner;
+            tone: root.status.banner-tone;
+            horizontal-stretch: 1;
+        }
+
+        if root.status.banner-action != "": Button {
+            text: root.status.banner-action;
+            clicked => {
+                root.banner-action();
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        Button {
+            text: root.identify-active ? @tr("Stop identifying") : @tr("Identify by key press");
+            clicked => {
+                root.toggle-identify();
+            }
+        }
+
+        Button {
+            text: @tr("Refresh");
+            clicked => {
+                root.refresh();
+            }
+        }
+
+        CheckBox {
+            text: @tr("Show hidden and disconnected keyboards");
+            checked <=> root.show-hidden;
+        }
+    }
+
+    // While identifying, the keys go here, so that Space or Enter on the keyboard being looked
+    // for presses no button; Esc stops (review U12).
+    if root.identify-active: CaptureArea {
+        text: @tr("Press a key on the keyboard you want to find. Its row is marked \"◀ Just pressed\". Esc stops.");
+        init => {
+            self.focus-capture();
+        }
+        escape => {
+            root.toggle-identify();
+        }
+    }
+    Text {
+        text: root.identify-announcement;
+        height: 0px;
+        accessible-live-region: polite;
+    }
+
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            spacing: 8px;
+            alignment: start;
+            accessible-role: AccessibleRole.list;
+            accessible-label: @tr("Keyboards");
+            for row in root.keyboards: KeyboardRow {
+                vm: row;
+                assign => {
+                    root.assign(row.id);
+                }
+                apply-now => {
+                    root.apply-now(row.id);
+                }
+            }
+        }
+    }
+}

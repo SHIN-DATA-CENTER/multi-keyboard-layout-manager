@@ -1,0 +1,424 @@
+// Small building blocks shared by the screens (design m3 B, C, E).
+
+import { Palette, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { BadgeVm, ChoiceVm, KeyTestVm, Tone } from "structs.slint";
+
+// A coloured label. Screen readers get `vm.accessible-text` (design m3 E.3).
+export component Badge inherits Rectangle {
+    in property <BadgeVm> vm;
+    background: Theme.tone-background(vm.tone);
+    border-color: Theme.tone-border(vm.tone);
+    border-width: Theme.high-contrast ? 1px : 0px;
+    border-radius: 4px;
+    min-width: label.preferred-width + 12px;
+    height: label.preferred-height + 4px;
+    accessible-role: AccessibleRole.text;
+    accessible-label: vm.accessible-text != "" ? vm.accessible-text : vm.text;
+
+    label := Text {
+        text: vm.text;
+        color: Theme.tone-text(vm.tone);
+        font-size: Theme.font-caption;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// The title of a page (design m3 E.1, E.2). It takes the focus when the page opens, so that a
+// screen reader reads the new page's title and the focus never disappears with the old page
+// (pages are rebuilt by `if`; review U16 d). Tab moves on to the page's first control.
+export component PageHeader inherits VerticalLayout {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> focus-on-open: true;
+    spacing: 4px;
+
+    heading := FocusScope {
+        min-height: heading-layout.preferred-height;
+        accessible-role: AccessibleRole.text;
+        accessible-label: root.title;
+        accessible-description: root.subtitle;
+        init => {
+            if (root.focus-on-open) {
+                self.focus();
+            }
+        }
+
+        Rectangle {
+            border-width: heading.has-focus ? Theme.focus-width : 0px;
+            border-color: Theme.focus-ring;
+            border-radius: 4px;
+        }
+
+        heading-layout := VerticalLayout {
+            padding: 2px;
+            Text {
+                text: root.title;
+                font-size: Theme.font-title;
+                font-weight: 600;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    if root.subtitle != "": Text {
+        text: root.subtitle;
+        font-size: Theme.font-body;
+        color: Theme.text-secondary;
+        wrap: word-wrap;
+    }
+}
+
+// Secondary text.
+export component Caption inherits Text {
+    color: Theme.text-secondary;
+    font-size: Theme.font-caption;
+    wrap: word-wrap;
+}
+
+// Body text.
+export component Body inherits Text {
+    color: Theme.text;
+    font-size: Theme.font-body;
+    wrap: word-wrap;
+}
+
+// A banner line with a tone (attention, warnings, design m3 B.12).
+export component Banner inherits Rectangle {
+    in property <string> text;
+    in property <Tone> tone: Tone.info;
+    background: Theme.tone-background(tone);
+    border-color: Theme.tone-border(tone);
+    border-width: Theme.high-contrast ? 1px : 0px;
+    border-radius: 6px;
+    min-height: body.preferred-height + 12px;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+
+    body := Text {
+        x: 8px;
+        width: parent.width - 16px;
+        text: root.text;
+        font-size: Theme.font-body;
+        color: Theme.tone-text(root.tone);
+        wrap: word-wrap;
+        vertical-alignment: center;
+    }
+}
+
+// Marks a part that a work package still has to build (design m3 I). Not translated.
+export component StubNotice inherits Text {
+    in property <string> package;
+    text: "TODO(" + package + ")";
+    color: Theme.text-secondary;
+    font-size: 11px;
+}
+
+// Radio choices (design m3 E.1, E.2; review U16): one tab stop; the arrow keys move the
+// selection; ◉ / ○ and a filled background show the selection, a separate outer ring the focus.
+// Used for the layout choices and for the apply method (review U1).
+export component RadioList inherits Rectangle {
+    in property <[ChoiceVm]> choices;
+    in-out property <int> selected: -1;
+    in property <string> label;
+    callback chosen(int);
+    min-height: list.preferred-height + 8px;
+
+    function pick(index: int) {
+        if (index >= 0 && index < root.choices.length && root.choices[index].enabled) {
+            root.selected = index;
+            root.chosen(index);
+        }
+    }
+
+    function step(delta: int) {
+        if (root.choices.length == 0) {
+            return;
+        }
+        if (root.selected < 0) {
+            root.pick(0);
+            return;
+        }
+        root.pick(Math.clamp(root.selected + delta, 0, root.choices.length - 1));
+    }
+
+    public function focus-choices() {
+        group.focus();
+    }
+
+    group := FocusScope {
+        accessible-role: AccessibleRole.radio-group;
+        accessible-label: root.label;
+        key-pressed(event) => {
+            if (event.text == Key.DownArrow || event.text == Key.RightArrow) {
+                root.step(1);
+                return accept;
+            }
+            if (event.text == Key.UpArrow || event.text == Key.LeftArrow) {
+                root.step(-1);
+                return accept;
+            }
+            if (event.text == " " && root.selected < 0) {
+                root.pick(0);
+                return accept;
+            }
+            reject
+        }
+
+        list := VerticalLayout {
+            padding: 4px;
+            spacing: 6px;
+            for choice[index] in root.choices: Rectangle {
+                min-height: item.preferred-height;
+                border-radius: 6px;
+                background: index == root.selected ? Theme.selected-fill : transparent;
+                border-width: 1px;
+                border-color: Theme.border;
+                accessible-role: AccessibleRole.radio-button;
+                accessible-label: choice.text;
+                accessible-description: choice.detail;
+                accessible-checked: index == root.selected;
+                accessible-enabled: choice.enabled;
+
+                // The focus ring, outside the fill: on the selected choice (or the first).
+                Rectangle {
+                    x: -3px;
+                    y: -3px;
+                    width: parent.width + 6px;
+                    height: parent.height + 6px;
+                    border-radius: 8px;
+                    border-width: group.has-focus && (index == root.selected || (root.selected < 0 && index == 0)) ? Theme.focus-width : 0px;
+                    border-color: Theme.focus-ring;
+                }
+
+                TouchArea {
+                    enabled: choice.enabled;
+                    clicked => {
+                        root.pick(index);
+                        group.focus();
+                    }
+                }
+
+                item := HorizontalLayout {
+                    padding: 8px;
+                    spacing: 8px;
+                    Text {
+                        text: index == root.selected ? "◉" : "○";
+                        font-size: Theme.font-body;
+                        color: index == root.selected ? Theme.selected-text : Theme.text;
+                        vertical-alignment: top;
+                        accessible-role: AccessibleRole.none;
+                    }
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        Text {
+                            text: choice.text;
+                            font-size: Theme.font-body;
+                            color: !choice.enabled ? Theme.text-secondary : (index == root.selected ? Theme.selected-text : Theme.text);
+                            wrap: word-wrap;
+                            accessible-role: AccessibleRole.none;
+                        }
+
+                        if choice.detail != "": Caption {
+                            text: choice.detail;
+                            accessible-role: AccessibleRole.none;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The IME-free key test (plan 1.4, 3.3; M0 #8 B): a FocusScope keeps the IME off, so the
+// characters come straight from the keyboard layout. Shift+2: "@" = US, "\"" = JIS. The Rust side
+// adds which keyboard sent the key (winit DeviceEvent, design m3 A.4) and never logs the text.
+// Tab and Esc are not swallowed: Tab leaves the field, Esc reaches the dialog (the countdown's
+// "revert", design m3 E.1).
+export component KeyTestArea inherits Rectangle {
+    in property <KeyTestVm> vm;
+    // The accessible description: the countdown passes its whole instruction (design m3 E.3).
+    in property <string> description: vm.prompt;
+    // (text, shift)
+    callback key-pressed(string, bool);
+    out property <bool> focused: scope.has-focus;
+    min-height: 120px * Theme.font-scale;
+    border-radius: 6px;
+    border-width: scope.has-focus ? Theme.focus-width : 1px;
+    border-color: scope.has-focus ? Theme.focus-ring : Theme.border;
+    background: Theme.surface;
+
+    public function focus-test() {
+        scope.focus();
+    }
+
+    scope := FocusScope {
+        accessible-role: AccessibleRole.text-input;
+        accessible-label: @tr("Key test");
+        accessible-description: root.description;
+        accessible-value: root.vm.last-text;
+        key-pressed(event) => {
+            if (event.text == Key.Tab || event.text == Key.Backtab || event.text == Key.Escape) {
+                return reject;
+            }
+            root.key-pressed(event.text, event.modifiers.shift);
+            accept
+        }
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 4px;
+            Text {
+                text: scope.has-focus ? root.vm.prompt : @tr("Click here, then press a key");
+                font-size: Theme.font-body;
+                color: Theme.text;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+
+            Text {
+                text: root.vm.last-text;
+                font-size: Theme.font-key;
+                color: Theme.text;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: root.vm.verdict;
+                font-size: Theme.font-body;
+                color: Theme.tone-text(root.vm.verdict-tone);
+                horizontal-alignment: center;
+                wrap: word-wrap;
+                accessible-live-region: polite;
+            }
+
+            Text {
+                text: root.vm.device;
+                font-size: Theme.font-caption;
+                color: Theme.text-secondary;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// Where the keys go while "identify by key press" runs (design m3 B.3; review U12): it takes
+// the focus, swallows every key but Tab and Esc (so Space or Enter on the keyboard being looked
+// for does not press a button), and Esc stops identifying.
+export component CaptureArea inherits Rectangle {
+    in property <string> text;
+    callback escape();
+    min-height: label.preferred-height + 16px;
+    border-radius: 6px;
+    border-width: scope.has-focus ? Theme.focus-width : 1px;
+    border-color: scope.has-focus ? Theme.focus-ring : Theme.border;
+    background: Theme.surface;
+
+    public function focus-capture() {
+        scope.focus();
+    }
+
+    scope := FocusScope {
+        accessible-role: AccessibleRole.text-input;
+        accessible-label: @tr("Identify by key press");
+        accessible-description: root.text;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.escape();
+                return accept;
+            }
+            if (event.text == Key.Tab || event.text == Key.Backtab) {
+                return reject;
+            }
+            accept
+        }
+
+        label := Text {
+            x: 8px;
+            width: parent.width - 16px;
+            text: root.text;
+            font-size: Theme.font-body;
+            color: Theme.text;
+            wrap: word-wrap;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The frame of an overlay dialog (design m3 B.6, E.1, E.4): swallows clicks on the page behind
+// it; Esc that no part of the dialog handles calls `escape` (the countdown: revert). Dialogs are
+// built of three parts: the title (here), a `DialogBody` that scrolls, and a `DialogButtons` row
+// that always stays visible, so no button is ever drawn outside the frame at 200 % and a large
+// text size (review U11).
+export component DialogFrame inherits Rectangle {
+    in property <string> title;
+    callback escape();
+    background: #00000080;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: root.title;
+
+    TouchArea { }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.escape();
+                return accept;
+            }
+            reject
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(parent.width - 24px, 560px * Theme.font-scale);
+            height: min(parent.height - 24px, inner.preferred-height);
+            background: Theme.window-background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            inner := VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+                Text {
+                    text: root.title;
+                    font-size: Theme.font-dialog-title;
+                    font-weight: 600;
+                    color: Theme.text;
+                    wrap: word-wrap;
+                }
+
+                @children
+            }
+        }
+    }
+}
+
+// The scrolling middle of a dialog or page: shrinks (down to a few lines) before anything else
+// does.
+export component DialogBody inherits Rectangle {
+    vertical-stretch: 1;
+    preferred-height: content.preferred-height;
+    min-height: min(content.preferred-height, 64px * Theme.font-scale);
+
+    ScrollView {
+        width: 100%;
+        height: 100%;
+        content := VerticalLayout {
+            spacing: 8px;
+            @children
+        }
+    }
+}
+
+// The button row of a dialog or page: never shrinks, always visible.
+export component DialogButtons inherits HorizontalLayout {
+    spacing: 8px;
+    alignment: end;
+    vertical-stretch: 0;
+}

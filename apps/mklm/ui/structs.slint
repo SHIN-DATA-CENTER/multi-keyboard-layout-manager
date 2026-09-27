@@ -1,0 +1,247 @@
+// View-model types shared by the screens (design m3 B). Rust fills them (src/vm/*.rs, via
+// src/app.rs); the screens only display them and raise callbacks. Every user-visible string in
+// them is already localized by Rust (src/i18n.rs); static labels are @tr in the .slint files.
+
+// The page shown in the main area (design m3 B.0): twelve pages. The change page covers the
+// assignment, the layout detection and the apply method (review U14).
+export enum Screen {
+    wizard,
+    main,
+    change,
+    uac-notice,
+    restart,
+    post-reboot,
+    conflict,
+    journal,
+    recovery,
+    ime-help,
+    settings,
+    about,
+}
+
+// A modal layer over the page (design m3 B.6, B.7, B.16, B.17, A.2.3). Only one at a time.
+export enum Overlay {
+    none,
+    progress,
+    countdown,
+    reconnect,
+    result,
+    recovery-confirm,
+    close-notice,
+    quit-confirm,
+}
+
+// Colour role of a badge or banner (design m3 C.2, E.3).
+export enum Tone {
+    neutral,
+    info,
+    success,
+    warning,
+    danger,
+}
+
+export struct BadgeVm {
+    text: string,
+    tone: Tone,
+    // What a screen reader says for the badge (design m3 E.3), e.g. "キー入力なし: このデバイス
+    // からのキー入力をまだ見ていません…".
+    accessible-text: string,
+}
+
+// The status line at the top of the main screen (plan 3.2, design m3 B.2).
+export struct StatusVm {
+    input-method: string,
+    input-method-tone: Tone,
+    mode: string,
+    // Fixed mode: what it means and the way out (review U4).
+    mode-note: string,
+    standard: string,
+    sign-in: string,
+    sign-in-tone: Tone,
+    // A banner for the most important attention (design m3 B.12); empty when none.
+    banner: string,
+    banner-tone: Tone,
+    banner-action: string,
+}
+
+// One physical device (container) in the keyboard list (plan 3.2, design m3 B.2).
+export struct KeyboardRowVm {
+    // The group key the callbacks pass back (container ID or instance ID).
+    id: string,
+    name: string,
+    transport: string,
+    vid-pid: string,
+    // 設定した配列 / 保存済み（反映待ち）/ 現在の動作 (glossary "状態表示").
+    assigned: string,
+    pending: string,
+    // What to do about the pending change (review U8).
+    pending-hint: string,
+    // "今すぐ反映…" is offered on the row.
+    apply-now: bool,
+    current: string,
+    current-tone: Tone,
+    // "⚠ 実物は US 配列ですが JIS として動いています" (review U4).
+    physical-note: string,
+    badges: [BadgeVm],
+    // Highlighted by "キーを押して特定" (plan 3.3); also a badge, never colour alone.
+    highlighted: bool,
+    can-assign: bool,
+    // Why "変更…" is disabled (design m3 E.2).
+    blocked-note: string,
+    // The accessible label of "変更…" ("Keychron Receiver の配列を変更").
+    assign-label: string,
+    // One sentence with everything above, for screen readers (design m3 E.3).
+    accessible-summary: string,
+}
+
+// A layout choice on the change page (plan 3.4): a radio button with ◉ / ○ (review U16).
+export struct ChoiceVm {
+    text: string,
+    detail: string,
+    enabled: bool,
+}
+
+// One value line of a plan or a restore preview (technical details, design m3 B.5).
+export struct PlanLineVm {
+    key: string,
+    name: string,
+    now: string,
+    after: string,
+}
+
+// The change page below the choices (plan 3.5 step 1, design m3 B.5).
+export struct ChangeVm {
+    title: string,
+    // `PrepareChange` runs: "確認しています…".
+    preparing: bool,
+    // The two apply methods (review U1): shown when the plan can reset in place.
+    method-visible: bool,
+    live-text: string,
+    live-detail: string,
+    restart-text: string,
+    restart-detail: string,
+    takes-effect: string,
+    all-users-note: string,
+    migration-note: string,
+    ime-note: string,
+    warnings: [string],
+    lines: [PlanLineVm],
+    // One or two lines about the UAC prompt that follows (review U14).
+    uac-line: string,
+    // "変更する（次に Windows の確認が出ます）".
+    apply-text: string,
+    can-apply: bool,
+    // The in-place detection (design m3 B.3).
+    detect-instruction: string,
+    detect-feedback: string,
+    detect-feedback-tone: Tone,
+    detect-verdict: string,
+}
+
+// The keep-or-revert countdown (plan 3.5 step 3, design m3 B.6).
+export struct CountdownVm {
+    title: string,
+    // Also the key test's accessible description and the announcement on opening (E.3).
+    message: string,
+    remaining: int,
+    total: int,
+    // "Windows の認識: Keychron Receiver は JIS 配列です ✓" (review U5).
+    recognition: string,
+    recognition-tone: Tone,
+    // A polite announcement at 10 and 5 seconds left.
+    reminder: string,
+}
+
+// The reconnect wait (design m3 B.7).
+export struct ReconnectVm {
+    title: string,
+    instructions: string,
+    status: string,
+    status-tone: Tone,
+    can-keep: bool,
+}
+
+// The key test field (IME-free FocusScope, plan 1.4 / 3.3, design m3 B.3).
+export struct KeyTestVm {
+    prompt: string,
+    last-text: string,
+    verdict: string,
+    verdict-tone: Tone,
+    device: string,
+}
+
+// Progress of a helper session (design m3 B.5, B.17).
+export struct ProgressVm {
+    title: string,
+    step: string,
+    detail: string,
+}
+
+// The result of a request (design m3 B.17).
+export struct ResultVm {
+    title: string,
+    // "今の状態" (review U7): one line per keyboard of the request.
+    current-state: [string],
+    message: string,
+    tone: Tone,
+    ime-note: string,
+    run-once-note: string,
+    next-step: string,
+    details: string,
+}
+
+// One row of the post-reboot check (design m2 D.7, m3 B.9), in layout names (review U5).
+export struct CheckRowVm {
+    name: string,
+    setting: string,
+    recognized: string,
+    tone: Tone,
+    // "未" / "✓" / "⚠" (review U2).
+    typed: string,
+    typed-tone: Tone,
+    details: string,
+}
+
+// One keyboard of an operation in conflict (design m2 D.8, m3 B.10; review U6).
+export struct ConflictKeyboardVm {
+    name: string,
+    // "今の値: 不明な種類（8/2）— MKLM 以外が変更".
+    now: string,
+    // By layout name, "（おすすめ）" on the recommended one.
+    options: [string],
+    selected: int,
+    // The per-value numbers, folded under "詳細".
+    details: string,
+}
+
+// One journal entry in the history (design m3 B.11): local time (design m3 G.1).
+export struct JournalRowVm {
+    op: string,
+    when: string,
+    what: string,
+    state: string,
+    reason: string,
+    tone: Tone,
+    can-revert: bool,
+    // "2026/09/27 22:25 の変更を元に戻す" (design m3 E.2).
+    revert-label: string,
+}
+
+// One entry on the recovery page (design m3 B.12; review U9).
+export struct RecoveryItemVm {
+    operation: string,
+    outcome: string,
+    tone: Tone,
+}
+
+// One connected keyboard on the wizard's keyboards step (plan 3.1, design m3 B.1; review U3).
+export struct WizardKeyboardVm {
+    name: string,
+    current: string,
+    // 0 = JIS, 1 = US.
+    choice: int,
+    problem: string,
+    problem-deletable: bool,
+    // 0 = keep (recommended), 1 = delete.
+    problem-choice: int,
+}

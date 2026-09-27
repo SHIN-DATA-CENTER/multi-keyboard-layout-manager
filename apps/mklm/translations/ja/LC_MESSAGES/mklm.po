@@ -1,0 +1,383 @@
+# Japanese translation of the static labels of mklm.exe (design m3 D.2).
+# Source strings are the English @tr("…") texts of apps/mklm/ui/*.slint, without a translation
+# context (build.rs: DefaultTranslationContext::None). Update with
+#   slint-tr-extractor --no-default-translation-context -o mklm.pot ui/*.slint ui/screens/*.slint
+# and keep every entry translated: tests/translations.rs fails on a missing or empty msgstr.
+# Texts Rust composes are not here; they are in src/i18n.rs.
+msgid ""
+msgstr ""
+"Project-Id-Version: mklm 0.1.0\n"
+"Language: ja\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "A US keyboard has no 半角/全角 key: turn the IME on and off with Alt+`. To use Ctrl+Space instead: Microsoft IME settings → Keys and touch customization → turn on \"Assign your preferred function to each key/key combination\" → Ctrl + Space: IME on/off."
+msgstr "US 配列のキーボードには「半角/全角」キーがありません。日本語入力のオン/オフは Alt+` です。Ctrl+Space を使うには: Microsoft IME の設定 → キーとタッチのカスタマイズ → 「各キー/キーの組み合わせに好みの機能を割り当てます」をオン → Ctrl + Space: IME-オン/オフ"
+
+msgid "A change is still waiting for you"
+msgstr "確認待ちの変更があります"
+
+msgid "About"
+msgstr "このアプリについて"
+
+msgid "Advanced keyboard settings"
+msgstr "キーボードの詳細設定"
+
+msgid "Apply now…"
+msgstr "今すぐ反映…"
+
+msgid "Apply the choices"
+msgstr "選んだとおりにする"
+
+msgid "Assigned: {}"
+msgstr "設定した配列: {}"
+
+msgid "Back"
+msgstr "戻る"
+
+msgid "Back to before MKLM…"
+msgstr "MKLM 導入前に戻す…"
+
+msgid "Cancel"
+msgstr "キャンセル"
+
+msgid "Change"
+msgstr "変更する"
+
+msgid "Change…"
+msgstr "変更…"
+
+msgid "Check the keyboards after the restart"
+msgstr "再起動後のキーボードを確認してください"
+
+msgid "Checking…"
+msgstr "確認しています…"
+
+msgid "Choose Restart, not Shut down: with Fast Startup a shutdown keeps the keyboard drivers as they were."
+msgstr "「シャットダウン」ではなく「再起動」を選んでください。高速スタートアップが有効だと、シャットダウンではキーボードのドライバーが読み直されません。"
+
+msgid "Click here, then press a key"
+msgstr "ここをクリックしてから、キーを押してください"
+
+msgid "Close"
+msgstr "閉じる"
+
+msgid "Continue to the prompt"
+msgstr "確認画面へ進む"
+
+msgid "Copy details"
+msgstr "詳細をコピー"
+
+msgid "Dark"
+msgstr "ダーク"
+
+msgid "Decide later"
+msgstr "後で決める"
+
+msgid "Delete it (the driver does not read it)"
+msgstr "削除する（ドライバーが読まない値）"
+
+msgid "Do you want to allow this app from an unknown publisher to make changes to your device?"
+msgstr "不明な発行元からのこのアプリがデバイスに変更を加えることを許可しますか?"
+
+msgid "File origin: Hard drive on this computer"
+msgstr "ファイルの入手先: このコンピューター上のハード ドライブ"
+
+msgid "Give me more time to check a new layout (60 seconds)"
+msgstr "確認の時間を長くする（60 秒）"
+
+msgid "History"
+msgstr "履歴"
+
+msgid "How the change takes effect"
+msgstr "切り替え方"
+
+msgid "I know how to sign in if a keyboard types differently"
+msgstr "キーボードの配列が変わってもサインインする方法を確認しました"
+
+msgid "Identify a keyboard by key press"
+msgstr "キーを押してキーボードを特定"
+
+msgid "Identify by key press"
+msgstr "キーを押して特定"
+
+msgid "If you cannot type at the sign-in screen: use the on-screen keyboard (the accessibility button at the bottom right), sign in with your PIN or fingerprint, or plug in another keyboard."
+msgstr "サインイン画面で入力できないときは、スクリーン キーボード（右下のアクセシビリティ ボタン）を使うか、PIN や指紋でサインインするか、別のキーボードをつないでください。"
+
+msgid "If you choose Later, MKLM offers the recovery again; until then no keyboard's layout can be changed."
+msgstr "「後で」を選ぶと、MKLM が後でもう一度回復を案内します。それまで、キーボードの配列は変更できません。"
+
+msgid "If your password contains symbols: when the layout changes, the same keys type other symbols. Sign in with a PIN (digits), or set up a PIN before the restart."
+msgstr "パスワードに記号がある場合、配列が変わると同じキーで別の記号が入力されます。PIN（数字）でサインインするか、再起動の前に PIN を設定してください。"
+
+msgid "Input method"
+msgstr "入力方式"
+
+msgid "Input methods"
+msgstr "入力方式"
+
+msgid "Input methods and the Japanese IME"
+msgstr "入力方式と日本語 IME"
+
+msgid "Keep"
+msgstr "このままにする"
+
+msgid "Keep this layout"
+msgstr "このままにする"
+
+msgid "Key test"
+msgstr "打鍵テスト"
+
+msgid "Keyboard"
+msgstr "キーボード"
+
+msgid "Keyboards"
+msgstr "キーボード"
+
+msgid "Language"
+msgstr "言語"
+
+msgid "Language settings"
+msgstr "言語の設定"
+
+msgid "Later"
+msgstr "後で"
+
+msgid "Layout"
+msgstr "配列"
+
+msgid "Layout of {}"
+msgstr "{} の配列"
+
+msgid "Leave it (recommended)"
+msgstr "そのまま（おすすめ）"
+
+msgid "Licensed under the Apache License 2.0."
+msgstr "Apache License 2.0 で提供しています。"
+
+msgid "Light"
+msgstr "ライト"
+
+msgid "MKLM keeps running inside \"^\" (the hidden icons) at the right end of the taskbar. Click its icon to come back to this window. To end MKLM, right-click the icon and choose Quit."
+msgstr "MKLM はタスク バー右端の「^」（隠れているインジケーター）の中で動き続けます。アイコンをクリックするとこの画面に戻ります。終了するには、アイコンを右クリックして「終了」を選びます。"
+
+msgid "MKLM keeps running on the taskbar"
+msgstr "MKLM はタスク バーで動き続けます"
+
+msgid "MKLM needs your attention"
+msgstr "確認が必要なことがあります"
+
+msgid "MKLM's administrator program (mklm-helper.exe) stopped before it finished. To finish or undo the change now, Windows asks for administrator permission once more (the publisher shows as \"Unknown\")."
+msgstr "MKLM の管理用プログラム（mklm-helper.exe）が途中で止まりました。今すぐ回復するには、Windows がもう一度管理者の許可を求めます（発行元は「不明」と表示されます）。"
+
+msgid "MKLM's administrator program (mklm-helper.exe) stopped while you were trying the new layout. To put the keyboard back now, Windows asks for administrator permission once more (the publisher shows as \"Unknown\")."
+msgstr "新しい配列を試している間に、MKLM の管理用プログラム（mklm-helper.exe）が止まりました。キーボードを今すぐ元に戻すには、Windows がもう一度管理者の許可を求めます（発行元は「不明」と表示されます）。"
+
+msgid "MKLM's administrator program stopped"
+msgstr "MKLM の管理用プログラムが止まりました"
+
+msgid "Microsoft IME settings"
+msgstr "Microsoft IME の設定"
+
+msgid "Mode"
+msgstr "モード"
+
+msgid "Multi Keyboard Layout Manager"
+msgstr "Multi Keyboard Layout Manager"
+
+msgid "Navigation"
+msgstr "ナビゲーション"
+
+msgid "Next"
+msgstr "次へ"
+
+msgid "Not in effect yet: the PC has not restarted since the change. Restart it with Restart, not Shut down."
+msgstr "まだ反映されていません。変更の後に PC が再起動されていません。「シャットダウン」ではなく「再起動」してください。"
+
+msgid "Not sure? Press the key left of Backspace on that keyboard:"
+msgstr "わからないときは、そのキーボードで Backspace の左のキーを押してください:"
+
+msgid "Nothing is changed if you choose No."
+msgstr "「いいえ」を選んだ場合は、何も変更しません。"
+
+msgid "Now"
+msgstr "今の状態"
+
+msgid "OK"
+msgstr "OK"
+
+msgid "On an account that is not an administrator, Windows asks for an administrator's password or PIN instead."
+msgstr "管理者でないアカウントでは、「はい」の代わりに管理者のパスワードか PIN の入力を求められます。"
+
+msgid "Open the recovery files folder"
+msgstr "復旧用ファイルのフォルダーを開く"
+
+msgid "Open the sign-in options"
+msgstr "サインイン オプションを開く"
+
+msgid "Open the taskbar settings"
+msgstr "タスク バーの設定を開く"
+
+msgid "Per-keyboard layouts work only while the Japanese IME is the active input method. To type English, turn the IME off (Alt+` or the 半角/全角 key) instead of switching to English (US): while English (US) is active, every keyboard types US."
+msgstr "キーボードごとの配列は、日本語 IME を使っている間だけ有効です。英語を打つときは、英語 (US) に切り替えずに IME をオフにしてください（Alt+` か「半角/全角」キー）。英語 (US) に切り替えると、すべてのキーボードが US 配列になります。"
+
+msgid "Press a key on the keyboard you want to find. Its row is marked \"◀ Just pressed\". Esc stops."
+msgstr "探したいキーボードでキーを押してください。その行に「◀ いま押したキーボード」と表示されます。Esc でやめます。"
+
+msgid "Put every keyboard back to before MKLM…"
+msgstr "すべてのキーボードを MKLM 導入前に戻す…"
+
+msgid "Put it back now"
+msgstr "今すぐ元に戻す"
+
+msgid "Quit"
+msgstr "終了"
+
+msgid "Quit MKLM"
+msgstr "MKLM を終了"
+
+msgid "Quit and decide later"
+msgstr "終了して後で決める"
+
+msgid "Recover (recommended)"
+msgstr "回復する（おすすめ）"
+
+msgid "Refresh"
+msgstr "最新の情報に更新"
+
+msgid "Region (copy settings)"
+msgstr "地域（設定のコピー）"
+
+msgid "Restart now"
+msgstr "今すぐ再起動"
+
+msgid "Restart the PC to finish"
+msgstr "PC を再起動して完了してください"
+
+msgid "Revert"
+msgstr "元に戻す"
+
+msgid "Revert and quit"
+msgstr "元に戻して終了"
+
+msgid "Reverting automatically in {} s"
+msgstr "あと {} 秒で自動的に元に戻します"
+
+msgid "Revert…"
+msgstr "元に戻す…"
+
+msgid "Run the setup again…"
+msgstr "初回セットアップをもう一度行う…"
+
+msgid "Save your open files before you choose Restart now."
+msgstr "「今すぐ再起動」を押す前に、開いているファイルを保存してください。"
+
+msgid "Seconds left: {}"
+msgstr "残り {} 秒"
+
+msgid "Set up MKLM"
+msgstr "MKLM のセットアップ"
+
+msgid "Set up later"
+msgstr "後でセットアップする"
+
+msgid "Setting"
+msgstr "設定"
+
+msgid "Settings"
+msgstr "設定"
+
+msgid "Show MKLM"
+msgstr "MKLM を表示"
+
+msgid "Show hidden and disconnected keyboards"
+msgstr "非表示と未接続のキーボードも表示する"
+
+msgid "Show the details"
+msgstr "詳細を表示する"
+
+msgid "Show the technical details"
+msgstr "技術的な詳細を表示する"
+
+msgid "Sign-in screen"
+msgstr "サインイン画面"
+
+msgid "Some keyboard settings changed outside MKLM"
+msgstr "MKLM 以外がキーボードの設定を変更しました"
+
+msgid "Standard layout"
+msgstr "標準配列"
+
+msgid "Start MKLM on the taskbar (inside \"^\") when I sign in"
+msgstr "サインイン時に MKLM をタスク バー（「^」の中）で起動する"
+
+msgid "Start again"
+msgstr "やり直す"
+
+msgid "Stop identifying"
+msgstr "特定をやめる"
+
+msgid "Stored value on {}"
+msgstr "{} に保存されている値"
+
+msgid "System"
+msgstr "システム"
+
+msgid "The PC's standard layout"
+msgstr "PC の標準配列"
+
+msgid "The PC's standard layout:"
+msgstr "PC の標準配列:"
+
+msgid "The next screen asks \"Do you want to allow this app from an unknown publisher to make changes to your device?\". MKLM is not code-signed yet, so the verified publisher shows as \"Unknown\". Check that mklm-helper.exe is shown in the middle of the screen, then choose Yes."
+msgstr "次の画面に「不明な発行元からのこのアプリがデバイスに変更を加えることを許可しますか?」と表示されます。MKLM はまだコード署名をしていないため、確認済みの発行元が「不明」になります。画面の中ほどに「mklm-helper.exe」と表示されていることを確かめてから「はい」を押してください。"
+
+msgid "Theme"
+msgstr "テーマ"
+
+msgid "Typed"
+msgstr "打鍵"
+
+msgid "Undo every change waiting for you…"
+msgstr "確認待ちの変更をすべて元に戻す…"
+
+msgid "Undo the change…"
+msgstr "変更を元に戻す…"
+
+msgid "Uninstalling MKLM restores the keyboards: off"
+msgstr "アンインストール時にキーボードの設定を元に戻す: オフ"
+
+msgid "Uninstalling MKLM restores the keyboards: on"
+msgstr "アンインストール時にキーボードの設定を元に戻す: オン"
+
+msgid "Until the PC restarts, no keyboard's layout can be changed."
+msgstr "再起動するまで、ほかのキーボードの配列も変更できません。"
+
+msgid "Until you decide, no keyboard's layout can be changed."
+msgstr "決めるまで、ほかのキーボードの配列も変更できません。"
+
+msgid "Until you recover, no keyboard's layout can be changed."
+msgstr "回復するまで、キーボードの配列は変更できません。"
+
+msgid "User Account Control"
+msgstr "ユーザー アカウント制御"
+
+msgid "Verified publisher: Unknown"
+msgstr "確認済みの発行元: 不明"
+
+msgid "What the Windows prompt looks like"
+msgstr "Windows の確認画面の例"
+
+msgid "What {} becomes"
+msgstr "{} をどうするか"
+
+msgid "Windows asks for administrator permission next"
+msgstr "次に、Windows が管理者の許可を求めます"
+
+msgid "Windows reports"
+msgstr "Windows の認識"
+
+msgid "[Yes] [No]"
+msgstr "［はい］［いいえ］"

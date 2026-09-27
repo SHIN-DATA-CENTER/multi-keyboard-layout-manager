@@ -1,0 +1,624 @@
+// MKLM GUI (milestone M3; docs/design/m3-gui.md). One window: a navigation rail, the page
+// (Screen) and at most one overlay (Overlay). Rust (src/app.rs) owns all state and fills the
+// view-model properties; this file only lays them out and raises callbacks.
+
+import { Button, Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import {
+    BadgeVm, ChangeVm, ChoiceVm, CheckRowVm, ConflictKeyboardVm, CountdownVm, JournalRowVm,
+    KeyboardRowVm, KeyTestVm, Overlay, PlanLineVm, ProgressVm, ReconnectVm, RecoveryItemVm,
+    ResultVm, Screen, StatusVm, Tone, WizardKeyboardVm,
+} from "structs.slint";
+import { MainScreen } from "screens/main.slint";
+import { WizardScreen } from "screens/wizard.slint";
+import { ChangeScreen, UacNoticeScreen } from "screens/change.slint";
+import {
+    CloseNoticeDialog, CountdownDialog, ProgressDialog, QuitConfirmDialog, ReconnectDialog,
+    RecoveryConfirmDialog, ResultDialog,
+} from "screens/session.slint";
+import { PostRebootScreen, RestartScreen } from "screens/restart.slint";
+import {
+    AboutScreen, ConflictScreen, ImeHelpScreen, JournalScreen, RecoveryScreen, SettingsScreen,
+} from "screens/other.slint";
+
+export { Theme, Screen, Overlay, Tone }
+
+// One entry of the navigation rail (design m3 B.0, E.1).
+component NavItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback activated();
+    min-height: max(36px, label.preferred-height + 12px);
+    border-radius: 6px;
+    background: selected ? Theme.accent : transparent;
+    border-width: fs.has-focus ? Theme.focus-width : 0px;
+    border-color: Theme.focus-ring;
+    opacity: enabled ? 1 : 0.5;
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        accessible-role: AccessibleRole.tab;
+        accessible-label: root.text;
+        accessible-item-selected: root.selected;
+        accessible-action-default => {
+            root.activated();
+        }
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " ") {
+                root.activated();
+                return accept;
+            }
+            reject
+        }
+        TouchArea {
+            enabled: root.enabled;
+            clicked => {
+                root.activated();
+            }
+        }
+
+        label := Text {
+            x: 12px;
+            width: parent.width - 16px;
+            text: root.text;
+            font-size: Theme.font-body;
+            color: root.selected ? Theme.accent-text : Theme.text;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: @tr("Multi Keyboard Layout Manager");
+    default-font-family: Theme.font-family;
+    default-font-size: Theme.font-body;
+    preferred-width: 960px;
+    preferred-height: 680px;
+    // Fits the work area at 200 % on 1920×1080 and at 150 % on 1366×768 (review U11).
+    min-width: 560px;
+    min-height: 400px;
+    background: Theme.window-background;
+    in property <image> app-icon;
+    icon: app-icon;
+
+    // Palette.color-scheme is always set explicitly (never Unknown), plan 3.7 / M0 #8.
+    public function apply-color-scheme(dark: bool) {
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+        Theme.dark = dark;
+    }
+
+    in-out property <Screen> screen: Screen.main;
+    in-out property <Overlay> overlay: Overlay.none;
+    // Navigation is off while a wizard, a change, a check or a session runs (design m3 B.0).
+    in property <bool> navigation-enabled: true;
+    callback navigate(Screen);
+
+    // --- Main (B.2) ---
+    in property <StatusVm> status;
+    in property <[KeyboardRowVm]> keyboards;
+    in property <bool> identify-active;
+    in property <string> identify-announcement;
+    in-out property <bool> show-hidden;
+    callback assign(string);
+    callback apply-now(string);
+    callback toggle-identify();
+    callback banner-action();
+    callback refresh();
+
+    // --- Wizard (B.1) ---
+    in property <int> wizard-step;
+    in property <string> wizard-heading;
+    in property <string> wizard-body;
+    in property <[string]> wizard-warnings;
+    in property <[WizardKeyboardVm]> wizard-keyboards;
+    in property <bool> wizard-standard-visible;
+    in-out property <int> wizard-standard-index;
+    in property <bool> wizard-can-next: true;
+    in property <string> wizard-next-text;
+    callback wizard-back();
+    callback wizard-next();
+    callback wizard-skip();
+    callback wizard-keyboard-choice(int, int);
+    callback wizard-problem-choice(int, int);
+
+    // --- The change page (B.3 to B.5) ---
+    in property <string> change-keyboard-name;
+    in property <[ChoiceVm]> change-choices;
+    in-out property <int> change-selected: -1;
+    in-out property <int> change-method: -1;
+    in property <ChangeVm> change;
+    callback change-choose(int);
+    callback change-choose-method(int);
+    callback change-restart-detection();
+    callback change-apply();
+    callback restore-baseline();
+    callback uac-go();
+    callback cancel-change();
+
+    // --- Key test, shared by the change page, countdown, reconnect and the post-reboot check ---
+    in property <KeyTestVm> key-test;
+    callback key-pressed(string, bool);
+
+    // --- Session overlays (B.6, B.7, B.16, B.17, A.2.3) ---
+    in property <ProgressVm> progress;
+    in property <CountdownVm> countdown;
+    in property <ReconnectVm> reconnect;
+    in property <ResultVm> result;
+    in property <bool> recovery-after-countdown;
+    in property <string> quit-message;
+    callback keep();
+    callback revert();
+    callback decide-later();
+    callback result-closed();
+    callback result-next-step();
+    callback copy-details();
+    callback recover-after-loss(bool);
+    callback close-notice-ok();
+    callback close-notice-quit();
+    callback quit-requested();
+    callback quit-revert();
+    callback quit-leave();
+    callback quit-cancel();
+
+    // --- Restart and the post-reboot check (B.8, B.9) ---
+    in property <[string]> restart-reasons;
+    in property <bool> restart-ready;
+    in property <bool> restart-layout-changes;
+    callback restart-now();
+    callback restart-later();
+    callback undo-open();
+    in property <string> post-reboot-operation;
+    in property <bool> post-reboot-not-restarted;
+    in property <[CheckRowVm]> post-reboot-rows;
+    in property <string> post-reboot-migration-note;
+    in property <string> post-reboot-keep-warning;
+    in property <string> post-reboot-revert-text;
+    callback post-reboot-keep();
+    callback post-reboot-revert();
+    callback post-reboot-later();
+
+    // --- Conflict, history, recovery (B.10 to B.12) ---
+    in property <string> conflict-operation;
+    in property <[ConflictKeyboardVm]> conflict-keyboards;
+    in property <string> conflict-error;
+    callback conflict-choice(int, int);
+    callback conflict-resolve();
+    in property <[JournalRowVm]> journal-rows;
+    in property <string> journal-empty;
+    callback journal-revert(string);
+    callback open-recovery-folder();
+    in property <[RecoveryItemVm]> recovery-items;
+    in property <bool> recovery-can-recover;
+    in property <bool> recovery-can-undo;
+    callback recover();
+    callback recovery-later();
+
+    // --- Guide, settings, About (B.13 to B.15) ---
+    callback open-settings-page(int);
+    in-out property <int> settings-theme-index: 2;
+    in-out property <int> settings-language-index: 2;
+    in-out property <bool> settings-autostart;
+    in property <string> settings-autostart-note;
+    in-out property <bool> settings-long-countdown;
+    in property <bool> settings-restore-on-uninstall: true;
+    in property <string> settings-restore-note;
+    callback theme-selected(int);
+    callback language-selected(int);
+    callback autostart-toggled(bool);
+    callback long-countdown-toggled(bool);
+    callback change-restore-on-uninstall();
+    callback restore-all();
+    callback run-wizard();
+    in property <string> about-version;
+    in property <string> about-licences;
+
+    HorizontalLayout {
+        // The navigation rail (design m3 B.0): 160 px when the window is narrow (large scale), up
+        // to 200 px; the page takes most of any extra width.
+        Rectangle {
+            min-width: 160px;
+            max-width: 200px;
+            horizontal-stretch: 0.1;
+            background: Theme.surface;
+            accessible-role: AccessibleRole.tab-list;
+            accessible-label: @tr("Navigation");
+
+            VerticalLayout {
+                padding: 8px;
+                spacing: 4px;
+                alignment: start;
+                NavItem {
+                    text: @tr("Keyboards");
+                    selected: root.screen == Screen.main;
+                    enabled: root.navigation-enabled;
+                    activated => {
+                        root.navigate(Screen.main);
+                    }
+                }
+
+                NavItem {
+                    text: @tr("History");
+                    selected: root.screen == Screen.journal;
+                    enabled: root.navigation-enabled;
+                    activated => {
+                        root.navigate(Screen.journal);
+                    }
+                }
+
+                NavItem {
+                    text: @tr("Input methods");
+                    selected: root.screen == Screen.ime-help;
+                    enabled: root.navigation-enabled;
+                    activated => {
+                        root.navigate(Screen.ime-help);
+                    }
+                }
+
+                NavItem {
+                    text: @tr("Settings");
+                    selected: root.screen == Screen.settings;
+                    enabled: root.navigation-enabled;
+                    activated => {
+                        root.navigate(Screen.settings);
+                    }
+                }
+
+                NavItem {
+                    text: @tr("About");
+                    selected: root.screen == Screen.about;
+                    enabled: root.navigation-enabled;
+                    activated => {
+                        root.navigate(Screen.about);
+                    }
+                }
+            }
+        }
+
+        // The page.
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: 400px;
+            accessible-role: AccessibleRole.main;
+
+            if root.screen == Screen.main: MainScreen {
+                status: root.status;
+                keyboards: root.keyboards;
+                identify-active: root.identify-active;
+                identify-announcement: root.identify-announcement;
+                show-hidden <=> root.show-hidden;
+                assign(id) => {
+                    root.assign(id);
+                }
+                apply-now(id) => {
+                    root.apply-now(id);
+                }
+                toggle-identify => {
+                    root.toggle-identify();
+                }
+                banner-action => {
+                    root.banner-action();
+                }
+                refresh => {
+                    root.refresh();
+                }
+            }
+            if root.screen == Screen.wizard: WizardScreen {
+                step: root.wizard-step;
+                heading: root.wizard-heading;
+                body: root.wizard-body;
+                warnings: root.wizard-warnings;
+                keyboards: root.wizard-keyboards;
+                key-test: root.key-test;
+                standard-visible: root.wizard-standard-visible;
+                standard-index <=> root.wizard-standard-index;
+                can-next: root.wizard-can-next;
+                next-text: root.wizard-next-text;
+                back => {
+                    root.wizard-back();
+                }
+                next => {
+                    root.wizard-next();
+                }
+                skip => {
+                    root.wizard-skip();
+                }
+                open-settings-page(page) => {
+                    root.open-settings-page(page);
+                }
+                keyboard-choice(row, choice) => {
+                    root.wizard-keyboard-choice(row, choice);
+                }
+                problem-choice(row, choice) => {
+                    root.wizard-problem-choice(row, choice);
+                }
+                key-pressed(text, shift) => {
+                    root.key-pressed(text, shift);
+                }
+            }
+            if root.screen == Screen.change: ChangeScreen {
+                keyboard-name: root.change-keyboard-name;
+                choices: root.change-choices;
+                selected <=> root.change-selected;
+                method <=> root.change-method;
+                vm: root.change;
+                key-test: root.key-test;
+                choose(index) => {
+                    root.change-choose(index);
+                }
+                choose-method(index) => {
+                    root.change-choose-method(index);
+                }
+                key-pressed(text, shift) => {
+                    root.key-pressed(text, shift);
+                }
+                restart-detection => {
+                    root.change-restart-detection();
+                }
+                restore-baseline => {
+                    root.restore-baseline();
+                }
+                apply => {
+                    root.change-apply();
+                }
+                cancel => {
+                    root.cancel-change();
+                }
+            }
+            if root.screen == Screen.uac-notice: UacNoticeScreen {
+                go => {
+                    root.uac-go();
+                }
+                cancel => {
+                    root.cancel-change();
+                }
+            }
+            if root.screen == Screen.restart: RestartScreen {
+                reasons: root.restart-reasons;
+                ready: root.restart-ready;
+                layout-changes: root.restart-layout-changes;
+                restart-now => {
+                    root.restart-now();
+                }
+                later => {
+                    root.restart-later();
+                }
+                undo => {
+                    root.undo-open();
+                }
+                open-settings-page(page) => {
+                    root.open-settings-page(page);
+                }
+            }
+            if root.screen == Screen.post-reboot: PostRebootScreen {
+                operation: root.post-reboot-operation;
+                not-restarted: root.post-reboot-not-restarted;
+                rows: root.post-reboot-rows;
+                migration-note: root.post-reboot-migration-note;
+                keep-warning: root.post-reboot-keep-warning;
+                revert-text: root.post-reboot-revert-text;
+                key-test: root.key-test;
+                key-pressed(text, shift) => {
+                    root.key-pressed(text, shift);
+                }
+                keep => {
+                    root.post-reboot-keep();
+                }
+                revert => {
+                    root.post-reboot-revert();
+                }
+                later => {
+                    root.post-reboot-later();
+                }
+            }
+            if root.screen == Screen.conflict: ConflictScreen {
+                operation: root.conflict-operation;
+                keyboards: root.conflict-keyboards;
+                error: root.conflict-error;
+                choice(row, choice) => {
+                    root.conflict-choice(row, choice);
+                }
+                resolve => {
+                    root.conflict-resolve();
+                }
+                undo => {
+                    root.undo-open();
+                }
+                cancel => {
+                    root.navigate(Screen.main);
+                }
+            }
+            if root.screen == Screen.journal: JournalScreen {
+                rows: root.journal-rows;
+                empty-text: root.journal-empty;
+                revert(op) => {
+                    root.journal-revert(op);
+                }
+                open-recovery-folder => {
+                    root.open-recovery-folder();
+                }
+            }
+            if root.screen == Screen.recovery: RecoveryScreen {
+                items: root.recovery-items;
+                can-recover: root.recovery-can-recover;
+                can-undo: root.recovery-can-undo;
+                recover => {
+                    root.recover();
+                }
+                undo => {
+                    root.undo-open();
+                }
+                later => {
+                    root.recovery-later();
+                }
+            }
+            if root.screen == Screen.ime-help: ImeHelpScreen {
+                open-settings-page(page) => {
+                    root.open-settings-page(page);
+                }
+            }
+            if root.screen == Screen.settings: SettingsScreen {
+                theme-index <=> root.settings-theme-index;
+                language-index <=> root.settings-language-index;
+                autostart <=> root.settings-autostart;
+                autostart-note: root.settings-autostart-note;
+                long-countdown <=> root.settings-long-countdown;
+                restore-on-uninstall: root.settings-restore-on-uninstall;
+                restore-note: root.settings-restore-note;
+                theme-selected(index) => {
+                    root.theme-selected(index);
+                }
+                language-selected(index) => {
+                    root.language-selected(index);
+                }
+                autostart-toggled(on) => {
+                    root.autostart-toggled(on);
+                }
+                long-countdown-toggled(on) => {
+                    root.long-countdown-toggled(on);
+                }
+                change-restore-on-uninstall => {
+                    root.change-restore-on-uninstall();
+                }
+                restore-all => {
+                    root.restore-all();
+                }
+                run-wizard => {
+                    root.run-wizard();
+                }
+            }
+            if root.screen == Screen.about: AboutScreen {
+                version: root.about-version;
+                licences: root.about-licences;
+            }
+        }
+    }
+
+    // Overlays (one at a time) above the page.
+    if root.overlay == Overlay.progress: ProgressDialog {
+        vm: root.progress;
+    }
+    if root.overlay == Overlay.countdown: CountdownDialog {
+        vm: root.countdown;
+        key-test: root.key-test;
+        key-pressed(text, shift) => {
+            root.key-pressed(text, shift);
+        }
+        keep => {
+            root.keep();
+        }
+        revert => {
+            root.revert();
+        }
+    }
+    if root.overlay == Overlay.reconnect: ReconnectDialog {
+        vm: root.reconnect;
+        key-test: root.key-test;
+        key-pressed(text, shift) => {
+            root.key-pressed(text, shift);
+        }
+        keep => {
+            root.keep();
+        }
+        revert => {
+            root.revert();
+        }
+        later => {
+            root.decide-later();
+        }
+    }
+    if root.overlay == Overlay.result: ResultDialog {
+        vm: root.result;
+        close => {
+            root.result-closed();
+        }
+        next-step => {
+            root.result-next-step();
+        }
+        copy-details => {
+            root.copy-details();
+        }
+    }
+    if root.overlay == Overlay.recovery-confirm: RecoveryConfirmDialog {
+        countdown: root.recovery-after-countdown;
+        answer(yes) => {
+            root.recover-after-loss(yes);
+        }
+    }
+    if root.overlay == Overlay.close-notice: CloseNoticeDialog {
+        to-tray => {
+            root.close-notice-ok();
+        }
+        quit => {
+            root.close-notice-quit();
+        }
+        taskbar-settings => {
+            root.open-settings-page(4);
+        }
+    }
+    if root.overlay == Overlay.quit-confirm: QuitConfirmDialog {
+        message: root.quit-message;
+        revert-and-quit => {
+            root.quit-revert();
+        }
+        quit-leaving-it => {
+            root.quit-leave();
+        }
+        cancel => {
+            root.quit-cancel();
+        }
+    }
+}
+
+// The notification-area icon (plan 3.9). Slint's builtin `clicked` and `icon` are not exposed to
+// Rust, so they are forwarded (M0 #8, prototype README 9). Recreated on TaskbarCreated
+// (src/tray.rs), because Slint 1.18.1 does not re-add it after explorer restarts.
+export component TrayIcon inherits SystemTrayIcon {
+    in property <image> tray-image;
+    in property <string> tray-tooltip: "MKLM";
+    in property <bool> can-undo;
+    icon: tray-image;
+    tooltip: tray-tooltip;
+    callback show-window();
+    callback identify();
+    callback undo-open();
+    callback quit-app();
+    callback icon-clicked();
+    clicked => {
+        root.icon-clicked();
+    }
+
+    Menu {
+        MenuItem {
+            title: @tr("Show MKLM");
+            activated => {
+                root.show-window();
+            }
+        }
+
+        MenuItem {
+            title: @tr("Identify a keyboard by key press");
+            activated => {
+                root.identify();
+            }
+        }
+
+        MenuItem {
+            title: @tr("Undo every change waiting for you…");
+            enabled: root.can-undo;
+            activated => {
+                root.undo-open();
+            }
+        }
+
+        MenuSeparator { }
+
+        MenuItem {
+            title: @tr("Quit");
+            activated => {
+                root.quit-app();
+            }
+        }
+    }
+}

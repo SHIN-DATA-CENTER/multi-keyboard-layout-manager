@@ -1,0 +1,419 @@
+// The remaining pages (design m3 B.10 to B.15): conflict resolution, history, the recovery
+// prompt, the IME guide, settings and About.
+
+import { AboutSlint, Button, CheckBox, ComboBox, ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { ConflictKeyboardVm, JournalRowVm, RecoveryItemVm, Tone } from "../structs.slint";
+import {
+    Banner, Body, Caption, DialogBody, DialogButtons, PageHeader, StubNotice,
+} from "../widgets.slint";
+
+// Decide what each keyboard of an operation in conflict becomes (design m2 D.8; review U6): one
+// row per keyboard, options by layout name, the recommended one marked; the per-value numbers are
+// folded under "詳細".
+export component ConflictScreen inherits VerticalLayout {
+    in property <string> operation;
+    in property <[ConflictKeyboardVm]> keyboards;
+    in property <string> error;
+    in-out property <bool> show-details: false;
+    callback choice(int, int);
+    callback resolve();
+    callback undo();
+    callback cancel();
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: @tr("Some keyboard settings changed outside MKLM");
+        subtitle: root.operation;
+    }
+
+    DialogBody {
+        if root.error != "": Banner {
+            text: root.error;
+            tone: Tone.danger;
+        }
+        for keyboard[index] in root.keyboards: VerticalLayout {
+            spacing: 2px;
+            Body {
+                text: keyboard.name;
+                font-weight: 600;
+            }
+
+            Caption {
+                text: keyboard.now;
+            }
+
+            ComboBox {
+                model: keyboard.options;
+                current-index: keyboard.selected;
+                accessible-label: @tr("What {} becomes", keyboard.name);
+                selected => {
+                    root.choice(index, self.current-index);
+                }
+            }
+
+            if root.show-details: Caption {
+                text: keyboard.details;
+            }
+        }
+        CheckBox {
+            text: @tr("Show the details");
+            checked <=> root.show-details;
+        }
+    }
+
+    DialogButtons {
+        alignment: stretch;
+        Button {
+            text: @tr("Undo every change waiting for you…");
+            clicked => {
+                root.undo();
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        Button {
+            text: @tr("Cancel");
+            clicked => {
+                root.cancel();
+            }
+        }
+
+        Button {
+            text: @tr("Apply the choices");
+            primary: true;
+            clicked => {
+                root.resolve();
+            }
+        }
+    }
+}
+
+// The journal, read-only, in local time (design m3 B.11, G.1).
+export component JournalScreen inherits VerticalLayout {
+    in property <[JournalRowVm]> rows;
+    in property <string> empty-text;
+    callback revert(string);
+    callback open-recovery-folder();
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: @tr("History");
+    }
+
+    if root.rows.length == 0: Caption {
+        text: root.empty-text;
+    }
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            spacing: 6px;
+            alignment: start;
+            for row in root.rows: HorizontalLayout {
+                spacing: 8px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Body {
+                        text: row.when + "  " + row.what;
+                    }
+
+                    Text {
+                        text: row.state + (row.reason != "" ? " — " + row.reason : "");
+                        font-size: Theme.font-body;
+                        color: Theme.tone-text(row.tone);
+                        wrap: word-wrap;
+                    }
+
+                    Caption {
+                        text: row.op;
+                    }
+                }
+
+                if row.can-revert: Button {
+                    text: @tr("Revert…");
+                    accessible-label: row.revert-label;
+                    clicked => {
+                        root.revert(row.op);
+                    }
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        alignment: start;
+        Button {
+            text: @tr("Open the recovery files folder");
+            clicked => {
+                root.open-recovery-folder();
+            }
+        }
+    }
+}
+
+// What the journal needs at start-up (design m2 D.7, m3 B.12; review U9): each entry with what
+// recovering will do to it; one primary button.
+export component RecoveryScreen inherits VerticalLayout {
+    in property <[RecoveryItemVm]> items;
+    in property <bool> can-recover;
+    in property <bool> can-undo;
+    callback recover();
+    callback undo();
+    callback later();
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: @tr("MKLM needs your attention");
+    }
+
+    DialogBody {
+        for item in root.items: VerticalLayout {
+            spacing: 2px;
+            Body {
+                text: item.operation;
+                font-weight: 600;
+            }
+
+            Banner {
+                text: item.outcome;
+                tone: item.tone;
+            }
+        }
+        Caption {
+            text: @tr("Until you recover, no keyboard's layout can be changed.");
+        }
+    }
+
+    DialogButtons {
+        Button {
+            text: @tr("Later");
+            clicked => {
+                root.later();
+            }
+        }
+
+        if root.can-undo: Button {
+            text: @tr("Undo every change waiting for you…");
+            clicked => {
+                root.undo();
+            }
+        }
+        if root.can-recover: Button {
+            text: @tr("Recover (recommended)");
+            primary: true;
+            clicked => {
+                root.recover();
+            }
+        }
+    }
+}
+
+// How to use per-keyboard layouts with the Japanese IME (plan 3.10): guidance and deep links
+// only; MKLM writes no IME setting.
+export component ImeHelpScreen inherits VerticalLayout {
+    callback open-settings-page(int);
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: @tr("Input methods and the Japanese IME");
+    }
+
+    DialogBody {
+        Body {
+            text: @tr("Per-keyboard layouts work only while the Japanese IME is the active input method. To type English, turn the IME off (Alt+` or the 半角/全角 key) instead of switching to English (US): while English (US) is active, every keyboard types US.");
+        }
+
+        Body {
+            text: @tr("A US keyboard has no 半角/全角 key: turn the IME on and off with Alt+`. To use Ctrl+Space instead: Microsoft IME settings → Keys and touch customization → turn on \"Assign your preferred function to each key/key combination\" → Ctrl + Space: IME on/off.");
+        }
+    }
+
+    DialogButtons {
+        alignment: start;
+        Button {
+            text: @tr("Language settings");
+            clicked => {
+                root.open-settings-page(0);
+            }
+        }
+
+        Button {
+            text: @tr("Advanced keyboard settings");
+            clicked => {
+                root.open-settings-page(1);
+            }
+        }
+
+        Button {
+            text: @tr("Microsoft IME settings");
+            clicked => {
+                root.open-settings-page(2);
+            }
+        }
+    }
+}
+
+export component SettingsScreen inherits VerticalLayout {
+    // 0 = light, 1 = dark, 2 = system.
+    in-out property <int> theme-index;
+    // 0 = Japanese, 1 = English, 2 = system.
+    in-out property <int> language-index;
+    in-out property <bool> autostart;
+    in property <string> autostart-note;
+    // "確認の時間を長くする（60 秒）" (review U10).
+    in-out property <bool> long-countdown;
+    in property <bool> restore-on-uninstall: true;
+    in property <string> restore-note;
+    callback theme-selected(int);
+    callback language-selected(int);
+    callback autostart-toggled(bool);
+    callback long-countdown-toggled(bool);
+    callback change-restore-on-uninstall();
+    callback restore-all();
+    callback run-wizard();
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: @tr("Settings");
+    }
+
+    DialogBody {
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Body {
+                text: @tr("Theme");
+                vertical-alignment: center;
+            }
+
+            ComboBox {
+                model: [@tr("Light"), @tr("Dark"), @tr("System")];
+                current-index <=> root.theme-index;
+                accessible-label: @tr("Theme");
+                selected => {
+                    root.theme-selected(self.current-index);
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Body {
+                text: @tr("Language");
+                vertical-alignment: center;
+            }
+
+            ComboBox {
+                model: ["日本語", "English", @tr("System")];
+                current-index <=> root.language-index;
+                accessible-label: @tr("Language");
+                selected => {
+                    root.language-selected(self.current-index);
+                }
+            }
+        }
+
+        CheckBox {
+            text: @tr("Start MKLM on the taskbar (inside \"^\") when I sign in");
+            checked <=> root.autostart;
+            toggled => {
+                root.autostart-toggled(self.checked);
+            }
+        }
+
+        if root.autostart-note != "": Caption {
+            text: root.autostart-note;
+        }
+        CheckBox {
+            text: @tr("Give me more time to check a new layout (60 seconds)");
+            checked <=> root.long-countdown;
+            toggled => {
+                root.long-countdown-toggled(self.checked);
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Body {
+                text: root.restore-on-uninstall ? @tr("Uninstalling MKLM restores the keyboards: on") : @tr("Uninstalling MKLM restores the keyboards: off");
+                vertical-alignment: center;
+            }
+
+            Button {
+                text: @tr("Change…");
+                clicked => {
+                    root.change-restore-on-uninstall();
+                }
+            }
+        }
+
+        Caption {
+            text: root.restore-note;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Button {
+                text: @tr("Run the setup again…");
+                clicked => {
+                    root.run-wizard();
+                }
+            }
+
+            Button {
+                text: @tr("Put every keyboard back to before MKLM…");
+                clicked => {
+                    root.restore-all();
+                }
+            }
+        }
+    }
+}
+
+export component AboutScreen inherits VerticalLayout {
+    in property <string> version;
+    in property <string> licences;
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: "Multi Keyboard Layout Manager";
+        subtitle: root.version;
+    }
+
+    Body {
+        text: "© 2026 SHIN DATA CENTER";
+    }
+
+    Caption {
+        text: @tr("Licensed under the Apache License 2.0.");
+    }
+
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            Caption {
+                text: root.licences;
+            }
+
+            StubNotice {
+                package: "WP-U7";
+            }
+        }
+    }
+
+    AboutSlint {
+        height: 200px;
+    }
+}

@@ -18,6 +18,7 @@ mklm-core.workspace = true
 mklm-win.workspace = true
 mklm-ipc.workspace = true
 mklm-engine.workspace = true
+mklm-client.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

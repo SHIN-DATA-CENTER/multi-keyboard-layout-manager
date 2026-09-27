@@ -1,29 +1,14 @@
 //! Decisions the CLI takes from the journal alone, unelevated (design C.7 `attention`, D.7, F.2,
-//! F.4): whether a command can start, whether the post-reboot check must be registered, and which
-//! entries `reboot`, `post-reboot` and `keep` deal with.
+//! F.4). The rules are `mklm_client::gate` (shared with the GUI, design m3 A.2); this module turns
+//! a typed [`BlockReason`] into the CLI's message and exit code.
 
-use mklm_core::{
-    Attention, BootId, Journal, JournalEntry, Liveness, OpState, PendingAction, ProcessIdentity,
-    attention,
-};
+use mklm_client::gate::{self, BlockReason};
+use mklm_core::{BootId, Journal, Liveness, ProcessIdentity};
 
-use super::exit_code;
+pub use mklm_client::gate::{Gate, post_reboot_entries, restart_reasons, takes_effect_at_restart};
+
+use super::outcome::class_exit_code;
 use super::render::kind_text;
-
-/// What a command needs from the journal before it launches the helper (the engine checks the
-/// same under the lock, design D.1 step 3; checking first saves a UAC prompt that could only end
-/// in a refusal).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Gate {
-    /// `set`, `migrate`: no open entry at all.
-    NewOp,
-    /// `restore --baseline`: open entries that are not in flight are superseded.
-    Restore,
-    /// `revert`, `keep`, `resolve`: interrupted entries must be recovered first.
-    Existing,
-    /// `recover`, `undo`: they recover interrupted entries themselves.
-    Recover,
-}
 
 /// Why a command cannot start now.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,147 +25,62 @@ pub fn blocker(
     liveness: &dyn Fn(&ProcessIdentity) -> Liveness,
     gate: Gate,
 ) -> Option<Blocker> {
-    if let Some(bad) = journal.unreadable.first() {
-        return Some(Blocker {
-            exit_code: exit_code::FAILURE,
-            message: format!(
-                "the journal has {} entr{} this MKLM cannot read ({}: {}); nothing may be \
-                 written until MKLM is updated",
-                journal.unreadable.len(),
-                if journal.unreadable.len() == 1 {
-                    "y"
-                } else {
-                    "ies"
-                },
-                bad.name,
-                bad.error
-            ),
-        });
-    }
-    for entry in &journal.entries {
-        let blocked = |message: String| {
-            Some(Blocker {
-                exit_code: exit_code::BLOCKED,
-                message,
-            })
-        };
-        let op = entry.op_id.short();
-        let what = kind_text(&entry.kind);
-        match attention(entry, boot, liveness(&entry.owner)) {
-            Attention::None | Attention::NeedsApply => {}
-            Attention::Busy => {
-                return blocked(format!(
-                    "another MKLM process is working on operation {op} ({what}); try again when \
-                     it has finished"
-                ));
-            }
-            Attention::Recover if gate == Gate::Recover => {}
-            Attention::Recover if entry.state == OpState::PendingReboot => {
-                return blocked(format!(
-                    "operation {op} ({what}) waits for the check after the restart; run \
-                     `mklm-cli post-reboot` (or `mklm-cli undo`)"
-                ));
-            }
-            Attention::Recover => {
-                return blocked(format!(
-                    "operation {op} ({what}) was interrupted; run `mklm-cli recover` first"
-                ));
-            }
-            Attention::AwaitingUser if gate == Gate::NewOp => {
-                return blocked(format!(
-                    "operation {op} ({what}) waits for keep or revert; run `mklm-cli keep {op}` \
-                     or `mklm-cli revert {op}` (or `mklm-cli undo`)"
-                ));
-            }
-            Attention::WaitingForReboot if gate == Gate::NewOp => {
-                return blocked(format!(
-                    "operation {op} ({what}) waits for a PC restart; run `mklm-cli reboot` (or \
-                     undo it with `mklm-cli undo`)"
-                ));
-            }
-            Attention::Conflict if gate == Gate::NewOp => {
-                return blocked(format!(
-                    "operation {op} ({what}) is in conflict; run `mklm-cli resolve {op}` (or \
-                     `mklm-cli undo`)"
-                ));
-            }
-            Attention::AwaitingUser | Attention::WaitingForReboot | Attention::Conflict => {}
+    gate::blocker(journal, boot, liveness, gate).map(|reason| Blocker {
+        exit_code: class_exit_code(reason.class()),
+        message: blocker_text(&reason),
+    })
+}
+
+/// The CLI's message for a [`BlockReason`].
+pub fn blocker_text(reason: &BlockReason) -> String {
+    let (op, what) = match reason.op() {
+        Some(op) => (op.op_id.short().to_string(), kind_text(&op.kind)),
+        None => (String::new(), String::new()),
+    };
+    match reason {
+        BlockReason::JournalUnreadable { count, first } => format!(
+            "the journal has {count} entr{} this MKLM cannot read ({}: {}); nothing may be \
+             written until MKLM is updated",
+            if *count == 1 { "y" } else { "ies" },
+            first.name,
+            first.error
+        ),
+        BlockReason::Busy(_) => format!(
+            "another MKLM process is working on operation {op} ({what}); try again when it has \
+             finished"
+        ),
+        BlockReason::PostRebootCheck(_) => format!(
+            "operation {op} ({what}) waits for the check after the restart; run `mklm-cli \
+             post-reboot` (or `mklm-cli undo`)"
+        ),
+        BlockReason::NeedsRecovery(_) => {
+            format!("operation {op} ({what}) was interrupted; run `mklm-cli recover` first")
         }
+        BlockReason::AwaitingUser(_) => format!(
+            "operation {op} ({what}) waits for keep or revert; run `mklm-cli keep {op}` or \
+             `mklm-cli revert {op}` (or `mklm-cli undo`)"
+        ),
+        BlockReason::WaitingForReboot(_) => format!(
+            "operation {op} ({what}) waits for a PC restart; run `mklm-cli reboot` (or undo it \
+             with `mklm-cli undo`)"
+        ),
+        BlockReason::Conflict(_) => format!(
+            "operation {op} ({what}) is in conflict; run `mklm-cli resolve {op}` (or `mklm-cli \
+             undo`)"
+        ),
     }
-    None
-}
-
-/// What to do about the post-reboot RunOnce entry after a session (design F.4, review C17).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunOnce {
-    /// Nothing waits for a restart.
-    NotNeeded,
-    /// Register `mklm-cli post-reboot` for the current user.
-    Register,
-    /// Needed, but this process runs elevated (an elevated console, or `--in-process`) and may
-    /// belong to another administrator than the signed-in user (a standard user who typed an
-    /// administrator's credentials): tell the user to run `mklm-cli post-reboot` after the restart
-    /// instead of writing another account's `RunOnce`.
-    TellUser,
-}
-
-/// The rule of design F.4: decided by the journal (`Journal::needs_post_reboot_check`), not by the
-/// result the caller happened to receive. Only an unelevated caller registers (F.4).
-pub fn run_once(journal: &Journal, boot: BootId, elevated: bool) -> RunOnce {
-    if !journal.needs_post_reboot_check(boot) {
-        RunOnce::NotNeeded
-    } else if elevated {
-        RunOnce::TellUser
-    } else {
-        RunOnce::Register
-    }
-}
-
-/// True for an operation that takes effect through a PC restart (a migration, a PS/2 assignment,
-/// a restore with boot-time values): `keep` shows the post-reboot check for it (design D.6, C2).
-pub fn takes_effect_at_restart(entry: &JournalEntry) -> bool {
-    entry.apply == Some(PendingAction::RestartPc) || entry.touches_boot_time_values()
-}
-
-/// The entries `post-reboot` asks about (design D.7): `PendingReboot`, and `AwaitingConfirm` of an
-/// operation that takes effect at a restart. Oldest first.
-pub fn post_reboot_entries(journal: &Journal) -> Vec<&JournalEntry> {
-    journal
-        .open_entries()
-        .into_iter()
-        .filter(|entry| match entry.state {
-            OpState::PendingReboot => true,
-            OpState::AwaitingConfirm => takes_effect_at_restart(entry),
-            _ => false,
-        })
-        .collect()
-}
-
-/// The entries that make a restart necessary now (design F.4 `reboot`): `PendingReboot` or
-/// `RevertedPendingReboot` in this boot, or an `apply_pending` restart recorded in this boot.
-pub fn restart_reasons(journal: &Journal, boot: BootId) -> Vec<&JournalEntry> {
-    journal
-        .entries
-        .iter()
-        .filter(|entry| {
-            let state = matches!(
-                entry.state,
-                OpState::PendingReboot | OpState::RevertedPendingReboot
-            ) && entry.boot_id == boot;
-            let pending = entry.apply_pending.as_ref().is_some_and(|pending| {
-                pending.action == PendingAction::RestartPc && pending.since == boot
-            });
-            state || pending
-        })
-        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use mklm_core::{
-        ApplyPending, Countdown, JournalError, LayoutChoice, OpId, OpKind, RegValue, Timestamp,
-        UnreadableEntry, ValueRecord, WriteTarget, value_names,
+        ApplyPending, Countdown, JournalEntry, JournalError, LayoutChoice, OpId, OpKind, OpState,
+        PendingAction, RegValue, Timestamp, UnreadableEntry, ValueRecord, WriteTarget, value_names,
     };
+
+    use mklm_client::gate::{RunOnce, run_once};
+
+    use super::super::exit_code;
 
     use super::*;
 

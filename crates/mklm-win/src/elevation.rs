@@ -373,12 +373,12 @@ pub fn console_window() -> Option<isize> {
 
 /// COM for `ShellExecuteExW`, which may delegate to shell extensions. Leaves an apartment the
 /// thread already had alone.
-struct ComApartment {
+pub(crate) struct ComApartment {
     entered: bool,
 }
 
 impl ComApartment {
-    fn enter() -> Self {
+    pub(crate) fn enter() -> Self {
         // SAFETY: no reserved pointer; the flags are constants. Balanced by `Drop` when it
         // succeeded (S_OK or S_FALSE).
         let result =

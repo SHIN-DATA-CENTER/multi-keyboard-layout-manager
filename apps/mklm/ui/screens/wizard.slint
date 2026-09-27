@@ -1,0 +1,169 @@
+// The first-run wizard (plan 3.1, design m3 B.1; review U3): 1 welcome, 2 input methods (user
+// and sign-in screen), 3 the keyboards' layouts (JIS / US per connected keyboard, the in-place
+// detection, problem values on their row), 4 summary (nothing to do, one migration that carries
+// the assignments, or ordinary changes).
+
+import { Button, ComboBox } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { KeyTestVm, Tone, WizardKeyboardVm } from "../structs.slint";
+import {
+    Banner, Body, Caption, DialogBody, DialogButtons, KeyTestArea, PageHeader, StubNotice,
+} from "../widgets.slint";
+
+export component WizardScreen inherits VerticalLayout {
+    // 0 = welcome, 1 = input methods, 2 = keyboards, 3 = summary.
+    in property <int> step;
+    // "手順 3 / 4: キーボードの配列" (review U16 e: the position in words).
+    in property <string> heading;
+    in property <string> body;
+    in property <[string]> warnings;
+    in property <[WizardKeyboardVm]> keyboards;
+    in property <KeyTestVm> key-test;
+    // Fixed-mode migration only: the PC's standard layout ("標準配列（おすすめ: 今の JIS）").
+    in property <bool> standard-visible;
+    in-out property <int> standard-index;
+    in property <bool> can-next: true;
+    in property <string> next-text: @tr("Next");
+    callback back();
+    callback next();
+    callback skip();
+    callback open-settings-page(int);
+    callback keyboard-choice(int, int);
+    callback problem-choice(int, int);
+    callback key-pressed(string, bool);
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: @tr("Set up MKLM");
+        subtitle: root.heading;
+    }
+
+    DialogBody {
+        Body {
+            text: root.body;
+        }
+
+        for warning in root.warnings: Banner {
+            text: warning;
+            tone: Tone.warning;
+        }
+
+        if root.step == 1: HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Button {
+                text: @tr("Language settings");
+                clicked => {
+                    root.open-settings-page(0);
+                }
+            }
+
+            Button {
+                text: @tr("Advanced keyboard settings");
+                clicked => {
+                    root.open-settings-page(1);
+                }
+            }
+
+            Button {
+                text: @tr("Region (copy settings)");
+                clicked => {
+                    root.open-settings-page(3);
+                }
+            }
+        }
+        if root.step == 2: VerticalLayout {
+            spacing: 6px;
+            for keyboard[index] in root.keyboards: VerticalLayout {
+                spacing: 2px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        Body {
+                            text: keyboard.name;
+                        }
+
+                        Caption {
+                            text: keyboard.current;
+                        }
+                    }
+
+                    ComboBox {
+                        model: ["JIS", "US"];
+                        current-index: keyboard.choice;
+                        accessible-label: @tr("Layout of {}", keyboard.name);
+                        selected => {
+                            root.keyboard-choice(index, self.current-index);
+                        }
+                    }
+                }
+
+                if keyboard.problem != "": Caption {
+                    text: keyboard.problem;
+                }
+                if keyboard.problem-deletable: ComboBox {
+                    model: [@tr("Leave it (recommended)"), @tr("Delete it (the driver does not read it)")];
+                    current-index: keyboard.problem-choice;
+                    accessible-label: @tr("Stored value on {}", keyboard.name);
+                    selected => {
+                        root.problem-choice(index, self.current-index);
+                    }
+                }
+            }
+            Caption {
+                text: @tr("Not sure? Press the key left of Backspace on that keyboard:");
+            }
+
+            KeyTestArea {
+                vm: root.key-test;
+                key-pressed(text, shift) => {
+                    root.key-pressed(text, shift);
+                }
+            }
+
+            StubNotice {
+                package: "WP-U2";
+            }
+        }
+        if root.step == 3 && root.standard-visible: HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Caption {
+                text: @tr("The PC's standard layout:");
+                vertical-alignment: center;
+            }
+
+            ComboBox {
+                model: ["JIS", "US"];
+                current-index <=> root.standard-index;
+                accessible-label: @tr("The PC's standard layout");
+            }
+        }
+    }
+
+    DialogButtons {
+        if root.step > 0: Button {
+            text: @tr("Back");
+            clicked => {
+                root.back();
+            }
+        }
+        Button {
+            text: @tr("Set up later");
+            clicked => {
+                root.skip();
+            }
+        }
+
+        Button {
+            text: root.next-text;
+            primary: true;
+            enabled: root.can-next;
+            clicked => {
+                root.next();
+            }
+        }
+    }
+}

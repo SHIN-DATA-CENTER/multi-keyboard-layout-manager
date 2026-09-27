@@ -1,0 +1,90 @@
+// App colours and fonts (design m3 C). Rust sets `dark`, `high-contrast`, the high-contrast
+// system colours, `font-family` and `font-scale` (src/theme.rs, src/i18n.rs,
+// mklm_win::ui::theme::read_text_scale_factor); `Palette.color-scheme` is set explicitly to dark
+// or light by AppWindow.apply-color-scheme (never "unknown", plan 3.7).
+//
+// std-widgets take their colours from Palette, which cannot be overridden; our own components
+// (badges, list rows, banners, the key test area, dialogs) use these tokens, which follow the
+// system colours while high contrast is on (design m3 C.2).
+//
+// Font sizes are multiples of `font-scale`, Windows' "Text size" (design m3 E.4): Slint does not
+// apply it by itself. Whether the std-widgets follow `default-font-size` is checked in T-A11Y-4
+// (design m3 J.3).
+
+import { Palette } from "std-widgets.slint";
+import { Tone } from "structs.slint";
+
+export global Theme {
+    in-out property <bool> dark: false;
+    in-out property <bool> high-contrast: false;
+    // GetSysColor values while high contrast is on (mklm_win::ui::theme::system_colors).
+    in-out property <color> hc-window: #000000;
+    in-out property <color> hc-window-text: #ffffff;
+    in-out property <color> hc-highlight: #1aebff;
+    in-out property <color> hc-highlight-text: #000000;
+    in-out property <color> hc-button-face: #000000;
+    in-out property <color> hc-button-text: #ffffff;
+    in-out property <color> hc-gray-text: #3ff23f;
+    in-out property <color> hc-hot-light: #ffff00;
+    // "Yu Gothic UI" for Japanese, "Segoe UI" for English (plan 3.8).
+    in-out property <string> font-family: "Yu Gothic UI";
+    // UISettings.TextScaleFactor, 1.0 to 2.25.
+    in-out property <float> font-scale: 1.0;
+
+    out property <length> font-body: 14px * font-scale;
+    out property <length> font-caption: 12px * font-scale;
+    out property <length> font-title: 20px * font-scale;
+    out property <length> font-dialog-title: 18px * font-scale;
+    out property <length> font-key: 36px * font-scale;
+
+    out property <brush> window-background: high-contrast ? hc-window : Palette.background;
+    out property <brush> surface: high-contrast ? hc-window : Palette.alternate-background;
+    out property <brush> text: high-contrast ? hc-window-text : Palette.foreground;
+    out property <brush> text-secondary: high-contrast ? hc-window-text : (dark ? #ffffffc9 : #00000099);
+    out property <brush> border: high-contrast ? hc-window-text : Palette.border;
+    out property <brush> focus-ring: high-contrast ? hc-highlight : Palette.accent-background;
+    out property <brush> accent: high-contrast ? hc-highlight : Palette.accent-background;
+    out property <brush> accent-text: high-contrast ? hc-highlight-text : Palette.accent-foreground;
+    // The row of the keyboard that typed while identifying (design m3 B.3). In high contrast no
+    // fill (Highlight behind WindowText can fall below 2:1): a 3px Highlight border and the
+    // badge instead (review U12).
+    out property <brush> highlight-row: high-contrast ? hc-window : (dark ? #3a5b8c : #cfe3ff);
+    out property <brush> highlight-row-border: high-contrast ? hc-highlight : Palette.accent-background;
+    out property <brush> highlight-row-text: high-contrast ? hc-window-text : Palette.foreground;
+    // A selected radio choice (review U16): filled; the focus is a separate outer ring.
+    out property <brush> selected-fill: high-contrast ? hc-highlight : (dark ? #2b4a73 : #dcebff);
+    out property <brush> selected-text: high-contrast ? hc-highlight-text : Palette.foreground;
+    out property <length> focus-width: high-contrast ? 3px : 2px;
+
+    // Badge and banner colours (design m3 C.2). Text on them is `tone-text`.
+    public pure function tone-background(tone: Tone) -> brush {
+        if (high-contrast) {
+            return hc-window;
+        }
+        if (tone == Tone.info) {
+            return dark ? #0b3a5e : #dcecfb;
+        }
+        if (tone == Tone.success) {
+            return dark ? #173d1f : #dff3e0;
+        }
+        if (tone == Tone.warning) {
+            return dark ? #4a3a05 : #fff1c2;
+        }
+        if (tone == Tone.danger) {
+            return dark ? #5a1a1a : #fbdcdc;
+        }
+        return dark ? #3a3a3a : #ececec;
+    }
+
+    public pure function tone-text(tone: Tone) -> brush {
+        if (high-contrast) {
+            return hc-window-text;
+        }
+        return dark ? #ffffff : #1a1a1a;
+    }
+
+    // High contrast draws a border around badges instead of a background colour.
+    public pure function tone-border(tone: Tone) -> brush {
+        return high-contrast ? hc-window-text : transparent;
+    }
+}

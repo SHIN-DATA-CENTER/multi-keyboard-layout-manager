@@ -25,9 +25,20 @@
 //! - [`session`]: boot ID, randomness, PC restart and the post-reboot RunOnce entry.
 //! - [`console`]: console control events for the in-process fallback of `mklm-cli`.
 //!
-//! HKLM keys are opened with `KEY_SET_VALUE` only in [`regwrite`] and [`journal_store`] (which
-//! write through the private `regraw` value I/O), and the HKCU RunOnce value is written only in
-//! [`session`]. The private `security` module names the right only to check ACLs.
+//! GUI and front ends (M3, design m3 A.5):
+//! - [`instance`]: the GUI's single instance (mutex and the `activate` / `quit` pipe).
+//! - [`notify`]: keyboard arrival and removal notifications.
+//! - [`time`]: journal timestamps in local time.
+//! - [`machine_settings`]: `HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Settings` (read by anyone,
+//!   written by the helper only).
+//! - `session`: also the GUI's HKCU autostart value.
+//! - `ui` (feature `gui`, only `apps/mklm`): theme, high contrast, title bar, the hidden shell
+//!   window, the tray balloon, the active input language, allowlisted settings pages.
+//!
+//! HKLM keys are opened with `KEY_SET_VALUE` only in [`regwrite`], [`journal_store`] (which
+//! write through the private `regraw` value I/O) and [`machine_settings`], and the HKCU RunOnce
+//! and Run values are written only in [`session`]. The private `security` module names the right
+//! only to check ACLs.
 
 #![cfg(windows)]
 
@@ -39,7 +50,10 @@ mod error;
 pub mod global;
 mod hwkey;
 pub mod input_lang;
+pub mod instance;
 pub mod journal_store;
+pub mod machine_settings;
+pub mod notify;
 pub mod os;
 pub mod pipe;
 pub mod proc_identity;
@@ -53,6 +67,9 @@ pub mod regwrite;
 mod security;
 pub mod session;
 mod sys;
+pub mod time;
+#[cfg(feature = "gui")]
+pub mod ui;
 
 use mklm_core::SystemSnapshot;
 
