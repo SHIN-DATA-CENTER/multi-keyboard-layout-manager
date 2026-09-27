@@ -1,0 +1,40 @@
+[package]
+name = "slint-proto"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+authors = ["SHIN DATA CENTER"]
+publish = false
+description = "Throwaway Slint 1.18 prototype for MKLM M0 #8 (GUI de-risking)."
+
+# Standalone: not a member of the root workspace (root has exclude = ["prototypes"]).
+[workspace]
+
+[dependencies]
+slint = { version = "~1.18", features = ["unstable-winit-030"] }
+# Same version as the root workspace and as Slint's own windows dependency (no duplicate).
+windows = { version = "0.62.2", features = [
+    "Foundation",
+    "UI",
+    "UI_ViewManagement",
+    "Win32_Foundation",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
+    "Win32_Graphics_Dwm",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Input",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+slint-build = "~1.18"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"

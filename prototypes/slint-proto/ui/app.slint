@@ -1,0 +1,325 @@
+// MKLM M0 #8: throwaway Slint prototype (theme, IME, key test, device identification, tray).
+
+import {
+    Button, CheckBox, ComboBox, GroupBox, LineEdit, Palette, ScrollView, VerticalBox, HorizontalBox,
+} from "std-widgets.slint";
+
+// One keyboard seen through winit's DeviceEvent::Key.
+export struct KeyboardRow {
+    path: string,
+    instance-id: string,
+    raw-info: string,
+    last-text: string,
+    presses: int,
+}
+
+component Caption inherits Text {
+    color: Palette.foreground;
+    opacity: 0.7;
+    font-size: 12px;
+    wrap: word-wrap;
+}
+
+component Mono inherits Text {
+    font-family: "Consolas";
+    font-size: 12px;
+    color: Palette.foreground;
+    wrap: word-wrap;
+}
+
+export component AppWindow inherits Window {
+    title: "MKLM Slint 試作（M0 #8）";
+    default-font-family: "Yu Gothic UI";
+    preferred-width: 780px;
+    preferred-height: 860px;
+    min-width: 560px;
+    min-height: 480px;
+    background: Palette.background;
+    in property <image> app-icon;
+    icon: app-icon;
+
+    // --- Theme ---
+    // 0 = Light, 1 = Dark, 2 = System.
+    in-out property <int> theme-mode: 2;
+    in property <string> resolved-theme-text;
+    in property <string> os-theme-text;
+    in-out property <bool> reapply-on-settingchange: false;
+    callback theme-mode-selected(int);
+    callback reapply-title-bar();
+
+    // Palette.color-scheme is always set explicitly (never Unknown) from Rust.
+    public function apply-color-scheme(dark: bool) {
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    // --- Key test (FocusScope, no IME) ---
+    in property <string> key-text: "—";
+    in property <string> key-verdict;
+    in property <string> key-release-text;
+    in property <string> key-device;
+    // (text, shift)
+    callback key-test-pressed(string, bool);
+    callback key-test-released(string);
+
+    // --- Device identification (winit DeviceEvent) ---
+    in property <string> device-path: "（まだキー入力がありません）";
+    in property <string> device-instance-id;
+    in property <string> device-raw-info;
+    in property <string> device-physical-key;
+    in property <[KeyboardRow]> keyboards;
+
+    // --- Tray ---
+    in-out property <bool> tray-workaround: true;
+    callback hide-to-tray();
+    callback quit-app();
+
+    // --- Diagnostics ---
+    in property <string> event-log;
+    in property <string> env-info;
+
+    ScrollView {
+        VerticalBox {
+            alignment: start;
+
+            Text {
+                text: "MKLM GUI 試作";
+                font-size: 20px;
+                font-weight: 600;
+                color: Palette.foreground;
+            }
+
+            Caption {
+                text: "テーマ、日本語 IME、IME を通さない打鍵テスト、入力元キーボードの特定、トレイを確かめるための試作です。システムには何も書き込みません。";
+            }
+
+            GroupBox {
+                title: "1. テーマ";
+                VerticalBox {
+                    HorizontalBox {
+                        padding: 0;
+                        Text {
+                            text: "テーマ:";
+                            vertical-alignment: center;
+                            color: Palette.foreground;
+                        }
+
+                        ComboBox {
+                            model: ["ライト", "ダーク", "システム"];
+                            current-index <=> root.theme-mode;
+                            selected => {
+                                root.theme-mode-selected(self.current-index);
+                            }
+                        }
+
+                        Button {
+                            text: "タイトルバーを再適用";
+                            clicked => {
+                                root.reapply-title-bar();
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "現在のテーマ: " + root.resolved-theme-text;
+                        font-weight: 600;
+                        color: Palette.foreground;
+                    }
+
+                    Caption {
+                        text: root.os-theme-text;
+                    }
+
+                    CheckBox {
+                        text: "WM_SETTINGCHANGE を受けるたびに DWM 属性を再適用する（回避策の検証用。通常はオフ）";
+                        checked <=> root.reapply-on-settingchange;
+                    }
+                }
+            }
+
+            GroupBox {
+                title: "2. 日本語 IME 入力";
+                VerticalBox {
+                    ime-edit := LineEdit {
+                        placeholder-text: "ここで IME をオンにして日本語を入力してください";
+                    }
+
+                    Caption {
+                        text: "入力中の内容: " + ime-edit.text;
+                    }
+                }
+            }
+
+            GroupBox {
+                title: "3. 打鍵テスト（IME を通さない）";
+                VerticalBox {
+                    key-scope := FocusScope {
+                        height: 120px;
+                        key-pressed(event) => {
+                            if (event.text == Key.Tab) {
+                                return reject;
+                            }
+                            root.key-test-pressed(event.text, event.modifiers.shift);
+                            accept
+                        }
+                        key-released(event) => {
+                            root.key-test-released(event.text);
+                            accept
+                        }
+
+                        Rectangle {
+                            border-radius: 6px;
+                            border-width: key-scope.has-focus ? 2px : 1px;
+                            border-color: key-scope.has-focus ? Palette.accent-background : Palette.border;
+                            background: Palette.alternate-background;
+
+                            VerticalLayout {
+                                padding: 8px;
+                                spacing: 4px;
+                                Text {
+                                    text: key-scope.has-focus ? "キーを押してください（Shift+2 で @ なら US、\" なら JIS）" : "ここをクリックしてから、キーを押してください";
+                                    color: Palette.foreground;
+                                    horizontal-alignment: center;
+                                }
+
+                                Text {
+                                    text: root.key-text;
+                                    font-size: 40px;
+                                    color: Palette.foreground;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                Text {
+                                    text: root.key-verdict;
+                                    color: Palette.foreground;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    Caption {
+                        text: "離したときの文字: " + root.key-release-text;
+                    }
+
+                    Caption {
+                        text: "このキーを送ったキーボード: " + root.key-device;
+                    }
+                }
+            }
+
+            GroupBox {
+                title: "4. どのキーボード？（winit DeviceEvent）";
+                VerticalBox {
+                    Caption {
+                        text: "最後にキー入力があったデバイスのインターフェイス パス:";
+                    }
+
+                    Mono {
+                        text: root.device-path;
+                    }
+
+                    Mono {
+                        text: "インスタンス ID: " + root.device-instance-id;
+                    }
+
+                    Mono {
+                        text: "Raw Input: " + root.device-raw-info + "    物理キー: " + root.device-physical-key;
+                    }
+
+                    Caption {
+                        text: "キー入力のあったキーボード（Shift+2 を各キーボードで押し、最後の文字を比べてください）:";
+                    }
+
+                    for row in root.keyboards: VerticalLayout {
+                        spacing: 2px;
+                        Mono {
+                            text: row.instance-id;
+                            font-weight: 600;
+                        }
+
+                        Mono {
+                            text: "  " + row.raw-info + "    打鍵数 " + row.presses + "    最後の文字 " + row.last-text;
+                        }
+                    }
+                }
+            }
+
+            GroupBox {
+                title: "5. トレイ";
+                VerticalBox {
+                    Caption {
+                        text: "ウィンドウを閉じるとトレイに隠れます。トレイのアイコンを左クリックするか、右クリック メニューの「表示」で戻ります。「終了」で終わります。";
+                    }
+
+                    CheckBox {
+                        text: "explorer の再起動（TaskbarCreated）でトレイ アイコンを作り直す（回避策）";
+                        checked <=> root.tray-workaround;
+                    }
+
+                    HorizontalBox {
+                        padding: 0;
+                        alignment: start;
+                        Button {
+                            text: "トレイに隠す";
+                            clicked => {
+                                root.hide-to-tray();
+                            }
+                        }
+
+                        Button {
+                            text: "終了";
+                            clicked => {
+                                root.quit-app();
+                            }
+                        }
+                    }
+                }
+            }
+
+            GroupBox {
+                title: "6. イベントログ";
+                VerticalBox {
+                    Mono {
+                        text: root.env-info;
+                    }
+
+                    Mono {
+                        text: root.event-log;
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component TrayIcon inherits SystemTrayIcon {
+    in property <image> tray-image;
+    icon: tray-image;
+    tooltip: "MKLM 試作";
+    callback show-window();
+    callback quit-app();
+    // The builtin `clicked` is not exposed to Rust (no `on_clicked`), so forward it.
+    callback icon-clicked();
+    clicked => {
+        root.icon-clicked();
+    }
+
+    Menu {
+        MenuItem {
+            title: "表示";
+            activated => {
+                root.show-window();
+            }
+        }
+
+        MenuSeparator { }
+
+        MenuItem {
+            title: "終了";
+            activated => {
+                root.quit-app();
+            }
+        }
+    }
+}
