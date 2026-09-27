@@ -8,6 +8,11 @@
 //! impersonate it. Both sides check the other's PID. Reads and writes are overlapped with
 //! timeouts (`CancelIoEx` on expiry, then waiting for the cancelled I/O to finish, so that no
 //! buffer is released while the kernel may still write to it).
+//!
+//! The GUI's single-instance pipe (M3, design m3 F.1) uses the same pipe with the other half of
+//! the checks: [`PipeServer::accept_any`] takes any client (the DACL, the fixed one-line commands
+//! and the read deadline of `instance` are the defence there), and [`PipeConnection::connect_any`]
+//! leaves the verification of the server to the caller (`instance::send_to_instance`).
 
 use std::io::{self, Read, Write};
 use std::os::windows::io::OwnedHandle;
@@ -31,8 +36,8 @@ use windows::Win32::System::IO::{
 };
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-    PIPE_WAIT, PeekNamedPipe, WaitNamedPipeW,
+    GetNamedPipeServerProcessId, GetNamedPipeServerSessionId, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe, WaitNamedPipeW,
 };
 use windows::Win32::System::Threading::{
     CreateEventW, GetCurrentProcess, INFINITE, WaitForMultipleObjects,
@@ -60,6 +65,13 @@ const BUFFER_SIZE: u32 = 64 * 1024;
 
 /// Pause between two connection attempts while the only instance is busy.
 const BUSY_RETRY: Duration = Duration::from_millis(20);
+
+/// Pause between two connection attempts while the pipe does not exist yet
+/// ([`PipeConnection::connect_any`]).
+const MISSING_RETRY: Duration = Duration::from_millis(50);
+
+/// Longest single wait of [`PipeServer::accept_any`] without a timeout; it waits again after it.
+const ACCEPT_STEP: Duration = Duration::from_secs(3600);
 
 /// A pipe created by the caller, waiting for the helper.
 #[derive(Debug)]
@@ -256,6 +268,147 @@ impl PipeServer {
             })),
         }
     }
+
+    /// Waits for any client up to `timeout` (`None`: without a limit) and returns it, without
+    /// checking who it is: the single-instance pipe (design m3 F.1), where the DACL, the fixed
+    /// one-line commands and the read deadline are the defence, and where the *client* verifies
+    /// the server. `Ok(None)` when nobody connected in time.
+    ///
+    /// The server end stays with `self`: when the returned [`AcceptedClient`] drops, the client
+    /// is disconnected (`DisconnectNamedPipe`) and the pipe can take the next one. The borrow
+    /// keeps a second accept from starting while a client is connected.
+    pub fn accept_any(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> Result<Option<AcceptedClient<'_>>, Error> {
+        let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+        Ok(self.wait_any(deadline)?.map(|connection| AcceptedClient {
+            server: self,
+            connection,
+        }))
+    }
+
+    /// Waits for a client until `deadline` (`None`: without a limit) and returns a connection on
+    /// a duplicate of the server end, with the client's PID (0 when it cannot be read). The
+    /// caller must [`disconnect`](Self::disconnect) after dropping the connection and before
+    /// waiting again: until then the connection talks to this client, and afterwards the handle
+    /// would reach the next one.
+    pub(crate) fn wait_any(
+        &self,
+        deadline: Option<Instant>,
+    ) -> Result<Option<PipeConnection>, Error> {
+        let event = new_event()?;
+        loop {
+            let step = deadline.unwrap_or_else(|| Instant::now() + ACCEPT_STEP);
+            match self.wait_for_client(&event, step, None)? {
+                Connect::Connected => break,
+                Connect::Gone => {}
+                // Without a helper to watch, only the time can run out.
+                Connect::TimedOut | Connect::HelperExited { .. } => {
+                    if deadline.is_some() {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        let mut client = 0u32;
+        // SAFETY: `self.handle` is our server end, now connected; `client` is a valid out pointer.
+        if unsafe { GetNamedPipeClientProcessId(raw(&self.handle), &mut client) }.is_err() {
+            client = 0;
+        }
+        let connection = duplicate(&self.handle).and_then(|copy| PipeConnection::new(copy, client));
+        if connection.is_err() {
+            // Do not leave the pipe connected to a client nobody serves.
+            let _ = self.disconnect();
+        }
+        connection.map(Some)
+    }
+
+    /// Disconnects the current client (`DisconnectNamedPipe`); unread data is discarded. Without
+    /// a client this does nothing.
+    pub(crate) fn disconnect(&self) -> Result<(), Error> {
+        // SAFETY: `handle` is our server end.
+        match unsafe { DisconnectNamedPipe(raw(&self.handle)) } {
+            Ok(()) => Ok(()),
+            Err(error) if win32_code(&error) == ERROR_PIPE_NOT_CONNECTED.0 => Ok(()),
+            Err(error) => Err(win32("DisconnectNamedPipe", &error)),
+        }
+    }
+}
+
+/// A client taken by [`PipeServer::accept_any`]; disconnected when dropped.
+///
+/// It reads and writes like a [`PipeConnection`] but offers no `try_clone`, so that no handle to
+/// the pipe outlives this client and reaches the next one.
+#[derive(Debug)]
+pub struct AcceptedClient<'a> {
+    server: &'a PipeServer,
+    connection: PipeConnection,
+}
+
+impl AcceptedClient<'_> {
+    /// The client's PID (`GetNamedPipeClientProcessId`), 0 when it could not be read. Not
+    /// checked: for logging only.
+    pub fn client_pid(&self) -> u32 {
+        self.connection.peer_pid
+    }
+
+    /// See [`PipeConnection::set_read_timeout`].
+    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) {
+        self.connection.set_read_timeout(timeout);
+    }
+
+    /// See [`PipeConnection::set_write_timeout`].
+    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) {
+        self.connection.set_write_timeout(timeout);
+    }
+}
+
+impl Read for AcceptedClient<'_> {
+    /// Returns `Ok(0)` once the client has closed its end.
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.connection.read(buf)
+    }
+}
+
+impl Write for AcceptedClient<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.connection.write(buf)
+    }
+
+    /// See [`PipeConnection::flush`]: blocks while the client is alive but not reading.
+    fn flush(&mut self) -> io::Result<()> {
+        self.connection.flush()
+    }
+}
+
+impl Drop for AcceptedClient<'_> {
+    fn drop(&mut self) {
+        // The duplicate handle in `connection` closes right after this; nothing can use it in
+        // between, because the server is borrowed until the whole guard is gone.
+        let _ = self.server.disconnect();
+    }
+}
+
+/// A second handle to the same pipe end (`DuplicateHandle` within this process).
+fn duplicate(handle: &OwnedHandle) -> Result<OwnedHandle, Error> {
+    let mut copy = HANDLE::default();
+    // SAFETY: both process handles are this process's pseudo handle; `handle` is open; `copy` is
+    // a valid out pointer.
+    unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            raw(handle),
+            GetCurrentProcess(),
+            &mut copy,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
+    }
+    .map_err(|error| win32("DuplicateHandle", &error))?;
+    // SAFETY: DuplicateHandle succeeded, so `copy` is an open handle this process owns.
+    Ok(unsafe { own(copy) })
 }
 
 /// How one wait for a client ended.
@@ -300,36 +453,8 @@ impl PipeConnection {
     /// client holds the only instance until the server drops it) is retried with `WaitNamedPipeW`
     /// for up to `timeout`.
     pub fn connect(path: &str, expected_server_pid: u32, timeout: Duration) -> Result<Self, Error> {
-        check_pipe_path(path)?;
-        let name = to_wide(path);
-        let deadline = Instant::now() + timeout;
-        let handle = loop {
-            // SAFETY: `name` is NUL-terminated and outlives the call. SQOS identification keeps
-            // the server from impersonating this process.
-            let result = unsafe {
-                CreateFileW(
-                    PCWSTR(name.as_ptr()),
-                    (GENERIC_READ | GENERIC_WRITE).0,
-                    FILE_SHARE_NONE,
-                    None,
-                    OPEN_EXISTING,
-                    FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
-                    None,
-                )
-            };
-            match result {
-                // SAFETY: CreateFileW succeeded, so the handle is open and owned by us.
-                Ok(handle) => break unsafe { own(handle) },
-                Err(error) if win32_code(&error) == ERROR_PIPE_BUSY.0 => {
-                    wait_for_instance(&name, deadline)?;
-                }
-                Err(error) => return Err(win32("CreateFileW", &error)),
-            }
-        };
-        let mut server = 0u32;
-        // SAFETY: `handle` is a connected client end; `server` is a valid out pointer.
-        unsafe { GetNamedPipeServerProcessId(raw(&handle), &mut server) }
-            .map_err(|error| win32("GetNamedPipeServerProcessId", &error))?;
+        let handle = open_client(path, Instant::now() + timeout, false)?;
+        let server = server_pid(&handle)?;
         if server != expected_server_pid {
             return Err(Error::PeerMismatch {
                 expected: expected_server_pid,
@@ -339,9 +464,35 @@ impl PipeConnection {
         Self::new(handle, server)
     }
 
-    /// PID of the other end, as checked at connect time.
+    /// Client side without a PID check (the single-instance pipe, design m3 F.1): connects with
+    /// SQOS identification, retrying for up to `timeout` while the pipe does not exist yet
+    /// (`ERROR_FILE_NOT_FOUND`: the running instance holds its mutex a moment before its pipe
+    /// exists) or its only instance is busy (`ERROR_PIPE_BUSY`). [`Error::Timeout`] when the time
+    /// runs out. The caller must verify the server ([`peer_pid`](Self::peer_pid),
+    /// [`server_session_id`](Self::server_session_id)) before it sends anything.
+    pub fn connect_any(path: &str, timeout: Duration) -> Result<Self, Error> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(|| Instant::now() + ACCEPT_STEP);
+        let handle = open_client(path, deadline, true)?;
+        let server = server_pid(&handle)?;
+        Self::new(handle, server)
+    }
+
+    /// PID of the other end: checked at connect time by [`connect`](Self::connect) and
+    /// [`PipeServer::accept`], only read by [`connect_any`](Self::connect_any).
     pub fn peer_pid(&self) -> u32 {
         self.peer_pid
+    }
+
+    /// Client side: the Terminal Services session of the pipe's server
+    /// (`GetNamedPipeServerSessionId`).
+    pub fn server_session_id(&self) -> Result<u32, Error> {
+        let mut session = 0u32;
+        // SAFETY: `handle` is a connected pipe end; `session` is a valid out pointer.
+        unsafe { GetNamedPipeServerSessionId(raw(&self.handle), &mut session) }
+            .map_err(|error| win32("GetNamedPipeServerSessionId", &error))?;
+        Ok(session)
     }
 
     /// `None` waits forever. An expired read fails with `io::ErrorKind::TimedOut`.
@@ -370,23 +521,7 @@ impl PipeConnection {
     /// A second handle to the same connection (`DuplicateHandle`), with its own events and the
     /// same timeouts, so that one thread can write while another reads.
     pub fn try_clone(&self) -> Result<Self, Error> {
-        let mut duplicate = HANDLE::default();
-        // SAFETY: both process handles are this process's pseudo handle; `self.handle` is open;
-        // `duplicate` is a valid out pointer.
-        unsafe {
-            DuplicateHandle(
-                GetCurrentProcess(),
-                raw(&self.handle),
-                GetCurrentProcess(),
-                &mut duplicate,
-                0,
-                false,
-                DUPLICATE_SAME_ACCESS,
-            )
-        }
-        .map_err(|error| win32("DuplicateHandle", &error))?;
-        // SAFETY: DuplicateHandle succeeded, so `duplicate` is an open handle this process owns.
-        let mut clone = Self::new(unsafe { own(duplicate) }, self.peer_pid)?;
+        let mut clone = Self::new(duplicate(&self.handle)?, self.peer_pid)?;
         clone.read_timeout = self.read_timeout;
         clone.write_timeout = self.write_timeout;
         Ok(clone)
@@ -444,6 +579,61 @@ impl PipeConnection {
             Err(error) => Err(io_error(&error)),
         }
     }
+}
+
+/// Opens the client end of `path` with SQOS identification (the server can never impersonate
+/// this process). `ERROR_PIPE_BUSY` is retried with `WaitNamedPipeW` until `deadline`; with
+/// `retry_missing`, so is `ERROR_FILE_NOT_FOUND` (the pipe does not exist yet), every
+/// [`MISSING_RETRY`].
+fn open_client(path: &str, deadline: Instant, retry_missing: bool) -> Result<OwnedHandle, Error> {
+    check_pipe_path(path)?;
+    let name = to_wide(path);
+    loop {
+        // SAFETY: `name` is NUL-terminated and outlives the call. SQOS identification keeps the
+        // server from impersonating this process.
+        let result = unsafe {
+            CreateFileW(
+                PCWSTR(name.as_ptr()),
+                (GENERIC_READ | GENERIC_WRITE).0,
+                FILE_SHARE_NONE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                None,
+            )
+        };
+        match result {
+            // SAFETY: CreateFileW succeeded, so the handle is open and owned by us.
+            Ok(handle) => return Ok(unsafe { own(handle) }),
+            Err(error) if win32_code(&error) == ERROR_PIPE_BUSY.0 => {
+                match wait_for_instance(&name, deadline) {
+                    // The server went away while we waited: try again while it may come back.
+                    Err(Error::Win32 { code, .. })
+                        if retry_missing && code == ERROR_FILE_NOT_FOUND.0 => {}
+                    other => other?,
+                }
+            }
+            Err(error) if retry_missing && win32_code(&error) == ERROR_FILE_NOT_FOUND.0 => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(Error::Timeout {
+                        operation: "CreateFileW",
+                    });
+                }
+                thread::sleep(MISSING_RETRY.min(remaining));
+            }
+            Err(error) => return Err(win32("CreateFileW", &error)),
+        }
+    }
+}
+
+/// The PID of the server of a connected client end (`GetNamedPipeServerProcessId`).
+fn server_pid(handle: &OwnedHandle) -> Result<u32, Error> {
+    let mut server = 0u32;
+    // SAFETY: `handle` is a connected client end; `server` is a valid out pointer.
+    unsafe { GetNamedPipeServerProcessId(raw(handle), &mut server) }
+        .map_err(|error| win32("GetNamedPipeServerProcessId", &error))?;
+    Ok(server)
 }
 
 /// Waits (`WaitNamedPipeW`) until the only instance can take a connection again, or `deadline`.
@@ -722,6 +912,91 @@ mod tests {
                 found: me
             }
         );
+    }
+
+    /// `accept_any` takes whoever connects, one client at a time, and disconnects it when the
+    /// guard drops; the next client is then taken on the same pipe.
+    #[test]
+    fn accept_any_serves_one_client_after_another() {
+        let path = pipe_path();
+        let mut server = PipeServer::create(&path, &test_sddl()).expect("create pipe");
+        let started = Instant::now();
+        assert!(
+            server
+                .accept_any(Some(Duration::from_millis(50)))
+                .expect("wait")
+                .is_none()
+        );
+        assert!(started.elapsed() >= Duration::from_millis(40));
+        let me = std::process::id();
+        for round in 0..2u8 {
+            let client_path = path.clone();
+            let client = thread::spawn(move || {
+                let mut client = PipeConnection::connect_any(&client_path, Duration::from_secs(10))
+                    .expect("connect");
+                assert_eq!(client.peer_pid(), me);
+                assert!(client.server_session_id().is_ok());
+                client.write_all(&[round]).expect("write");
+                client.set_read_timeout(Some(Duration::from_secs(10)));
+                let mut reply = [0u8; 1];
+                client.read_exact(&mut reply).expect("reply");
+                assert_eq!(reply[0], round + 10);
+                // Disconnected by the server: end of stream.
+                let mut rest = Vec::new();
+                client.read_to_end(&mut rest).expect("read to end");
+                assert!(rest.is_empty());
+            });
+            let mut accepted = server
+                .accept_any(Some(Duration::from_secs(10)))
+                .expect("accept")
+                .expect("a client");
+            assert_eq!(accepted.client_pid(), me);
+            accepted.set_read_timeout(Some(Duration::from_secs(10)));
+            let mut byte = [0u8; 1];
+            accepted.read_exact(&mut byte).expect("read");
+            assert_eq!(byte[0], round);
+            accepted.set_write_timeout(Some(Duration::from_secs(10)));
+            accepted.write_all(&[round + 10]).expect("write");
+            // The client reads, so this returns; disconnecting earlier would discard the reply.
+            accepted.flush().expect("flush");
+            drop(accepted);
+            client.join().expect("client thread");
+        }
+    }
+
+    /// `connect_any` waits for a pipe that does not exist yet (the single instance creates it a
+    /// moment after its mutex), and gives up after its timeout.
+    #[test]
+    fn connect_any_waits_for_the_pipe_to_appear() {
+        let started = Instant::now();
+        let error = PipeConnection::connect_any(&pipe_path(), Duration::from_millis(120))
+            .expect_err("no such pipe");
+        assert_eq!(
+            error,
+            Error::Timeout {
+                operation: "CreateFileW"
+            }
+        );
+        assert!(started.elapsed() >= Duration::from_millis(100));
+
+        let path = pipe_path();
+        let server_path = path.clone();
+        let server = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut server = PipeServer::create(&server_path, &test_sddl()).expect("create pipe");
+            let mut accepted = server
+                .accept_any(Some(Duration::from_secs(10)))
+                .expect("accept")
+                .expect("a client");
+            accepted.set_read_timeout(Some(Duration::from_secs(10)));
+            let mut byte = [0u8; 1];
+            accepted.read_exact(&mut byte).expect("read");
+            byte[0]
+        });
+        let mut client =
+            PipeConnection::connect_any(&path, Duration::from_secs(10)).expect("connect late");
+        client.write_all(b"x").expect("write");
+        assert_eq!(server.join().expect("server thread"), b'x');
     }
 
     #[test]

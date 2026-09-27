@@ -91,7 +91,7 @@ fn process_token() -> Result<OwnedHandle, Error> {
 }
 
 /// A variable-size token information class, in an 8-byte aligned buffer.
-fn token_information(
+pub(crate) fn token_information(
     token: &OwnedHandle,
     class: TOKEN_INFORMATION_CLASS,
     function: &'static str,

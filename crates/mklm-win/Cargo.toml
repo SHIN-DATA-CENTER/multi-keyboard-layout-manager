@@ -55,5 +55,7 @@ gui = [
     "windows/UI_ViewManagement",
     "windows/Win32_Graphics_Dwm",
     "windows/Win32_Graphics_Gdi",
+    "windows/Win32_System_DataExchange",
+    "windows/Win32_System_Memory",
     "windows/Win32_UI_Accessibility",
 ]
