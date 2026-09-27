@@ -56,16 +56,56 @@
   - Keychron の値を `reg add ... /d 4`、`/d 0` で書き戻す。
 - `Recovery` の ACL: SY と BA がフルコントロール、BU は RX。ユーザーが USB メモリにコピーできる。
 
+## R6: 外部の変更との衝突（22:25〜22:28、合格）
+
+- **1 回目（テストの設計の誤り）**: JIS を確定したあと（操作 `75c67e35`）、外部から `KeyboardTypeOverride=4` を書いて `revert` した。
+  - 外部で書いた値が、取り消しの戻し先（before = 4）と同じだった。そのため、MKLM はその値を「すでに目的の値」として書かなかった。
+  - もう一方の Subtype は、MKLM が最後に書いた値（2）のままだったので、CAS で 0 に戻した。
+  - 結果は `Reverted`。意図に反する上書きはないので、妥当な振る舞いと判断した。
+- **2 回目**: JIS を確定したあと（操作 `371b1633`）、外部から `KeyboardTypeOverride=8` を書いた。戻し先とも、MKLM が書いた値とも違う値。
+  - `mklm-cli revert 371b1633 --other-input --yes`: 衝突を検出し、何も書かずに止まった。表示は「now 8; MKLM last wrote 7; before 4, intended 7, baseline 4」。終了コードは 5。
+    - 衝突していない Subtype も書き換えず、一部だけ戻すことはしない。
+    - `resolve` と `undo` を案内する。
+  - `mklm-cli resolve 371b1633 --all keep-current --other-input --yes`: 状態は `Failed`（the values changed outside MKLM were kept）。`last_written` は現在の値（8）になった。反映が済んでいないので、「再接続が必要」と表示する。
+  - 後片付け: `mklm-cli set … --layout us` で、8/2 から 4/0 に書き換えてリセットした（操作 `31f7f7bc`、確定）。
+
+## R11: パイプの防御（22:28〜22:30、合格）
+
+- 昇格していない同じユーザーのプロセスから、helper 用のパイプ（`\\.\pipe\SHINDATACENTER.MKLM.<uuid>`）を開こうとした結果:
+  - .NET の `NamedPipeClientStream`（InOut / In / Out / ReadData）: いずれも `UnauthorizedAccessException`。
+  - `CreateFileW` の `WRITE_DAC` だけ / `WRITE_OWNER` だけ: いずれも拒否（Win32 エラー 5）。
+- 不正な引数（`--pipe \\.\pipe\evil --nonce 00 --caller-pid 4`）で helper を昇格して起動すると、パイプに接続せず終了コード 2 で終わった。
+- 補足: 1 回目の試行ではパイプを見つける前に処理が終わった。ユーザーが UAC ですぐ「はい」を押したためで、操作 `bc7cc73f` として JIS が確定した。これは `revert` で戻した。
+
+## R12: UAC を断る（22:29、合格）
+
+- 実行: `mklm-cli set <Keychron の ID> --layout jis …`。UAC で「いいえ」を選んだ。
+- 結果: 「Cancelled: the administrator permission was declined; nothing was changed.」と表示され、終了コードは 3。ジャーナルの行数（12）もキーボードの値（4/0）も変わらなかった。
+- 進め方の教訓: ユーザーの手順の説明と UAC の画面が同時に出ると、説明を読む前に「はい」を押してしまいやすい。「いいえ」を押してもらうテストは、先に AskUserQuestion で準備を確かめてから始める。
+
+## R5: 書き込み途中の強制終了からの回復（22:31〜22:33、合格）
+
+- 方法:
+  - 昇格した PowerShell でデバッグビルドの CLI を動かし、`MKLM_DEBUG_PAUSE=after-first-write` を helper に引き継がせた。UAC 経由の起動ではユーザーの既定の環境変数しか渡らないので、この方法をとった。
+  - 1 段目を書いた直後の一時停止中に、`taskkill /F /IM mklm-helper.exe` で helper を止めた。
+- 一時停止中のレジストリ: 7/2（書き込み済みで、キーボードはまだリセットしていない）。
+- CLI の動き:
+  1. 「the helper stopped before it answered」を検出する。
+  2. 「Recovering what the helper left unfinished now.」と表示し、新しい helper を起動する（昇格したコンソールからなので UAC は出ない）。
+  3. ロールバックする。
+  4. 「8e9a9970: planned (interrupted?) -> reverted (roll-back)」と表示する。終了コードは 4。
+- 結果:
+  - 値は 4/0 に戻った。Raw Input は 4/0 のまま（リセット前に止めたため）。
+  - ジャーナルの状態は `Reverted`（the change was never kept after the keyboard reset; recovery put it back）。
+  - 回復用の helper にも一時停止の指定が引き継がれたので、回復に 2 分かかった（想定どおり）。
+- 気付いた点（M3 で直す）: 回復の理由の文言が「after the keyboard reset」になっているが、実際にはリセットの前に止めている。
+
 ## 未実施
 
 | テスト | 内容 | 必要なもの |
 |---|---|---|
-| R5 | 書き込み途中の強制終了からの回復 | デバッグビルドの一時停止機能と、昇格した taskkill |
-| R6 | 外部の変更との衝突 | 昇格した `reg add` |
 | R8 | 移行の往復 | 再起動 3〜4 回 |
 | R9 / R10 | 起動 ID の安定性 | シャットダウン、スリープ、休止、時刻の再同期 |
-| R11 | パイプの防御 | — |
-| R12 | UAC を断る | — |
 | R13 | BLE | 本物の BLE キーボード |
 | R14 / R15 | 別ユーザーでの確認 | VM か別アカウント |
-| R16 | 昇格したコンソールでの Ctrl+C | — |
+| R16 | 昇格したコンソールでの Ctrl+C | ユーザーの操作 |
