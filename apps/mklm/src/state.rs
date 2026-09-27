@@ -7,23 +7,36 @@
 //! set in the same `update` that emits [`Effect::StartSession`], so a second start is refused
 //! even while the UAC prompt is up; every message from a session worker carries its
 //! [`SessionId`], and messages of an older session are dropped.
+//!
+//! The change flow (design m3 B.3 to B.7, B.17; WP-U3): "変更…" opens the change page with a
+//! [`ChangeDraft`]; choosing a layout reads what the change is planned with on the I/O worker
+//! ([`Effect::PrepareChange`], answered by [`AppMsg::ChangePrepared`]); the plan is made here
+//! with the options of the apply method (`vm::change::plan_change`, pure), so that what the page
+//! shows is what is sent. "変更する" starts the session — the first time through the standalone
+//! UAC explanation. Keep and revert answer only the open question of the current session; after
+//! an answer the progress dialog says what MKLM waits for, and a late countdown tick does not
+//! bring the question back. The result waits for the read that follows the session
+//! ([`Effect::ReadForResult`]) before it says what the keyboards do now.
 
 use std::time::Instant;
 
+use mklm_client::gate::{BlockReason, Gate};
 use mklm_client::orchestrator::RequestReport;
 use mklm_client::run_once::{RunOnceError, RunOnceOutcome};
-use mklm_client::session::{Notice, Prompt, SessionView};
+use mklm_client::session::{Notice, Prompt, SessionKind, SessionView};
 use mklm_client::startup::StartupSummary;
 use mklm_core::{
-    ApplyOptions, BootId, Decision, Event, Journal, LayoutChoice, OperationPlan, SystemSnapshot,
+    ApplyOptions, BootId, Decision, Event, Journal, Layout, LayoutChoice, LayoutTable, OpId,
+    SystemSnapshot, assess,
 };
 use mklm_ipc::Request;
 
-use crate::detect::{Detection, Press};
+use crate::detect::{Detection, Press, Verdict};
 use crate::i18n::Lang;
-use crate::settings::Settings;
-use crate::vm::change::{ApplyMethod, InputActivity};
-use crate::vm::keytest::{self, KeyContext, KeyTest};
+use crate::settings::{PhysicalKind, PhysicalLayout, PhysicalSource, Settings};
+use crate::vm::change::{ApplyMethod, DraftPlan, InputActivity, MethodDefault};
+use crate::vm::keytest::{self, Expected, KeyContext, KeyTest};
+use crate::vm::session::Stage;
 
 /// The page in the main area (matches `Screen` in ui/structs.slint). Twelve pages: the change
 /// page covers assignment, detection and the apply method (review U14).
@@ -73,19 +86,100 @@ pub struct SystemRead {
     pub summary: StartupSummary,
 }
 
+/// What `PrepareChange` read on the I/O worker (design m3 B.5): the planning inventory, the
+/// journal and whether the journal lets the request start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedChange {
+    /// Every Keyboard-class devnode, phantoms included (`mklm_client::inventory::read_inventory`).
+    pub snapshot: SystemSnapshot,
+    /// Some value could not be read as MKLM expects: only the helper may conclude that nothing
+    /// needs writing.
+    pub uncertain_values: bool,
+    /// Read problems that do not stop a write (English, for the technical details).
+    pub warnings: Vec<String>,
+    pub journal: Journal,
+    /// `gate::blocker`: the request would be refused; no UAC prompt is shown.
+    pub blocker: Option<BlockReason>,
+}
+
+/// Why `PrepareChange` could not read what the change is planned with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrepareFailure {
+    /// Windows did not report every keyboard completely (read problems that stop a write,
+    /// design m2 S2); English diagnostics.
+    Incomplete(String),
+    /// The keyboards, the journal or the boot ID could not be read; English diagnostics.
+    Read(String),
+}
+
+impl PrepareFailure {
+    /// The English diagnostics.
+    pub fn diagnostic(&self) -> &str {
+        match self {
+            PrepareFailure::Incomplete(text) | PrepareFailure::Read(text) => text,
+        }
+    }
+}
+
 /// A change being prepared on the change page (design m3 B.4, B.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeDraft {
+    /// The row's ID (the container ID, or the instance ID of a keyboard without one).
+    pub row: String,
+    /// The device's display name.
+    pub name: String,
     /// The row's keyboards (instance IDs); the request targets the first present one.
     pub members: Vec<String>,
+    /// "MKLM 導入前に戻す…": the page previews the restore of this device.
+    pub restore: bool,
     pub choice: Option<LayoutChoice>,
-    /// The apply method (default from `vm::change::default_apply_method`).
+    /// The apply method the user picked; `None` uses [`Self::method_default`].
     pub method: Option<ApplyMethod>,
-    /// The plan shown (made with `method`'s options); sent as `ExpectedPlan`.
-    pub plan: Option<OperationPlan>,
+    /// `vm::change::default_apply_method` when the preparation arrived.
+    pub method_default: Option<MethodDefault>,
+    /// The PC's standard layout of a migration from fixed mode; `None` keeps the fixed one.
+    pub standard: Option<Layout>,
+    /// The token of the `PrepareChange` that runs now: "確認しています…".
+    pub preparing: Option<u64>,
+    /// What the last preparation read.
+    pub prepared: Option<PreparedChange>,
+    pub failure: Option<PrepareFailure>,
+    /// The plan shown (made with the chosen method's options); sent as `ExpectedPlan`.
+    pub plan: Option<DraftPlan>,
     pub detection: Detection,
     /// What the last key press did in the detection.
     pub last_press: Option<Press>,
+    /// An answer key came from this other keyboard (instance ID): the page names the one to use.
+    pub other_keyboard: Option<String>,
+}
+
+impl ChangeDraft {
+    pub fn new(row: String, name: String, members: Vec<String>) -> Self {
+        Self {
+            row,
+            name,
+            detection: Detection::for_keyboards(members.clone()),
+            members,
+            restore: false,
+            choice: None,
+            method: None,
+            method_default: None,
+            standard: None,
+            preparing: None,
+            prepared: None,
+            failure: None,
+            plan: None,
+            last_press: None,
+            other_keyboard: None,
+        }
+    }
+
+    /// The method the plan uses: the user's, else the default, else the restart.
+    pub fn resolved_method(&self) -> ApplyMethod {
+        self.method
+            .or(self.method_default.map(|default| default.method))
+            .unwrap_or(ApplyMethod::Restart)
+    }
 }
 
 /// Identifies one helper session (a request and its recovery after a lost helper).
@@ -116,12 +210,47 @@ impl SessionPhase {
     }
 }
 
+/// What the user or the orchestrator did that the progress dialog should say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionNote {
+    #[default]
+    None,
+    /// "このままにする" was sent.
+    Keeping,
+    /// "元に戻す", Esc, the window's × or quitting during a countdown.
+    Reverting,
+    /// "後で決める" or "終了して後で決める" on the reconnect path.
+    Leaving,
+    /// The helper stopped (`Notice::HelperLost`).
+    HelperLost,
+    /// The recovery after a lost helper runs.
+    Recovering,
+}
+
+/// A keyboard the result's "今の状態" names (design m3 B.17, review U7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTarget {
+    pub name: String,
+    /// Its instance IDs (every collection of the device).
+    pub members: Vec<String>,
+    /// How it typed before the session ("（変更前のまま）").
+    pub before: Option<LayoutTable>,
+}
+
 /// How a session ended, with the RunOnce rule applied on the worker right after it (design m2
 /// C17, m3 A.2.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionOutcome {
     pub report: RequestReport,
     pub run_once: Result<RunOnceOutcome, RunOnceError>,
+}
+
+/// The answers of the quit confirmation on the reconnect path (design m3 F.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitAnswer {
+    RevertAndQuit,
+    QuitLeavingIt,
+    Cancel,
 }
 
 /// Everything the UI thread knows.
@@ -143,11 +272,29 @@ pub struct AppState {
     pub activity: InputActivity,
     pub key_test: KeyTest,
     pub draft: Option<ChangeDraft>,
+    /// The token the next `PrepareChange` gets.
+    pub next_prepare: u64,
+    /// The GUI runs elevated: no UAC prompt follows, so none is explained (design m3 B.5).
+    pub elevated: bool,
     pub session: SessionPhase,
     /// The id the next session gets.
     pub next_session: SessionId,
+    /// The request of the running or last session.
+    pub request: Option<Request>,
+    /// The keyboards of the running or last request, for "今の状態".
+    pub targets: Vec<SessionTarget>,
+    /// The last session view that had journaled the operation (the result's reset phase and
+    /// operation ID).
+    pub last_view: Option<Box<SessionView>>,
+    /// The operation whose question the user answered (a late tick does not reopen it).
+    pub decided: Option<OpId>,
+    pub note: SessionNote,
     /// The last session's outcome, for the result overlay.
     pub outcome: Option<SessionOutcome>,
+    /// The preparation found the way blocked: the result overlay says why (no prompt shown).
+    pub blocked: Option<BlockReason>,
+    /// The result waits for the read that follows the session ("確かめています…").
+    pub result_read_pending: bool,
     /// The helper was lost during a countdown (true) or elsewhere, and the worker waits for the
     /// user's answer to the recovery question.
     pub recovery_question: Option<bool>,
@@ -162,6 +309,8 @@ pub struct AppState {
 pub enum AppMsg {
     Navigate(Page),
     SystemRead(Box<SystemRead>),
+    /// The read asked for by [`Effect::ReadForResult`] arrived (after its `SystemRead`).
+    ResultReadArrived,
     ActiveLayout(u32),
     /// A key press seen through Raw Input (winit `DeviceEvent::Key`): the keyboard's instance
     /// ID and the set 1 scan code. Never the character (plan 2.2).
@@ -180,6 +329,32 @@ pub enum AppMsg {
     ToggleIdentify,
     /// Read the system again (refresh button, input language changed, resume).
     Refresh,
+    /// "変更…" on a keyboard row (its ID): the change page (design m3 B.4).
+    OpenChange(String),
+    /// A layout choice on the change page (its index).
+    ChangeChoose(usize),
+    /// An apply method (0 = switch now, 1 = at the restart, review U1).
+    ChangeChooseMethod(usize),
+    /// The PC's standard layout of a migration (0 = JIS, 1 = US).
+    ChangeChooseStandard(usize),
+    /// "やり直す" of the in-place detection.
+    ChangeRestartDetection,
+    /// Select the layout the detection found (one click, design m3 B.3).
+    ChangeUseDetected,
+    /// "MKLM 導入前に戻す…" on the change page: the restore preview of this device.
+    OpenRestore,
+    /// What `PrepareChange` read (token `token`, answered at `at`).
+    ChangePrepared {
+        token: u64,
+        at: Instant,
+        prepared: Box<Result<PreparedChange, PrepareFailure>>,
+    },
+    /// "変更する" on the change page.
+    ChangeApply,
+    /// "確認画面へ進む" on the first-time UAC explanation.
+    UacGo,
+    /// "キャンセル" on the change page (to the main screen) or on the UAC explanation (back).
+    CancelChange,
     /// Start a helper session for `request` (the change page's button, recovery, undo …).
     StartRequest {
         request: Request,
@@ -205,7 +380,20 @@ pub enum AppMsg {
         session: SessionId,
         outcome: Box<SessionOutcome>,
     },
+    /// A decision for the open question (checked against it).
     Decide(Decision),
+    /// "このままにする" in the countdown or the reconnect wait.
+    KeepChange,
+    /// "元に戻す" (and Esc) in the countdown or the reconnect wait.
+    RevertChange,
+    /// "後で決める" in the reconnect wait: leave; the change keeps waiting (design m3 B.7).
+    DecideLater,
+    ResultClosed,
+    /// The result's next-step button.
+    ResultNextStep,
+    /// "詳細をコピー".
+    CopyDetails,
+    QuitConfirmAnswered(QuitAnswer),
     /// Show the window and bring it to the front (tray click, a second start). Never changes
     /// the page: the post-reboot check and the recovery prompt are decided from the journal on
     /// the next `SystemRead` (design m3 F.1).
@@ -223,6 +411,14 @@ pub enum AppMsg {
 pub enum Effect {
     /// Read the snapshot, the journal and the boot ID on the I/O worker.
     Read,
+    /// The same, then [`AppMsg::ResultReadArrived`]: the result's "今の状態" (design m3 B.17).
+    ReadForResult,
+    /// Read what a change is planned with on the I/O worker: the planning inventory, the journal
+    /// and `gate::blocker(gate)` (design m3 B.5). Answered by [`AppMsg::ChangePrepared`].
+    PrepareChange {
+        token: u64,
+        gate: Gate,
+    },
     SaveSettings(Box<Settings>),
     /// Start a helper session on a new session worker (only while no other one lives).
     StartSession {
@@ -239,6 +435,8 @@ pub enum Effect {
     /// Apply the post-reboot RunOnce rule on the I/O worker (at start-up, and when the user
     /// chose "decide later" on the post-reboot check). After a session the worker applies it.
     RunOnceRule,
+    /// Put text on the clipboard ("詳細をコピー": English diagnostics only, never keys).
+    CopyText(String),
     ShowWindow,
     HideWindow,
     Quit,
@@ -265,12 +463,46 @@ fn current_session(state: &AppState, session: SessionId) -> bool {
     state.session.id() == Some(session)
 }
 
+/// The navigation rail is off while a change, a check or a session runs (design m3 B.0).
+pub fn navigation_enabled(state: &AppState) -> bool {
+    state.session == SessionPhase::Idle
+        && state.overlay == OverlayKind::None
+        && !matches!(
+            state.page,
+            Page::Wizard | Page::Change | Page::UacNotice | Page::PostReboot
+        )
+}
+
+/// What the progress dialog says (design m3 B.5, B.6).
+pub fn progress_stage(state: &AppState) -> Stage {
+    match (&state.session, state.note) {
+        (SessionPhase::Launching { .. }, _) => Stage::Launching,
+        (_, SessionNote::Keeping) => Stage::Answered { keep: true },
+        (_, SessionNote::Reverting) => Stage::Answered { keep: false },
+        (_, SessionNote::Leaving) => Stage::Leaving,
+        (_, SessionNote::HelperLost) => Stage::HelperLost,
+        (_, SessionNote::Recovering) => Stage::Recovering,
+        (_, SessionNote::None) => Stage::Running,
+    }
+}
+
+/// The running session's view, if the helper is connected.
+pub fn session_view(state: &AppState) -> Option<&SessionView> {
+    match &state.session {
+        SessionPhase::Running { view, .. } => Some(view),
+        _ => None,
+    }
+}
+
 /// Applies `msg` to `state`. Flows not written yet are no-ops that leave the state unchanged
 /// (the skeleton never panics on a click).
 pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
     match msg {
         AppMsg::Navigate(page) => {
             state.page = page;
+            if !matches!(page, Page::Change | Page::UacNotice) {
+                state.draft = None;
+            }
             let mut effects = vec![Effect::Render];
             if page == Page::Main || page == Page::Journal {
                 effects.insert(0, Effect::Read);
@@ -281,36 +513,19 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             state.read = Some(*read);
             vec![Effect::Render]
         }
+        AppMsg::ResultReadArrived => {
+            if !state.result_read_pending {
+                return Vec::new();
+            }
+            state.result_read_pending = false;
+            vec![Effect::Render]
+        }
         AppMsg::ActiveLayout(hkl) if hkl != state.active_hkl => {
             state.active_hkl = hkl;
             vec![Effect::Render]
         }
         AppMsg::ActiveLayout(_) => Vec::new(),
-        AppMsg::KeyTestPressed { text, shift } => {
-            let lang = state.lang.unwrap_or(Lang::Ja);
-            let source_name = state
-                .last_key
-                .as_ref()
-                .map(|(id, _)| display_name(state, id));
-            // WP-U3 / WP-U4: `expected` from the session view (countdown, reconnect) or the
-            // post-reboot entry; `None` shows a neutral verdict.
-            let context = KeyContext {
-                source: state
-                    .last_key
-                    .as_ref()
-                    .map(|(id, code)| (id.as_str(), *code)),
-                source_name: source_name.as_deref(),
-                active_hkl: state.active_hkl,
-                expected: None,
-            };
-            match keytest::key_pressed(&text, shift, &context, lang) {
-                Some(test) => {
-                    state.key_test = test;
-                    vec![Effect::Render]
-                }
-                None => Vec::new(),
-            }
-        }
+        AppMsg::KeyTestPressed { text, shift } => key_test_pressed(state, &text, shift),
         AppMsg::Refresh => vec![Effect::Read],
         AppMsg::ToggleIdentify => {
             state.identify = !state.identify;
@@ -328,62 +543,168 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             state.activity.pointer(at);
             Vec::new()
         }
-        AppMsg::StartRequest { request, apply } => {
-            if state.session != SessionPhase::Idle {
-                // One session at a time (design m3 A.4): a second click, or undo from the tray
-                // while a UAC prompt is up, does nothing.
+        AppMsg::OpenChange(row) => open_change(state, &row),
+        AppMsg::ChangeChoose(index) => choose_layout(state, index),
+        AppMsg::ChangeChooseMethod(index) => {
+            let Some(method) = ApplyMethod::from_index(index) else {
+                return Vec::new();
+            };
+            let Some(draft) = editable_draft(state) else {
+                return Vec::new();
+            };
+            if draft.method == Some(method) {
                 return Vec::new();
             }
-            let session = state.next_session;
-            state.next_session += 1;
-            state.session = SessionPhase::Launching { id: session };
-            state.overlay = OverlayKind::Progress;
-            state.outcome = None;
+            draft.method = Some(method);
+            replan(draft);
+            vec![Effect::Render]
+        }
+        AppMsg::ChangeChooseStandard(index) => {
+            let standard = match index {
+                0 => Layout::Jis,
+                1 => Layout::Us,
+                _ => return Vec::new(),
+            };
+            let Some(draft) = editable_draft(state) else {
+                return Vec::new();
+            };
+            draft.standard = Some(standard);
+            replan(draft);
+            vec![Effect::Render]
+        }
+        AppMsg::ChangeRestartDetection => {
+            let Some(draft) = editable_draft(state) else {
+                return Vec::new();
+            };
+            draft.detection.restart();
+            draft.last_press = None;
+            draft.other_keyboard = None;
+            vec![Effect::Render]
+        }
+        AppMsg::ChangeUseDetected => {
+            let Some(draft) = &state.draft else {
+                return Vec::new();
+            };
+            let choice = match draft.detection.verdict() {
+                Some(Verdict::Jis) => LayoutChoice::Jis,
+                Some(Verdict::Us) => LayoutChoice::Us,
+                Some(Verdict::Mixed) | None => return Vec::new(),
+            };
+            let choices =
+                crate::vm::change::layout_choices(draft_snapshot(state, draft), &draft.members);
+            match choices.iter().position(|c| *c == choice) {
+                Some(index) => choose_layout(state, index),
+                None => Vec::new(),
+            }
+        }
+        AppMsg::OpenRestore => {
+            let token = state.next_prepare;
+            let Some(draft) = editable_draft(state) else {
+                return Vec::new();
+            };
+            draft.restore = true;
+            draft.choice = None;
+            draft.plan = None;
+            draft.failure = None;
+            draft.preparing = Some(token);
+            state.next_prepare += 1;
             vec![
-                Effect::StartSession {
-                    session,
-                    request,
-                    apply,
+                Effect::PrepareChange {
+                    token,
+                    gate: Gate::Restore,
                 },
                 Effect::Render,
             ]
         }
+        AppMsg::ChangePrepared {
+            token,
+            at,
+            prepared,
+        } => change_prepared(state, token, at, *prepared),
+        AppMsg::ChangeApply => {
+            if state.session != SessionPhase::Idle || state.page != Page::Change {
+                return Vec::new();
+            }
+            let Some((request, apply)) = state
+                .draft
+                .as_ref()
+                .and_then(crate::vm::change::draft_request)
+            else {
+                return Vec::new();
+            };
+            if !state.elevated && !state.settings.change.uac_notice_seen {
+                // Read before the first prompt (M2 R12); later changes explain it in one line.
+                state.page = Page::UacNotice;
+                return vec![Effect::Render];
+            }
+            start_change(state, request, apply)
+        }
+        AppMsg::UacGo => {
+            if state.page != Page::UacNotice || state.session != SessionPhase::Idle {
+                return Vec::new();
+            }
+            let Some((request, apply)) = state
+                .draft
+                .as_ref()
+                .and_then(crate::vm::change::draft_request)
+            else {
+                state.page = Page::Change;
+                return vec![Effect::Render];
+            };
+            state.settings.change.uac_notice_seen = true;
+            state.page = Page::Change;
+            let mut effects = vec![Effect::SaveSettings(Box::new(state.settings.clone()))];
+            effects.extend(start_change(state, request, apply));
+            effects
+        }
+        AppMsg::CancelChange => {
+            if state.session != SessionPhase::Idle {
+                return Vec::new();
+            }
+            match state.page {
+                // Back to the choices: nothing is lost, nothing happens.
+                Page::UacNotice => {
+                    state.page = Page::Change;
+                    vec![Effect::Render]
+                }
+                Page::Change => {
+                    state.draft = None;
+                    state.page = Page::Main;
+                    vec![Effect::Read, Effect::Render]
+                }
+                _ => Vec::new(),
+            }
+        }
+        AppMsg::StartRequest { request, apply } => start_request(state, request, apply, Vec::new()),
         AppMsg::SessionNotice { session, notice } if current_session(state, session) => {
             match notice {
                 // A new helper is being launched (the request's, or the recovery's): a UAC
                 // prompt may be up.
-                Notice::Starting(_) => state.session = SessionPhase::Launching { id: session },
+                Notice::Starting(kind) => {
+                    state.session = SessionPhase::Launching { id: session };
+                    if kind == SessionKind::Recovery {
+                        state.note = SessionNote::Recovering;
+                    }
+                }
                 Notice::Connected(_) => {
                     state.session = SessionPhase::Running {
                         id: session,
                         view: Box::default(),
                     };
                 }
-                Notice::HelperLost { .. } | Notice::RecoveringAfterLoss { .. } => {
+                Notice::HelperLost { .. } => {
                     state.overlay = OverlayKind::Progress;
+                    state.note = SessionNote::HelperLost;
+                }
+                Notice::RecoveringAfterLoss { .. } => {
+                    state.overlay = OverlayKind::Progress;
+                    state.note = SessionNote::Recovering;
                 }
             }
             vec![Effect::Render]
         }
         AppMsg::SessionEvent { session, view, .. } if current_session(state, session) => {
-            let overlay = match &view.prompt {
-                Prompt::Countdown { .. } => OverlayKind::Countdown,
-                Prompt::Reconnect { .. } => OverlayKind::Reconnect,
-                Prompt::None | Prompt::Answered { .. } => OverlayKind::Progress,
-            };
-            let mut effects = Vec::new();
-            // A question opened: bring the window to the front even if the user switched away
-            // during the UAC prompt — key tests and Raw Input need the focus (review U10).
-            if overlay != state.overlay
-                && matches!(overlay, OverlayKind::Countdown | OverlayKind::Reconnect)
-            {
-                state.visible = true;
-                effects.push(Effect::ShowWindow);
-            }
-            state.overlay = overlay;
-            state.session = SessionPhase::Running { id: session, view };
-            effects.push(Effect::Render);
-            effects
+            session_event(state, session, view)
         }
         AppMsg::RecoveryQuestion { session, countdown } if current_session(state, session) => {
             state.recovery_question = Some(countdown);
@@ -396,36 +717,88 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
                 return Vec::new();
             }
             state.overlay = OverlayKind::Progress;
+            state.note = if yes {
+                SessionNote::Recovering
+            } else {
+                SessionNote::HelperLost
+            };
             vec![Effect::AnswerRecovery(yes), Effect::Render]
         }
         AppMsg::SessionEnded { session, outcome } if current_session(state, session) => {
-            state.session = SessionPhase::Idle;
-            state.recovery_question = None;
-            let abandoned = matches!(
-                outcome.report.first,
-                mklm_client::orchestrator::RequestEnd::Ended(
-                    mklm_client::session::SessionEnd::Abandoned { .. }
-                )
-            );
-            state.overlay = if abandoned {
-                OverlayKind::None
-            } else {
-                OverlayKind::Result
-            };
-            state.outcome = Some(*outcome);
-            // The RunOnce rule already ran on the worker (design m3 A.2.3).
-            let mut effects = vec![Effect::Read, Effect::Render];
-            if state.quit_pending {
-                effects.push(Effect::Quit);
-            }
-            effects
+            session_ended(state, *outcome)
         }
         // Messages of a session that is not the current one.
         AppMsg::SessionNotice { .. }
         | AppMsg::SessionEvent { .. }
         | AppMsg::RecoveryQuestion { .. }
         | AppMsg::SessionEnded { .. } => Vec::new(),
-        AppMsg::Decide(decision) => vec![Effect::SendDecision(decision)],
+        AppMsg::Decide(decision) => {
+            let keep = matches!(decision, Decision::Keep { .. });
+            if !session_view(state).is_some_and(|view| view.accepts(&decision)) {
+                return Vec::new();
+            }
+            answer(state, keep)
+        }
+        AppMsg::KeepChange => answer(state, true),
+        AppMsg::RevertChange => answer(state, false),
+        AppMsg::DecideLater => {
+            let reconnect = session_view(state)
+                .is_some_and(|view| matches!(view.prompt, Prompt::Reconnect { .. }));
+            if !reconnect || state.decided.is_some() {
+                return Vec::new();
+            }
+            state.note = SessionNote::Leaving;
+            state.overlay = OverlayKind::Progress;
+            state.page = Page::Main;
+            state.draft = None;
+            vec![Effect::CancelSession, Effect::Render]
+        }
+        AppMsg::ResultClosed => {
+            if state.overlay != OverlayKind::Result {
+                return Vec::new();
+            }
+            state.overlay = OverlayKind::None;
+            state.blocked = None;
+            if matches!(state.page, Page::Change | Page::UacNotice) {
+                state.page = Page::Main;
+                state.draft = None;
+            }
+            vec![Effect::Read, Effect::Render]
+        }
+        AppMsg::ResultNextStep => {
+            if state.overlay != OverlayKind::Result {
+                return Vec::new();
+            }
+            let lang = state.lang.unwrap_or(Lang::Ja);
+            let Some(next) = crate::vm::result::shown_result(state, lang).and_then(|r| r.next)
+            else {
+                return Vec::new();
+            };
+            state.overlay = OverlayKind::None;
+            state.blocked = None;
+            let page = match next {
+                crate::vm::result::NextStep::Restart => Page::Restart,
+                crate::vm::result::NextStep::PostReboot => Page::PostReboot,
+                crate::vm::result::NextStep::Conflict => Page::Conflict,
+                crate::vm::result::NextStep::Recovery => Page::Recovery,
+                crate::vm::result::NextStep::ImeHelp => Page::ImeHelp,
+            };
+            let mut effects = update(state, AppMsg::Navigate(page));
+            if !effects.contains(&Effect::Read) {
+                effects.insert(0, Effect::Read);
+            }
+            effects
+        }
+        AppMsg::CopyDetails => {
+            let lang = state.lang.unwrap_or(Lang::Ja);
+            crate::vm::result::shown_result(state, lang)
+                .filter(|result| {
+                    state.overlay == OverlayKind::Result && !result.copy_text.is_empty()
+                })
+                .map(|result| vec![Effect::CopyText(result.copy_text)])
+                .unwrap_or_default()
+        }
+        AppMsg::QuitConfirmAnswered(answer_) => quit_confirm_answered(state, answer_),
         AppMsg::Activate => {
             state.visible = true;
             vec![Effect::ShowWindow, Effect::Read, Effect::Render]
@@ -443,15 +816,401 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             }
             effects
         }
-        AppMsg::QuitRequested => match state.session {
-            SessionPhase::Idle => vec![Effect::Quit],
-            // Nothing is connected yet: leave now (design m3 F.5 "UAC 待ち").
-            SessionPhase::Launching { .. } => vec![Effect::CancelSession, Effect::Quit],
-            SessionPhase::Running { .. } => {
-                state.quit_pending = true;
-                vec![Effect::CancelSession]
-            }
+        AppMsg::QuitRequested => quit_requested(state),
+    }
+}
+
+/// The snapshot a draft's page describes: the preparation's, else the display read's.
+fn draft_snapshot<'a>(state: &'a AppState, draft: &'a ChangeDraft) -> Option<&'a SystemSnapshot> {
+    draft
+        .prepared
+        .as_ref()
+        .map(|prepared| &prepared.snapshot)
+        .or_else(|| state.read.as_ref().and_then(|read| read.snapshot.as_ref()))
+}
+
+/// The draft while the change page can still be edited (no session runs).
+fn editable_draft(state: &mut AppState) -> Option<&mut ChangeDraft> {
+    if state.session != SessionPhase::Idle || state.page != Page::Change {
+        return None;
+    }
+    state.draft.as_mut()
+}
+
+/// "変更…" on a row: the change page for its device (design m3 B.4).
+fn open_change(state: &mut AppState, row: &str) -> Vec<Effect> {
+    if state.session != SessionPhase::Idle {
+        return Vec::new();
+    }
+    let Some(snapshot) = state.read.as_ref().and_then(|read| read.snapshot.as_ref()) else {
+        return Vec::new();
+    };
+    let assessment = assess(snapshot);
+    // The row ID is the container of an external device, or a keyboard's instance ID
+    // (`vm::keyboards::keyboard_rows`).
+    let Some(group) = assessment.groups.iter().find(|group| {
+        (!group.is_internal
+            && group
+                .container_id
+                .as_deref()
+                .is_some_and(|container| container.eq_ignore_ascii_case(row)))
+            || group
+                .keyboards
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(row))
+    }) else {
+        return Vec::new();
+    };
+    state.draft = Some(ChangeDraft::new(
+        row.to_string(),
+        group.display_name.clone(),
+        group.keyboards.clone(),
+    ));
+    state.identify = false;
+    state.highlighted = None;
+    state.key_test = KeyTest::default();
+    state.page = Page::Change;
+    vec![Effect::Render]
+}
+
+/// A layout choice: read what the change is planned with (design m3 B.5).
+fn choose_layout(state: &mut AppState, index: usize) -> Vec<Effect> {
+    let token = state.next_prepare;
+    let choices = match &state.draft {
+        Some(draft) => {
+            crate::vm::change::layout_choices(draft_snapshot(state, draft), &draft.members)
+        }
+        None => return Vec::new(),
+    };
+    let Some(choice) = choices.get(index).copied() else {
+        return Vec::new();
+    };
+    let Some(draft) = editable_draft(state) else {
+        return Vec::new();
+    };
+    if draft.restore || (draft.choice == Some(choice) && draft.failure.is_none()) {
+        return Vec::new();
+    }
+    draft.choice = Some(choice);
+    draft.plan = None;
+    draft.failure = None;
+    draft.preparing = Some(token);
+    state.next_prepare += 1;
+    vec![
+        Effect::PrepareChange {
+            token,
+            gate: Gate::NewOp,
         },
+        Effect::Render,
+    ]
+}
+
+/// Makes the draft's plan again from what the preparation read, with the resolved method.
+fn replan(draft: &mut ChangeDraft) {
+    let Some(prepared) = &draft.prepared else {
+        draft.plan = None;
+        return;
+    };
+    let Some(target) = crate::vm::change::target_instance(&prepared.snapshot, &draft.members)
+    else {
+        draft.plan = None;
+        return;
+    };
+    let method = draft.resolved_method();
+    draft.plan = if draft.restore {
+        Some(crate::vm::change::plan_restore(
+            &prepared.snapshot,
+            &prepared.journal,
+            &target,
+            method,
+        ))
+    } else {
+        draft.choice.map(|choice| {
+            crate::vm::change::plan_change(
+                &prepared.snapshot,
+                prepared.uncertain_values,
+                &target,
+                choice,
+                method,
+                draft.standard,
+            )
+        })
+    };
+}
+
+fn change_prepared(
+    state: &mut AppState,
+    token: u64,
+    at: Instant,
+    prepared: Result<PreparedChange, PrepareFailure>,
+) -> Vec<Effect> {
+    let activity = state.activity.clone();
+    let Some(draft) = state.draft.as_mut() else {
+        return Vec::new();
+    };
+    // A preparation the user has moved on from (another choice since) is dropped.
+    if draft.preparing != Some(token) {
+        return Vec::new();
+    }
+    draft.preparing = None;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(failure) => {
+            draft.failure = Some(failure);
+            draft.plan = None;
+            return vec![Effect::Render];
+        }
+    };
+    let blocker = prepared.blocker.clone();
+    draft.method_default = Some(crate::vm::change::default_apply_method(
+        &activity,
+        &draft.members,
+        at,
+    ));
+    draft.prepared = Some(prepared);
+    replan(draft);
+    if let Some(reason) = blocker {
+        // Stopped by the journal: say why, and show no UAC prompt (design m3 B.5).
+        state.blocked = Some(reason);
+        state.outcome = None;
+        state.overlay = OverlayKind::Result;
+    }
+    vec![Effect::Render]
+}
+
+/// The keyboards of the draft's request, with how they type now.
+fn draft_targets(state: &AppState) -> Vec<SessionTarget> {
+    let Some(draft) = &state.draft else {
+        return Vec::new();
+    };
+    let before = draft_snapshot(state, draft).and_then(|snapshot| {
+        let assessment = assess(snapshot);
+        let member = |present: bool| {
+            assessment.keyboards.iter().find(|ka| {
+                (ka.present || !present)
+                    && draft
+                        .members
+                        .iter()
+                        .any(|m| m.eq_ignore_ascii_case(&ka.instance_id))
+            })
+        };
+        member(true)
+            .or_else(|| member(false))
+            .and_then(|ka| ka.current.as_ref())
+            .map(|layout| layout.table.clone())
+    });
+    vec![SessionTarget {
+        name: draft.name.clone(),
+        members: draft.members.clone(),
+        before,
+    }]
+}
+
+fn start_change(state: &mut AppState, request: Request, apply: ApplyOptions) -> Vec<Effect> {
+    let targets = draft_targets(state);
+    start_request(state, request, apply, targets)
+}
+
+/// Starts a helper session (one at a time, design m3 A.4).
+fn start_request(
+    state: &mut AppState,
+    request: Request,
+    apply: ApplyOptions,
+    targets: Vec<SessionTarget>,
+) -> Vec<Effect> {
+    if state.session != SessionPhase::Idle {
+        // One session at a time (design m3 A.4): a second click, or undo from the tray while a
+        // UAC prompt is up, does nothing.
+        return Vec::new();
+    }
+    let session = state.next_session;
+    state.next_session += 1;
+    state.session = SessionPhase::Launching { id: session };
+    state.overlay = OverlayKind::Progress;
+    state.outcome = None;
+    state.blocked = None;
+    state.note = SessionNote::None;
+    state.decided = None;
+    state.last_view = None;
+    state.result_read_pending = false;
+    state.targets = targets;
+    state.request = Some(request.clone());
+    state.key_test = KeyTest::default();
+    vec![
+        Effect::StartSession {
+            session,
+            request,
+            apply,
+        },
+        Effect::Render,
+    ]
+}
+
+fn session_event(state: &mut AppState, session: SessionId, view: Box<SessionView>) -> Vec<Effect> {
+    let overlay = match (&view.prompt, state.overlay) {
+        // The quit confirmation stays over a reconnect reminder.
+        (Prompt::Reconnect { .. }, OverlayKind::QuitConfirm) => OverlayKind::QuitConfirm,
+        // Leaving for later: the relay is about to go; a reminder does not reopen the question.
+        (Prompt::Reconnect { .. }, _) if state.note == SessionNote::Leaving => {
+            OverlayKind::Progress
+        }
+        // Answered already: a tick sent before the answer reached the helper does not bring the
+        // question back.
+        (Prompt::Countdown { op_id, .. } | Prompt::Reconnect { op_id, .. }, _)
+            if state.decided.as_ref() == Some(op_id) =>
+        {
+            OverlayKind::Progress
+        }
+        (Prompt::Countdown { .. }, _) => OverlayKind::Countdown,
+        (Prompt::Reconnect { .. }, _) => OverlayKind::Reconnect,
+        (Prompt::None | Prompt::Answered { .. }, _) => OverlayKind::Progress,
+    };
+    let mut effects = Vec::new();
+    // A question opened: bring the window to the front even if the user switched away during
+    // the UAC prompt — key tests and Raw Input need the focus (review U10).
+    if overlay != state.overlay
+        && matches!(overlay, OverlayKind::Countdown | OverlayKind::Reconnect)
+    {
+        if state.overlay == OverlayKind::Progress {
+            state.key_test = KeyTest::default();
+        }
+        state.visible = true;
+        effects.push(Effect::ShowWindow);
+    }
+    state.overlay = overlay;
+    if view.planned {
+        if state.targets.is_empty() {
+            state.targets = view_targets(state, &view);
+        }
+        state.last_view = Some(view.clone());
+    }
+    state.session = SessionPhase::Running { id: session, view };
+    effects.push(Effect::Render);
+    effects
+}
+
+/// The keyboards a journaled operation changes, one per name (for requests that did not come
+/// from the change page).
+fn view_targets(state: &AppState, view: &SessionView) -> Vec<SessionTarget> {
+    let snapshot = state.read.as_ref().and_then(|read| read.snapshot.as_ref());
+    let assessment = snapshot.map(assess);
+    let mut targets: Vec<SessionTarget> = Vec::new();
+    for kb in view.keyboards.iter().filter(|kb| kb.changes) {
+        if let Some(target) = targets.iter_mut().find(|t| t.name == kb.display_name) {
+            target.members.push(kb.instance_id.clone());
+            continue;
+        }
+        let before = assessment.as_ref().and_then(|assessment| {
+            assessment
+                .keyboards
+                .iter()
+                .find(|ka| ka.instance_id.eq_ignore_ascii_case(&kb.instance_id))
+                .and_then(|ka| ka.current.as_ref())
+                .map(|layout| layout.table.clone())
+        });
+        targets.push(SessionTarget {
+            name: kb.display_name.clone(),
+            members: vec![kb.instance_id.clone()],
+            before,
+        });
+    }
+    targets
+}
+
+fn session_ended(state: &mut AppState, outcome: SessionOutcome) -> Vec<Effect> {
+    state.session = SessionPhase::Idle;
+    state.recovery_question = None;
+    state.decided = None;
+    state.note = SessionNote::None;
+    state.draft = None;
+    if matches!(state.page, Page::Change | Page::UacNotice) {
+        state.page = Page::Main;
+    }
+    let abandoned = matches!(
+        outcome.report.first,
+        mklm_client::orchestrator::RequestEnd::Ended(
+            mklm_client::session::SessionEnd::Abandoned { .. }
+        )
+    );
+    state.outcome = Some(outcome);
+    // The RunOnce rule already ran on the worker (design m3 A.2.3).
+    let mut effects = if abandoned {
+        // "Decide later": nothing to report; the banner shows the waiting change.
+        state.overlay = OverlayKind::None;
+        state.result_read_pending = false;
+        vec![Effect::Read, Effect::Render]
+    } else {
+        state.overlay = OverlayKind::Result;
+        state.result_read_pending = true;
+        vec![Effect::ReadForResult, Effect::Render]
+    };
+    if state.quit_pending {
+        effects.push(Effect::Quit);
+    }
+    effects
+}
+
+/// Answers the open question of the running session (design m3 B.6, B.7): once per question,
+/// and only while one is open (the relay drops anything else, design m3 A.2.2).
+fn answer(state: &mut AppState, keep: bool) -> Vec<Effect> {
+    let Some(view) = session_view(state) else {
+        return Vec::new();
+    };
+    let op_id = match &view.prompt {
+        Prompt::Countdown { op_id, .. } | Prompt::Reconnect { op_id, .. } => op_id.clone(),
+        Prompt::None | Prompt::Answered { .. } => return Vec::new(),
+    };
+    if state.decided.as_ref() == Some(&op_id) {
+        return Vec::new();
+    }
+    let decision = if keep {
+        Decision::Keep {
+            op_id: op_id.clone(),
+        }
+    } else {
+        Decision::RevertNow {
+            op_id: op_id.clone(),
+        }
+    };
+    state.decided = Some(op_id);
+    state.note = if keep {
+        SessionNote::Keeping
+    } else {
+        SessionNote::Reverting
+    };
+    state.overlay = OverlayKind::Progress;
+    vec![Effect::SendDecision(decision), Effect::Render]
+}
+
+/// A key in the key test, judged against the open question's expectation (review U2).
+fn key_test_pressed(state: &mut AppState, text: &str, shift: bool) -> Vec<Effect> {
+    let lang = state.lang.unwrap_or(Lang::Ja);
+    let source_name = state
+        .last_key
+        .as_ref()
+        .map(|(id, _)| display_name(state, id));
+    // WP-U4: the post-reboot check passes its row's expectation the same way.
+    let expectation = session_view(state).and_then(keytest::session_expectation);
+    let expected = expectation.as_ref().map(|(targets, name, table)| Expected {
+        targets,
+        name,
+        table,
+    });
+    let context = KeyContext {
+        source: state
+            .last_key
+            .as_ref()
+            .map(|(id, code)| (id.as_str(), *code)),
+        source_name: source_name.as_deref(),
+        active_hkl: state.active_hkl,
+        expected,
+    };
+    match keytest::key_pressed(text, shift, &context, lang) {
+        Some(test) => {
+            state.key_test = test;
+            vec![Effect::Render]
+        }
+        None => Vec::new(),
     }
 }
 
@@ -474,20 +1233,60 @@ fn device_key(
         visible_change = true; // the "キー入力なし" badge goes away
     }
     if crate::detect::is_jis_only_key(scancode)
-        && state
-            .settings
-            .learn_physical(crate::settings::PhysicalLayout {
-                id: instance_id.clone(),
-                layout: crate::settings::PhysicalKind::Jis,
-                source: crate::settings::PhysicalSource::JisOnlyKey,
-            })
+        && state.settings.learn_physical(PhysicalLayout {
+            id: instance_id.clone(),
+            layout: PhysicalKind::Jis,
+            source: PhysicalSource::JisOnlyKey,
+        })
     {
         save = true;
         visible_change = true; // the row may now say "実物は JIS 配列です…"
     }
-    if let Some(draft) = &mut state.draft {
-        draft.last_press = Some(draft.detection.press(&instance_id, scancode));
-        visible_change = true;
+    let detecting = state.session == SessionPhase::Idle && state.page == Page::Change;
+    let mut learned = None;
+    if detecting
+        && let Some(draft) = state.draft.as_mut()
+        && !draft.restore
+    {
+        let before = (draft.detection.clone(), draft.other_keyboard.clone());
+        let press = draft.detection.press(&instance_id, scancode);
+        draft.last_press = Some(press);
+        let answer_key = matches!(
+            scancode,
+            crate::detect::scancode::YEN
+                | crate::detect::scancode::EQUAL
+                | crate::detect::scancode::RO
+                | crate::detect::scancode::SLASH
+        );
+        match press {
+            // Only an answer key on the wrong keyboard is worth a word (not Tab or a letter).
+            Press::OtherKeyboard if answer_key => draft.other_keyboard = Some(instance_id.clone()),
+            Press::Counted => draft.other_keyboard = None,
+            Press::OtherKeyboard | Press::NotAnAnswer | Press::Finished => {}
+        }
+        if press == Press::Counted
+            && let (Some(device), Some(verdict)) =
+                (draft.detection.device.clone(), draft.detection.verdict())
+        {
+            learned = match verdict {
+                Verdict::Jis => Some((device, PhysicalKind::Jis)),
+                Verdict::Us => Some((device, PhysicalKind::Us)),
+                Verdict::Mixed => None,
+            };
+        }
+        if (draft.detection.clone(), draft.other_keyboard.clone()) != before {
+            visible_change = true;
+        }
+    }
+    // The detection's verdict is what the keyboard physically is (design m3 B.3).
+    if let Some((id, layout)) = learned
+        && state.settings.learn_physical(PhysicalLayout {
+            id,
+            layout,
+            source: PhysicalSource::Detection,
+        })
+    {
+        save = true;
     }
     if state.identify
         && state
@@ -513,9 +1312,7 @@ fn device_key(
 fn close_requested(state: &mut AppState) -> Vec<Effect> {
     match &state.session {
         SessionPhase::Running { view, .. } => match &view.prompt {
-            Prompt::Countdown { op_id, .. } => vec![Effect::SendDecision(Decision::RevertNow {
-                op_id: op_id.clone(),
-            })],
+            Prompt::Countdown { .. } => answer(state, false),
             _ => Vec::new(),
         },
         SessionPhase::Launching { .. } => Vec::new(),
@@ -530,21 +1327,97 @@ fn close_requested(state: &mut AppState) -> Vec<Effect> {
     }
 }
 
+/// Quitting (tray, `quit`): at once without a connected helper; a reconnect wait asks first;
+/// otherwise after the result (a countdown is reverted by the relay, design m3 F.5).
+fn quit_requested(state: &mut AppState) -> Vec<Effect> {
+    match &state.session {
+        SessionPhase::Idle => vec![Effect::Quit],
+        // Nothing is connected yet: leave now (design m3 F.5 "UAC 待ち").
+        SessionPhase::Launching { .. } => vec![Effect::CancelSession, Effect::Quit],
+        SessionPhase::Running { view, .. } => {
+            if matches!(view.prompt, Prompt::Reconnect { .. })
+                && state.decided.is_none()
+                && !state.quit_pending
+            {
+                state.overlay = OverlayKind::QuitConfirm;
+                state.visible = true;
+                return vec![Effect::ShowWindow, Effect::Render];
+            }
+            let countdown = matches!(view.prompt, Prompt::Countdown { .. });
+            state.quit_pending = true;
+            if countdown && state.decided.is_none() {
+                state.note = SessionNote::Reverting;
+                state.overlay = OverlayKind::Progress;
+                return vec![Effect::CancelSession, Effect::Render];
+            }
+            vec![Effect::CancelSession]
+        }
+    }
+}
+
+fn quit_confirm_answered(state: &mut AppState, answer_: QuitAnswer) -> Vec<Effect> {
+    if state.overlay != OverlayKind::QuitConfirm {
+        return Vec::new();
+    }
+    let reconnect =
+        session_view(state).is_some_and(|view| matches!(view.prompt, Prompt::Reconnect { .. }));
+    match answer_ {
+        QuitAnswer::Cancel => {
+            state.overlay = if reconnect {
+                OverlayKind::Reconnect
+            } else {
+                OverlayKind::Progress
+            };
+            vec![Effect::Render]
+        }
+        QuitAnswer::RevertAndQuit => {
+            state.quit_pending = true;
+            let effects = answer(state, false);
+            if effects.is_empty() {
+                // The question closed meanwhile: leave as soon as the result is in.
+                state.overlay = OverlayKind::Progress;
+                return vec![Effect::CancelSession, Effect::Render];
+            }
+            effects
+        }
+        QuitAnswer::QuitLeavingIt => {
+            state.quit_pending = true;
+            state.note = SessionNote::Leaving;
+            state.overlay = OverlayKind::Progress;
+            vec![Effect::CancelSession, Effect::Render]
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use mklm_client::orchestrator::RequestEnd;
+    use std::time::Duration;
+
+    use mklm_client::gate::OpRef;
+    use mklm_client::orchestrator::{LaunchError, RecoverySkip, RequestEnd};
     use mklm_client::session::SessionEnd;
-    use mklm_core::OpId;
+    use mklm_core::{
+        ExpectedKeyboard, KeyboardType, OpKind, OpState, OperationResult, Outcome, PendingAction,
+        fixtures,
+    };
 
     use super::*;
+    use crate::vm::SnapshotText;
 
     const KEYCHRON: &str = r"HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000";
+    const KEYCHRON_ROW: &str = "{F0D991EA-A583-5B9C-800D-48846AC6E633}";
+    const BUILT_IN: &str = r"ACPI\FUJ0309\4&320DB4C2&0";
+    const JAPANESE: u32 = 0x0411_0411;
 
     fn key(state: &mut AppState, scancode: u32) -> Vec<Effect> {
+        key_from(state, KEYCHRON, scancode)
+    }
+
+    fn key_from(state: &mut AppState, instance_id: &str, scancode: u32) -> Vec<Effect> {
         update(
             state,
             AppMsg::DeviceKey {
-                instance_id: KEYCHRON.into(),
+                instance_id: instance_id.into(),
                 scancode,
                 at: Instant::now(),
             },
@@ -561,15 +1434,22 @@ mod tests {
     }
 
     fn ended(session: SessionId, end: SessionEnd) -> AppMsg {
+        ended_with(
+            session,
+            RequestReport {
+                first: RequestEnd::Ended(end),
+                lost_needs_recovery: None,
+                recovery: None,
+                recovery_skipped: None,
+            },
+        )
+    }
+
+    fn ended_with(session: SessionId, report: RequestReport) -> AppMsg {
         AppMsg::SessionEnded {
             session,
             outcome: Box::new(SessionOutcome {
-                report: RequestReport {
-                    first: RequestEnd::Ended(end),
-                    lost_needs_recovery: None,
-                    recovery: None,
-                    recovery_skipped: None,
-                },
+                report,
                 run_once: Ok(RunOnceOutcome::NotNeeded),
             }),
         }
@@ -626,7 +1506,7 @@ mod tests {
             &mut state,
             AppMsg::SessionNotice {
                 session: 0,
-                notice: Notice::Connected(mklm_client::session::SessionKind::Request),
+                notice: Notice::Connected(SessionKind::Request),
             },
         );
         assert!(matches!(state.session, SessionPhase::Running { id: 0, .. }));
@@ -697,9 +1577,13 @@ mod tests {
         );
     }
 
+    fn op() -> OpId {
+        OpId::parse("3f2a9c1e-5b7d-4e8a-9c0f-1a2b3c4d5e6f").unwrap()
+    }
+
     #[test]
     fn closing_the_window_during_a_countdown_reverts() {
-        let op_id = OpId::parse("3f2a9c1e-5b7d-4e8a-9c0f-1a2b3c4d5e6f").unwrap();
+        let op_id = op();
         let mut view = SessionView::default();
         view.observe(&Event::CountdownStarted {
             op_id: op_id.clone(),
@@ -711,12 +1595,21 @@ mod tests {
                 id: 0,
                 view: Box::new(view),
             },
+            overlay: OverlayKind::Countdown,
             ..AppState::default()
         };
         assert_eq!(
             update(&mut state, AppMsg::WindowCloseRequested),
-            vec![Effect::SendDecision(Decision::RevertNow { op_id })]
+            vec![
+                Effect::SendDecision(Decision::RevertNow { op_id }),
+                Effect::Render
+            ]
         );
+        // The dialog now waits for the result (design m3 B.18).
+        assert_eq!(state.overlay, OverlayKind::Progress);
+        assert_eq!(progress_stage(&state), Stage::Answered { keep: false });
+        // A second × does not send it again.
+        assert!(update(&mut state, AppMsg::WindowCloseRequested).is_empty());
     }
 
     #[test]
@@ -736,5 +1629,908 @@ mod tests {
             vec![Effect::AnswerRecovery(false), Effect::Render]
         );
         assert!(update(&mut state, AppMsg::AnswerRecovery(true)).is_empty());
+    }
+
+    // --- The change flow with a fake helper (WP-U3) ---
+
+    /// The development machine as the display read and the planning inventory see it.
+    fn read() -> SystemRead {
+        SystemRead {
+            snapshot: Some(fixtures::dev_machine()),
+            warnings: Vec::new(),
+            journal: Some(Journal::default()),
+            boot: None,
+            summary: StartupSummary::default(),
+        }
+    }
+
+    fn prepared() -> PreparedChange {
+        PreparedChange {
+            snapshot: fixtures::dev_machine(),
+            uncertain_values: false,
+            warnings: Vec::new(),
+            journal: Journal::default(),
+            blocker: None,
+        }
+    }
+
+    fn ready_state() -> AppState {
+        AppState {
+            lang: Some(Lang::Ja),
+            read: Some(read()),
+            active_hkl: JAPANESE,
+            visible: true,
+            ..AppState::default()
+        }
+    }
+
+    /// Plays the helper's part: every event goes through `SessionView::observe` first, as the
+    /// relay does, then reaches the UI thread as `AppMsg::SessionEvent`.
+    struct FakeHelper {
+        session: SessionId,
+        view: SessionView,
+    }
+
+    impl FakeHelper {
+        fn connect(state: &mut AppState, session: SessionId) -> Self {
+            for notice in [
+                Notice::Starting(SessionKind::Request),
+                Notice::Connected(SessionKind::Request),
+            ] {
+                update(state, AppMsg::SessionNotice { session, notice });
+            }
+            Self {
+                session,
+                view: SessionView::default(),
+            }
+        }
+
+        fn send(&mut self, state: &mut AppState, event: Event) -> Vec<Effect> {
+            self.view.observe(&event);
+            update(
+                state,
+                AppMsg::SessionEvent {
+                    session: self.session,
+                    event: Box::new(event),
+                    view: Box::new(self.view.clone()),
+                },
+            )
+        }
+
+        /// A USB set up to its countdown (design m2 D.2 a).
+        fn live_reset(&mut self, state: &mut AppState, layout: LayoutTable) -> Vec<Effect> {
+            let expected_type = if layout == LayoutTable::Jis {
+                KeyboardType::JIS
+            } else {
+                KeyboardType::US
+            };
+            let mut effects = Vec::new();
+            for event in [
+                Event::Locked,
+                Event::Planned {
+                    op_id: op(),
+                    steps: Vec::new(),
+                    apply: Some(PendingAction::ResetKeyboard),
+                    keyboards: vec![ExpectedKeyboard {
+                        instance_id: KEYCHRON.into(),
+                        display_name: "Keychron Receiver".into(),
+                        expected_type: Some(expected_type),
+                        layout_after: Some(layout),
+                        changes: true,
+                    }],
+                },
+                Event::StateChanged {
+                    op_id: op(),
+                    state: OpState::Written,
+                },
+                Event::StepWritten {
+                    op_id: op(),
+                    step: 1,
+                    of: 1,
+                },
+                Event::ResettingKeyboard {
+                    instance_id: KEYCHRON.into(),
+                },
+                Event::KeyboardArrived {
+                    instance_id: KEYCHRON.into(),
+                    reported: Some(expected_type),
+                    expected: expected_type,
+                },
+                Event::CountdownStarted {
+                    op_id: op(),
+                    seconds: 20,
+                    verified: true,
+                },
+            ] {
+                effects = self.send(state, event);
+            }
+            effects
+        }
+
+        fn tick(&mut self, state: &mut AppState, remaining: u32) -> Vec<Effect> {
+            self.send(
+                state,
+                Event::CountdownTick {
+                    op_id: op(),
+                    remaining,
+                },
+            )
+        }
+    }
+
+    fn result(outcome: Outcome, failure: Option<mklm_core::FailureReason>) -> OperationResult {
+        OperationResult {
+            op_id: Some(op()),
+            outcome,
+            failure,
+            pending_action: None,
+            conflicts: Vec::new(),
+            inv_ps2_violation: None,
+            recovered: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// "変更…" on the Keychron, JIS chosen and prepared; returns the effects of the answer.
+    fn choose_jis(state: &mut AppState, at: Instant) -> Vec<Effect> {
+        assert_eq!(
+            update(state, AppMsg::OpenChange(KEYCHRON_ROW.into())),
+            vec![Effect::Render]
+        );
+        assert_eq!(state.page, Page::Change);
+        let effects = update(state, AppMsg::ChangeChoose(0));
+        let token = match effects.as_slice() {
+            [
+                Effect::PrepareChange {
+                    token,
+                    gate: Gate::NewOp,
+                },
+                Effect::Render,
+            ] => *token,
+            other => panic!("{other:?}"),
+        };
+        update(
+            state,
+            AppMsg::ChangePrepared {
+                token,
+                at,
+                prepared: Box::new(Ok(prepared())),
+            },
+        )
+    }
+
+    fn page(state: &AppState) -> crate::vm::change::ChangePage {
+        let draft = state.draft.as_ref().unwrap();
+        crate::vm::change::change_page(&crate::vm::change::ChangeContext {
+            draft,
+            display: state.read.as_ref().and_then(|read| read.snapshot.as_ref()),
+            uac_notice_seen: state.settings.change.uac_notice_seen,
+            elevated: state.elevated,
+            seconds: 20,
+            other_name: None,
+            lang: Lang::Ja,
+        })
+    }
+
+    #[test]
+    fn a_change_from_the_page_to_the_result() {
+        // T-APPLY-1 without the hardware: Keychron to JIS, a mouse user (switch now), the
+        // first-time UAC explanation, the countdown, "keep", the result and the state now.
+        let mut state = ready_state();
+        let now = Instant::now();
+        update(&mut state, AppMsg::PointerUsed(now));
+        choose_jis(&mut state, now + Duration::from_secs(5));
+        let shown = page(&state);
+        assert!(shown.can_apply && shown.method_visible);
+        assert_eq!(shown.method, Some(ApplyMethod::Live));
+        assert!(!navigation_enabled(&state));
+        // The first change: the explanation page comes before any prompt (M2 R12).
+        assert_eq!(
+            update(&mut state, AppMsg::ChangeApply),
+            vec![Effect::Render]
+        );
+        assert_eq!(state.page, Page::UacNotice);
+        let effects = update(&mut state, AppMsg::UacGo);
+        assert!(matches!(effects[0], Effect::SaveSettings(ref s) if s.change.uac_notice_seen));
+        let Effect::StartSession {
+            session,
+            request: Request::SetLayout(set),
+            apply,
+        } = &effects[1]
+        else {
+            panic!("{effects:?}")
+        };
+        assert_eq!(set.instance_id, KEYCHRON);
+        assert_eq!(set.layout, LayoutChoice::Jis);
+        assert_eq!(*apply, ApplyMethod::Live.options());
+        assert_eq!(
+            set.expected.as_ref().unwrap().apply,
+            Some(PendingAction::ResetKeyboard)
+        );
+        let session = *session;
+        assert_eq!(state.overlay, OverlayKind::Progress);
+        assert_eq!(progress_stage(&state), Stage::Launching);
+        // Nothing else starts while the prompt is up.
+        assert!(update(&mut state, AppMsg::ChangeApply).is_empty());
+
+        let mut helper = FakeHelper::connect(&mut state, session);
+        assert_eq!(progress_stage(&state), Stage::Running);
+        // The countdown opens: the window comes to the front (review U10).
+        state.visible = false;
+        let effects = helper.live_reset(&mut state, LayoutTable::Jis);
+        assert_eq!(state.overlay, OverlayKind::Countdown);
+        assert_eq!(effects, vec![Effect::ShowWindow, Effect::Render]);
+        assert!(state.visible);
+        // Shift+2 on the Keychron: judged against JIS (review U2).
+        key(&mut state, keytest::SCANCODE_DIGIT2);
+        update(
+            &mut state,
+            AppMsg::KeyTestPressed {
+                text: "\"".into(),
+                shift: true,
+            },
+        );
+        assert_eq!(
+            state.key_test.verdict,
+            "Shift+2 → \" : ✓ 期待どおり JIS です"
+        );
+        // The built-in keyboard: which keyboard to use instead.
+        key_from(&mut state, BUILT_IN, keytest::SCANCODE_DIGIT2);
+        update(
+            &mut state,
+            AppMsg::KeyTestPressed {
+                text: "\"".into(),
+                shift: true,
+            },
+        );
+        assert!(
+            state
+                .key_test
+                .verdict
+                .ends_with("Keychron Receiver で押してください"),
+            "{}",
+            state.key_test.verdict
+        );
+        helper.tick(&mut state, 10);
+        let countdown =
+            crate::vm::session::countdown(session_view(&state).unwrap(), Lang::Ja).unwrap();
+        assert_eq!(countdown.reminder, "あと 10 秒で元に戻ります");
+        // Keep: sent once; the dialog waits for the result.
+        assert_eq!(
+            update(&mut state, AppMsg::KeepChange),
+            vec![
+                Effect::SendDecision(Decision::Keep { op_id: op() }),
+                Effect::Render
+            ]
+        );
+        assert_eq!(state.overlay, OverlayKind::Progress);
+        assert!(update(&mut state, AppMsg::KeepChange).is_empty());
+        // A tick sent before the answer reached the helper does not reopen the question.
+        helper.tick(&mut state, 9);
+        assert_eq!(state.overlay, OverlayKind::Progress);
+        assert_eq!(progress_stage(&state), Stage::Answered { keep: true });
+
+        let effects = update(
+            &mut state,
+            ended_with(
+                session,
+                RequestReport {
+                    first: RequestEnd::Ended(SessionEnd::Finished(result(
+                        Outcome::Confirmed,
+                        None,
+                    ))),
+                    lost_needs_recovery: None,
+                    recovery: None,
+                    recovery_skipped: None,
+                },
+            ),
+        );
+        assert_eq!(effects, vec![Effect::ReadForResult, Effect::Render]);
+        assert_eq!(state.overlay, OverlayKind::Result);
+        assert_eq!(state.page, Page::Main);
+        assert!(state.draft.is_none());
+        // Until the read after the session arrives, "今の状態" says so (review U7).
+        let waiting = crate::vm::result::shown_result(&state, Lang::Ja).unwrap();
+        assert_eq!(waiting.current_state, vec!["確かめています…".to_string()]);
+        let mut after = read();
+        after.snapshot.as_mut().unwrap().keyboards[1].reported_type = Some(KeyboardType::JIS);
+        update(&mut state, AppMsg::SystemRead(Box::new(after)));
+        assert_eq!(
+            update(&mut state, AppMsg::ResultReadArrived),
+            vec![Effect::Render]
+        );
+        let shown = crate::vm::result::shown_result(&state, Lang::Ja).unwrap();
+        assert_eq!(
+            shown.snapshot_text(),
+            "title: 完了しました\n\
+             tone: Success\n\
+             now: Keychron Receiver: JIS として動作中\n\
+             message: 新しい配列のままにしました。\n"
+        );
+        // "詳細をコピー": English diagnostics only.
+        let copy = update(&mut state, AppMsg::CopyDetails);
+        assert!(matches!(&copy[..], [Effect::CopyText(text)] if text.contains("3f2a9c1e")));
+        assert_eq!(
+            update(&mut state, AppMsg::ResultClosed),
+            vec![Effect::Read, Effect::Render]
+        );
+        assert_eq!((state.page, state.overlay), (Page::Main, OverlayKind::None));
+        assert!(navigation_enabled(&state));
+
+        // The second change: no explanation page; the one line and the button say it.
+        choose_jis(&mut state, Instant::now());
+        assert!(!page(&state).uac_line.is_empty());
+        let effects = update(&mut state, AppMsg::ChangeApply);
+        assert!(matches!(
+            effects[0],
+            Effect::StartSession { session: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn a_keyboard_only_user_of_the_target_switches_at_the_restart() {
+        // T-APPLY-9: only the Keychron typed; the default is the restart, with the warning,
+        // and the request carries the restart's options.
+        let mut state = ready_state();
+        state.settings.change.uac_notice_seen = true;
+        let now = Instant::now();
+        key(&mut state, 0x1E);
+        choose_jis(&mut state, now);
+        let shown = page(&state);
+        assert_eq!(shown.method, Some(ApplyMethod::Restart));
+        assert_eq!(shown.warnings.len(), 1);
+        // The user picks "switch now" after all: the plan is made again (design m2 S6).
+        update(&mut state, AppMsg::ChangeChooseMethod(0));
+        let shown = page(&state);
+        assert_eq!(shown.method, Some(ApplyMethod::Live));
+        assert!(shown.warnings.is_empty());
+        let effects = update(&mut state, AppMsg::ChangeApply);
+        let Effect::StartSession { apply, .. } = &effects[0] else {
+            panic!("{effects:?}")
+        };
+        assert!(apply.allow_live_reset && apply.other_input_available);
+    }
+
+    #[test]
+    fn a_stale_preparation_is_dropped_and_the_detection_selects() {
+        let mut state = ready_state();
+        update(&mut state, AppMsg::OpenChange(KEYCHRON.into()));
+        let first = update(&mut state, AppMsg::ChangeChoose(0));
+        let second = update(&mut state, AppMsg::ChangeChoose(1));
+        let token = |effects: &[Effect]| match effects[0] {
+            Effect::PrepareChange { token, .. } => token,
+            _ => panic!(),
+        };
+        // The answer to the first choice arrives late: ignored.
+        assert!(
+            update(
+                &mut state,
+                AppMsg::ChangePrepared {
+                    token: token(&first),
+                    at: Instant::now(),
+                    prepared: Box::new(Ok(prepared())),
+                },
+            )
+            .is_empty()
+        );
+        assert!(page(&state).preparing);
+        update(
+            &mut state,
+            AppMsg::ChangePrepared {
+                token: token(&second),
+                at: Instant::now(),
+                prepared: Box::new(Ok(prepared())),
+            },
+        );
+        // US is what it is set to: nothing to change, no prompt.
+        assert!(!page(&state).can_apply);
+        // The detection on the page: the built-in keyboard's answer key is not counted.
+        let effects = key_from(&mut state, BUILT_IN, crate::detect::scancode::YEN);
+        assert!(effects.contains(&Effect::Render));
+        assert_eq!(
+            state.draft.as_ref().unwrap().other_keyboard.as_deref(),
+            Some(BUILT_IN)
+        );
+        // A Tab on the Keychron changes nothing visible (no render: the focus stays).
+        key(&mut state, 0x1E);
+        assert!(key(&mut state, 0x0F).is_empty());
+        key(&mut state, crate::detect::scancode::YEN);
+        let effects = key(&mut state, crate::detect::scancode::RO);
+        // JIS found: learned for the keyboard, saved.
+        assert!(matches!(effects[0], Effect::SaveSettings(_)));
+        assert_eq!(
+            state
+                .settings
+                .physical(KEYCHRON)
+                .map(|p| (p.layout, p.source)),
+            Some((PhysicalKind::Jis, PhysicalSource::Detection))
+        );
+        let effects = update(&mut state, AppMsg::ChangeUseDetected);
+        assert!(matches!(effects[0], Effect::PrepareChange { .. }));
+        assert_eq!(
+            state.draft.as_ref().unwrap().choice,
+            Some(LayoutChoice::Jis)
+        );
+    }
+
+    #[test]
+    fn a_blocked_change_shows_why_and_starts_nothing() {
+        let mut state = ready_state();
+        update(&mut state, AppMsg::OpenChange(KEYCHRON_ROW.into()));
+        let effects = update(&mut state, AppMsg::ChangeChoose(0));
+        let Effect::PrepareChange { token, .. } = effects[0] else {
+            panic!()
+        };
+        let reason = BlockReason::WaitingForReboot(OpRef {
+            op_id: op(),
+            kind: OpKind::SetLayout {
+                requested: KEYCHRON.into(),
+                instance_ids: vec![KEYCHRON.into()],
+                layout: LayoutChoice::Us,
+            },
+            state: OpState::PendingReboot,
+        });
+        update(
+            &mut state,
+            AppMsg::ChangePrepared {
+                token,
+                at: Instant::now(),
+                prepared: Box::new(Ok(PreparedChange {
+                    blocker: Some(reason),
+                    ..prepared()
+                })),
+            },
+        );
+        assert_eq!(state.overlay, OverlayKind::Result);
+        let shown = crate::vm::result::shown_result(&state, Lang::Ja).unwrap();
+        assert_eq!(shown.next, Some(crate::vm::result::NextStep::Restart));
+        assert!(
+            shown
+                .message
+                .starts_with("PC の再起動を待っている変更があります（Keychron Receiver を US）")
+        );
+        // The next step leaves the change: the restart page.
+        let effects = update(&mut state, AppMsg::ResultNextStep);
+        assert!(effects.contains(&Effect::Read));
+        assert_eq!(
+            (state.page, state.overlay),
+            (Page::Restart, OverlayKind::None)
+        );
+        assert!(state.draft.is_none() && state.session == SessionPhase::Idle);
+    }
+
+    #[test]
+    fn an_unreadable_inventory_is_said_on_the_page() {
+        let mut state = ready_state();
+        update(&mut state, AppMsg::OpenChange(KEYCHRON_ROW.into()));
+        let Effect::PrepareChange { token, .. } = update(&mut state, AppMsg::ChangeChoose(0))[0]
+        else {
+            panic!()
+        };
+        update(
+            &mut state,
+            AppMsg::ChangePrepared {
+                token,
+                at: Instant::now(),
+                prepared: Box::new(Err(PrepareFailure::Incomplete("no driver".into()))),
+            },
+        );
+        let shown = page(&state);
+        assert!(!shown.can_apply);
+        assert!(
+            shown
+                .note
+                .starts_with("Windows がキーボードの情報をすべて返さなかった")
+        );
+        assert!(update(&mut state, AppMsg::ChangeApply).is_empty());
+        // Choosing again reads again.
+        assert!(matches!(
+            update(&mut state, AppMsg::ChangeChoose(0))[0],
+            Effect::PrepareChange { .. }
+        ));
+        // Cancel: back to the main screen, nothing started.
+        assert_eq!(
+            update(&mut state, AppMsg::CancelChange),
+            vec![Effect::Read, Effect::Render]
+        );
+        assert_eq!(state.page, Page::Main);
+        assert!(state.draft.is_none());
+    }
+
+    #[test]
+    fn the_uac_explanation_can_be_left_back_to_the_page() {
+        let mut state = ready_state();
+        choose_jis(&mut state, Instant::now());
+        update(&mut state, AppMsg::ChangeApply);
+        assert_eq!(state.page, Page::UacNotice);
+        assert_eq!(
+            update(&mut state, AppMsg::CancelChange),
+            vec![Effect::Render]
+        );
+        assert_eq!(state.page, Page::Change);
+        assert!(state.draft.is_some() && !state.settings.change.uac_notice_seen);
+        // Elevated: no explanation, no prompt.
+        state.elevated = true;
+        assert!(matches!(
+            update(&mut state, AppMsg::ChangeApply)[0],
+            Effect::StartSession { .. }
+        ));
+    }
+
+    fn reconnecting(state: &mut AppState) -> FakeHelper {
+        update(state, undo());
+        let mut helper = FakeHelper::connect(state, 0);
+        helper.send(
+            state,
+            Event::Planned {
+                op_id: op(),
+                steps: Vec::new(),
+                apply: Some(PendingAction::Reconnect),
+                keyboards: vec![ExpectedKeyboard {
+                    instance_id: KEYCHRON.into(),
+                    display_name: "Keychron Receiver".into(),
+                    expected_type: Some(KeyboardType::JIS),
+                    layout_after: Some(LayoutTable::Jis),
+                    changes: true,
+                }],
+            },
+        );
+        helper.send(
+            state,
+            Event::WaitingForReconnect {
+                op_id: op(),
+                instance_ids: vec![KEYCHRON.into()],
+            },
+        );
+        assert_eq!(state.overlay, OverlayKind::Reconnect);
+        helper
+    }
+
+    #[test]
+    fn deciding_later_leaves_the_change_waiting() {
+        // Design m3 B.7: no automatic revert; the banner offers the decision later.
+        let mut state = ready_state();
+        let mut helper = reconnecting(&mut state);
+        assert_eq!(
+            update(&mut state, AppMsg::DecideLater),
+            vec![Effect::CancelSession, Effect::Render]
+        );
+        assert_eq!(progress_stage(&state), Stage::Leaving);
+        // A reminder before the relay leaves keeps the progress up.
+        helper.send(
+            &mut state,
+            Event::WaitingForReconnect {
+                op_id: op(),
+                instance_ids: vec![KEYCHRON.into()],
+            },
+        );
+        assert_eq!(state.overlay, OverlayKind::Progress);
+        let effects = update(
+            &mut state,
+            ended(0, SessionEnd::Abandoned { planned: true }),
+        );
+        assert_eq!(effects, vec![Effect::Read, Effect::Render]);
+        assert_eq!((state.page, state.overlay), (Page::Main, OverlayKind::None));
+    }
+
+    #[test]
+    fn quitting_during_a_reconnect_asks_first() {
+        let mut state = ready_state();
+        reconnecting(&mut state);
+        assert_eq!(
+            update(&mut state, AppMsg::QuitRequested),
+            vec![Effect::ShowWindow, Effect::Render]
+        );
+        assert_eq!(state.overlay, OverlayKind::QuitConfirm);
+        // Cancel: back to the question.
+        update(&mut state, AppMsg::QuitConfirmAnswered(QuitAnswer::Cancel));
+        assert_eq!(state.overlay, OverlayKind::Reconnect);
+        update(&mut state, AppMsg::QuitRequested);
+        assert_eq!(
+            update(
+                &mut state,
+                AppMsg::QuitConfirmAnswered(QuitAnswer::RevertAndQuit)
+            ),
+            vec![
+                Effect::SendDecision(Decision::RevertNow { op_id: op() }),
+                Effect::Render
+            ]
+        );
+        assert!(state.quit_pending);
+        let effects = update(
+            &mut state,
+            ended(0, SessionEnd::Finished(result(Outcome::Reverted, None))),
+        );
+        assert_eq!(effects.last(), Some(&Effect::Quit));
+        // "Quit and decide later" leaves the change waiting and quits after the relay left.
+        let mut state = ready_state();
+        reconnecting(&mut state);
+        update(&mut state, AppMsg::QuitRequested);
+        assert_eq!(
+            update(
+                &mut state,
+                AppMsg::QuitConfirmAnswered(QuitAnswer::QuitLeavingIt)
+            ),
+            vec![Effect::CancelSession, Effect::Render]
+        );
+        let effects = update(
+            &mut state,
+            ended(0, SessionEnd::Abandoned { planned: true }),
+        );
+        assert_eq!(effects.last(), Some(&Effect::Quit));
+    }
+
+    #[test]
+    fn quitting_during_a_countdown_reverts_then_quits() {
+        let mut state = ready_state();
+        update(&mut state, undo());
+        let mut helper = FakeHelper::connect(&mut state, 0);
+        helper.live_reset(&mut state, LayoutTable::Jis);
+        assert_eq!(
+            update(&mut state, AppMsg::QuitRequested),
+            vec![Effect::CancelSession, Effect::Render]
+        );
+        assert_eq!(progress_stage(&state), Stage::Answered { keep: false });
+        let effects = update(
+            &mut state,
+            ended(
+                0,
+                SessionEnd::Finished(result(
+                    Outcome::Reverted,
+                    Some(mklm_core::FailureReason::CallerDisconnected),
+                )),
+            ),
+        );
+        assert_eq!(effects.last(), Some(&Effect::Quit));
+    }
+
+    #[test]
+    fn a_lost_helper_asks_before_the_recovery_prompt() {
+        // T-APPLY-8: the helper dies during the countdown; "put it back now" launches the
+        // recovery session (with its own prompt), "later" launches nothing.
+        let mut state = ready_state();
+        update(&mut state, undo());
+        let mut helper = FakeHelper::connect(&mut state, 0);
+        helper.live_reset(&mut state, LayoutTable::Jis);
+        update(
+            &mut state,
+            AppMsg::SessionNotice {
+                session: 0,
+                notice: Notice::HelperLost {
+                    exit: None,
+                    detail: "the helper closed the pipe".into(),
+                },
+            },
+        );
+        assert_eq!(progress_stage(&state), Stage::HelperLost);
+        state.visible = false;
+        assert_eq!(
+            update(
+                &mut state,
+                AppMsg::RecoveryQuestion {
+                    session: 0,
+                    countdown: true
+                }
+            ),
+            vec![Effect::ShowWindow, Effect::Render]
+        );
+        update(&mut state, AppMsg::AnswerRecovery(true));
+        for notice in [
+            Notice::RecoveringAfterLoss { countdown: true },
+            Notice::Starting(SessionKind::Recovery),
+        ] {
+            update(&mut state, AppMsg::SessionNotice { session: 0, notice });
+        }
+        // The recovery's prompt: said as such.
+        assert_eq!(progress_stage(&state), Stage::Launching);
+        update(
+            &mut state,
+            AppMsg::SessionNotice {
+                session: 0,
+                notice: Notice::Connected(SessionKind::Recovery),
+            },
+        );
+        assert_eq!(progress_stage(&state), Stage::Recovering);
+        let mut recovered = result(Outcome::Recovered, None);
+        recovered.op_id = None;
+        recovered.recovered.push(mklm_core::RecoveredOp {
+            op_id: op(),
+            from: OpState::AwaitingConfirm,
+            to: OpState::Reverted,
+            decision: "roll-back".into(),
+        });
+        update(
+            &mut state,
+            ended_with(
+                0,
+                RequestReport {
+                    first: RequestEnd::Ended(SessionEnd::Lost {
+                        exit_code: Some(1),
+                        detail: "the helper closed the pipe".into(),
+                        planned: true,
+                        countdown: true,
+                    }),
+                    lost_needs_recovery: Some(Ok(true)),
+                    recovery: Some(RequestEnd::Ended(SessionEnd::Finished(recovered))),
+                    recovery_skipped: None,
+                },
+            ),
+        );
+        let shown = crate::vm::result::shown_result(&state, Lang::Ja).unwrap();
+        assert_eq!(shown.title, "自動で元に戻しました");
+        assert!(
+            shown
+                .message
+                .starts_with("MKLM の管理用プログラムが止まったため、すぐに回復しました。")
+        );
+        // "Later": nothing launched; the result points to the recovery page.
+        let mut state = ready_state();
+        update(&mut state, undo());
+        FakeHelper::connect(&mut state, 0).live_reset(&mut state, LayoutTable::Jis);
+        update(
+            &mut state,
+            AppMsg::RecoveryQuestion {
+                session: 0,
+                countdown: true,
+            },
+        );
+        update(&mut state, AppMsg::AnswerRecovery(false));
+        update(
+            &mut state,
+            ended_with(
+                0,
+                RequestReport {
+                    first: RequestEnd::Ended(SessionEnd::Lost {
+                        exit_code: None,
+                        detail: "the helper exited".into(),
+                        planned: true,
+                        countdown: true,
+                    }),
+                    lost_needs_recovery: Some(Ok(true)),
+                    recovery: None,
+                    recovery_skipped: Some(RecoverySkip::Declined),
+                },
+            ),
+        );
+        let shown = crate::vm::result::shown_result(&state, Lang::Ja).unwrap();
+        assert_eq!(shown.next, Some(crate::vm::result::NextStep::Recovery));
+        assert!(update(&mut state, AppMsg::ResultNextStep).contains(&Effect::Read));
+        assert_eq!(state.page, Page::Recovery);
+    }
+
+    #[test]
+    fn a_declined_prompt_is_cancelled_and_nothing_else_happens() {
+        // T-APPLY-3.
+        let mut state = ready_state();
+        state.settings.change.uac_notice_seen = true;
+        choose_jis(&mut state, Instant::now());
+        let effects = update(&mut state, AppMsg::ChangeApply);
+        let Effect::StartSession { session, .. } = effects[0] else {
+            panic!()
+        };
+        update(
+            &mut state,
+            AppMsg::SessionNotice {
+                session,
+                notice: Notice::Starting(SessionKind::Request),
+            },
+        );
+        update(
+            &mut state,
+            ended_with(
+                session,
+                RequestReport {
+                    first: RequestEnd::NotLaunched(LaunchError::Declined),
+                    lost_needs_recovery: None,
+                    recovery: None,
+                    recovery_skipped: None,
+                },
+            ),
+        );
+        let shown = crate::vm::result::shown_result(&state, Lang::Ja).unwrap();
+        assert_eq!(shown.title, "取り消しました（何も変更していません）");
+        assert_eq!(state.page, Page::Main);
+    }
+
+    #[test]
+    fn decisions_answer_only_the_open_question() {
+        let mut state = ready_state();
+        update(&mut state, undo());
+        let mut helper = FakeHelper::connect(&mut state, 0);
+        // No question yet: keep and revert do nothing.
+        assert!(update(&mut state, AppMsg::KeepChange).is_empty());
+        assert!(update(&mut state, AppMsg::RevertChange).is_empty());
+        helper.live_reset(&mut state, LayoutTable::Us);
+        // A decision about another operation is dropped.
+        let other = OpId::parse("11111111-5b7d-4e8a-9c0f-1a2b3c4d5e6f").unwrap();
+        assert!(update(&mut state, AppMsg::Decide(Decision::Keep { op_id: other })).is_empty());
+        assert_eq!(
+            update(&mut state, AppMsg::RevertChange),
+            vec![
+                Effect::SendDecision(Decision::RevertNow { op_id: op() }),
+                Effect::Render
+            ]
+        );
+        // "Decide later" is for the reconnect path only.
+        assert!(update(&mut state, AppMsg::DecideLater).is_empty());
+    }
+
+    #[test]
+    fn the_fixed_mode_standard_layout_is_chosen_on_the_page() {
+        let mut state = ready_state();
+        state.settings.change.uac_notice_seen = true;
+        update(&mut state, AppMsg::OpenChange(KEYCHRON_ROW.into()));
+        let Effect::PrepareChange { token, .. } = update(&mut state, AppMsg::ChangeChoose(1))[0]
+        else {
+            panic!()
+        };
+        let mut fixed = prepared();
+        fixed.snapshot.global = fixtures::global_fixed_jis();
+        update(
+            &mut state,
+            AppMsg::ChangePrepared {
+                token,
+                at: Instant::now(),
+                prepared: Box::new(Ok(fixed)),
+            },
+        );
+        assert!(page(&state).standard_visible);
+        update(&mut state, AppMsg::ChangeChooseStandard(1));
+        assert_eq!(page(&state).standard_selected, Some(1));
+        let effects = update(&mut state, AppMsg::ChangeApply);
+        let Effect::StartSession {
+            request: Request::Migrate(migrate),
+            ..
+        } = &effects[0]
+        else {
+            panic!("{effects:?}")
+        };
+        assert_eq!(migrate.standard, Layout::Us);
+    }
+
+    #[test]
+    fn the_restore_preview_of_a_device() {
+        let mut state = ready_state();
+        state.settings.change.uac_notice_seen = true;
+        update(&mut state, AppMsg::OpenChange(KEYCHRON_ROW.into()));
+        let effects = update(&mut state, AppMsg::OpenRestore);
+        let Effect::PrepareChange {
+            token,
+            gate: Gate::Restore,
+        } = effects[0]
+        else {
+            panic!("{effects:?}")
+        };
+        update(
+            &mut state,
+            AppMsg::ChangePrepared {
+                token,
+                at: Instant::now(),
+                prepared: Box::new(Ok(prepared())),
+            },
+        );
+        // Nothing recorded: nothing to put back, nothing to send.
+        let shown = page(&state);
+        assert!(shown.restore && !shown.can_apply);
+        assert_eq!(
+            shown.summary,
+            "MKLM 導入前の値のままです。戻すものはありません。"
+        );
+        assert!(update(&mut state, AppMsg::ChangeApply).is_empty());
+        // Layout choices do nothing in the restore preview.
+        assert!(update(&mut state, AppMsg::ChangeChoose(0)).is_empty());
+    }
+
+    #[test]
+    fn navigation_is_off_during_a_change_and_a_session() {
+        let mut state = ready_state();
+        assert!(navigation_enabled(&state));
+        update(&mut state, undo());
+        assert!(!navigation_enabled(&state));
+        // Leaving the change page by navigation drops the draft.
+        let mut state = ready_state();
+        update(&mut state, AppMsg::OpenChange(KEYCHRON_ROW.into()));
+        update(&mut state, AppMsg::Navigate(Page::Settings));
+        assert!(state.draft.is_none());
     }
 }

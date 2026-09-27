@@ -14,7 +14,7 @@
 use mklm_core::LayoutTable;
 
 use super::Tone;
-use crate::i18n::Lang;
+use crate::i18n::{self, Lang};
 
 /// The scan code of the "2" key (set 1).
 pub const SCANCODE_DIGIT2: u32 = 0x03;
@@ -54,10 +54,7 @@ pub struct KeyContext<'a> {
 /// The prompt before any key.
 pub fn prompt(lang: Lang) -> KeyTest {
     KeyTest {
-        prompt: match lang {
-            Lang::Ja => "キーを押してください（Shift+2 で @ なら US、\" なら JIS）".into(),
-            Lang::En => "Press a key (Shift+2: @ means US, \" means JIS)".into(),
-        },
+        prompt: i18n::key_test_prompt(lang),
         last_text: "—".into(),
         ..KeyTest::default()
     }
@@ -91,18 +88,8 @@ fn table_name(table: &LayoutTable) -> &'static str {
 
 /// The verdict for one Shift+2 press: `(text, tone)`.
 fn verdict(text: &str, context: &KeyContext<'_>, lang: Lang) -> (String, Tone) {
-    let pick = |ja: String, en: String| match lang {
-        Lang::Ja => ja,
-        Lang::En => en,
-    };
     if !mklm_core::hkl_has_japanese_layout(context.active_hkl) {
-        return (
-            pick(
-                "入力方式が日本語ではないため判定できません。Win+Space で日本語に切り替えてください".into(),
-                "Cannot tell: the input method is not Japanese. Switch to Japanese with Win+Space".into(),
-            ),
-            Tone::Warning,
-        );
+        return (i18n::key_test_not_japanese(lang), Tone::Warning);
     }
     if let (Some(expected), Some((source, _))) = (&context.expected, context.source)
         && !expected
@@ -112,59 +99,25 @@ fn verdict(text: &str, context: &KeyContext<'_>, lang: Lang) -> (String, Tone) {
     {
         let from = context.source_name.unwrap_or("?");
         return (
-            pick(
-                format!(
-                    "このキーは {from} から送られました。{} で押してください",
-                    expected.name
-                ),
-                format!("This key came from {from}. Press it on {}", expected.name),
-            ),
+            i18n::key_test_other_keyboard(from, expected.name, lang),
             Tone::Info,
         );
     }
     let typed = match text {
         "@" => LayoutTable::Us,
         "\"" => LayoutTable::Jis,
-        _ => {
-            return (
-                pick(
-                    "Shift+2 → 想定外の文字です".into(),
-                    "Shift+2 → an unexpected character".into(),
-                ),
-                Tone::Warning,
-            );
-        }
+        _ => return (i18n::key_test_unexpected(lang), Tone::Warning),
     };
     let got = table_name(&typed);
     match &context.expected {
-        Some(expected) if *expected.table == typed => (
-            pick(
-                format!("Shift+2 → {text} : ✓ 期待どおり {got} です"),
-                format!("Shift+2 → {text} : ✓ {got}, as expected"),
-            ),
-            Tone::Success,
-        ),
-        Some(expected) => {
-            let want = table_name(expected.table);
-            (
-                pick(
-                    format!(
-                        "Shift+2 → {text} : ⚠ {want} になるはずが {got} です。『元に戻す』をおすすめします"
-                    ),
-                    format!(
-                        "Shift+2 → {text} : ⚠ it should type {want} but types {got}. Revert is recommended"
-                    ),
-                ),
-                Tone::Danger,
-            )
+        Some(expected) if *expected.table == typed => {
+            (i18n::key_test_as_expected(text, got, lang), Tone::Success)
         }
-        None => (
-            pick(
-                format!("Shift+2 → {text} : {got} 配列として動作しています"),
-                format!("Shift+2 → {text} : it types {got}"),
-            ),
-            Tone::Neutral,
+        Some(expected) => (
+            i18n::key_test_wrong(text, table_name(expected.table), got, lang),
+            Tone::Danger,
         ),
+        None => (i18n::key_test_neutral(text, got, lang), Tone::Neutral),
     }
 }
 
@@ -187,12 +140,38 @@ pub fn key_pressed(
     test.last_text = shown;
     test.verdict = verdict;
     test.verdict_tone = tone;
-    test.device = match (context.source_name, lang) {
-        (Some(name), Lang::Ja) => format!("このキーを送ったキーボード: {name}"),
-        (Some(name), Lang::En) => format!("Sent by: {name}"),
-        (None, _) => String::new(),
-    };
+    test.device = context
+        .source_name
+        .map(|name| i18n::key_test_device(name, lang))
+        .unwrap_or_default();
     Some(test)
+}
+
+/// The expectation of a running session's open question (design m3 B.6, B.7; review U2): the
+/// keyboards the change is about, their name, and the layout they should type now. `None` when
+/// no countdown or reconnect question is open, or the change names no layout.
+pub fn session_expectation(
+    view: &mklm_client::session::SessionView,
+) -> Option<(Vec<String>, String, LayoutTable)> {
+    use mklm_client::session::Prompt;
+    if !matches!(
+        view.prompt,
+        Prompt::Countdown { .. } | Prompt::Reconnect { .. }
+    ) {
+        return None;
+    }
+    let first = view
+        .keyboards
+        .iter()
+        .find(|kb| kb.changes && kb.layout_after.is_some())?;
+    let table = first.layout_after.clone()?;
+    let targets = view
+        .keyboards
+        .iter()
+        .filter(|kb| kb.changes && kb.layout_after.as_ref() == Some(&table))
+        .map(|kb| kb.instance_id.clone())
+        .collect();
+    Some((targets, first.display_name.clone(), table))
 }
 
 #[cfg(test)]

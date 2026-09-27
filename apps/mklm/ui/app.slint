@@ -128,10 +128,13 @@ export component AppWindow inherits Window {
     in property <[ChoiceVm]> change-choices;
     in-out property <int> change-selected: -1;
     in-out property <int> change-method: -1;
+    in-out property <int> change-standard: -1;
     in property <ChangeVm> change;
     callback change-choose(int);
     callback change-choose-method(int);
+    callback change-choose-standard(int);
     callback change-restart-detection();
+    callback change-use-detected();
     callback change-apply();
     callback restore-baseline();
     callback uac-go();
@@ -342,6 +345,7 @@ export component AppWindow inherits Window {
                 choices: root.change-choices;
                 selected <=> root.change-selected;
                 method <=> root.change-method;
+                standard <=> root.change-standard;
                 vm: root.change;
                 key-test: root.key-test;
                 choose(index) => {
@@ -350,11 +354,17 @@ export component AppWindow inherits Window {
                 choose-method(index) => {
                     root.change-choose-method(index);
                 }
+                choose-standard(index) => {
+                    root.change-choose-standard(index);
+                }
                 key-pressed(text, shift) => {
                     root.key-pressed(text, shift);
                 }
                 restart-detection => {
                     root.change-restart-detection();
+                }
+                use-detected => {
+                    root.change-use-detected();
                 }
                 restore-baseline => {
                     root.restore-baseline();
