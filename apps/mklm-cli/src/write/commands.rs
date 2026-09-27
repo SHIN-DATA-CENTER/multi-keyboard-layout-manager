@@ -1,19 +1,22 @@
 //! The write commands on Windows (design F.2): unelevated checks and preview, the user's
-//! confirmation, then one helper session (or the in-process fallback), the result, and the
-//! post-reboot RunOnce rule after every session.
+//! confirmation, then one request through `mklm_client::run_once::run_request` (design m3 A.2.3,
+//! WP-C1: the helper session, the recovery after a lost helper, and the post-reboot RunOnce rule
+//! on the same thread, whatever the request did) or the in-process fallback, then the result.
 
 use std::borrow::Cow;
 use std::io::{self, IsTerminal as _, Write};
 
 use anyhow::{Context as _, Result};
 use mklm_client::inventory::InventoryError;
+use mklm_client::orchestrator::JournalSource as _;
 use mklm_client::run_once::{PostRebootCommand, RunOnceError, RunOnceOutcome, apply_run_once_rule};
+use mklm_client::session::SessionEnd;
 use mklm_core::{
     ApplyOptions, BootId, ConflictPolicy, ErrorInfo, GlobalMode, Journal, JournalEntry, Layout,
-    LayoutChoice, Liveness, OpKind, OpState, OperationError, OperationResult, Outcome,
-    PendingAction, ProcessIdentity, RegValue, ResolutionChoice, RestoreScope, SystemSnapshot,
-    ValueChoice, ValueOp, ValueRecord, WriteTarget, attention, plan_migration, plan_set_layout,
-    ps2_pin_layout, value_names,
+    LayoutChoice, Liveness, OpKind, OpState, OperationError, OperationResult, PendingAction,
+    ProcessIdentity, RegValue, ResolutionChoice, RestoreScope, SystemSnapshot, ValueChoice,
+    ValueOp, ValueRecord, WriteTarget, attention, plan_migration, plan_set_layout, ps2_pin_layout,
+    value_names,
 };
 use mklm_ipc::{
     Assignment, MigrateRequest, Request, ResolveConflictRequest, RestoreBaselineRequest,
@@ -25,14 +28,10 @@ use super::checks::{self, Gate};
 use super::in_process::{self, InProcessRequest};
 use super::input::{self, Input, Line, StdinInput, YesNo};
 use super::launch::{self, LaunchError};
-use super::outcome::{
-    error_exit_code, helper_exit_text, lost_recovery_exit_code, result_exit_code,
-};
 use super::preview;
-use super::relay::{self, Presenter, RelayConfig, SessionEnd};
-use super::render::{
-    CurrentValue, entry_line, error_text, model_value, next_steps, records_text, result_text,
-};
+use super::relay::{CliFrontend, Presenter};
+use super::render::{CurrentValue, entry_line, model_value, records_text};
+use super::report::{After, JournalAfter, Report};
 use super::target::{self, ResolvedKeyboard};
 use super::{
     AnswerArg, ApplyArgs, ChoiceArg, ConflictArg, LayoutArg, MigrateArgs, RecoverArgs, ResolveArgs,
@@ -102,6 +101,31 @@ impl Ui {
 
     fn ask(&mut self, question: &str) -> Result<YesNo> {
         Ok(input::ask_yes_no(&mut self.input, &mut self.out, question)?)
+    }
+
+    /// Writes the report of a request or session to standard output and standard error.
+    fn report<T>(&mut self, write: impl FnOnce(&mut Report<'_>) -> T) -> T {
+        let mut err = io::stderr();
+        let mut journal = LiveJournalAfter;
+        write(&mut Report {
+            out: &mut self.out,
+            err: &mut err,
+            journal: &mut journal,
+        })
+    }
+}
+
+/// The journal read again for a report ([`JournalAfter`]), unelevated.
+#[derive(Debug, Clone, Copy)]
+struct LiveJournalAfter;
+
+impl JournalAfter for LiveJournalAfter {
+    fn needs_recovery(&mut self) -> Result<bool, String> {
+        mklm_client::journal::LiveJournal.needs_recovery()
+    }
+
+    fn read(&mut self) -> Result<Journal> {
+        Ok(read_journal()?.0)
     }
 }
 
@@ -207,15 +231,26 @@ fn current_of(snapshot: Option<&SystemSnapshot>) -> impl Fn(&ValueRecord) -> Opt
     }
 }
 
+/// The program the post-reboot check starts (design m3 F.2, K.7; WP-C1): the GUI next to this
+/// CLI when it carries this build's ID, the CLI itself otherwise.
+fn post_reboot_command() -> PostRebootCommand {
+    PostRebootCommand::preferred(super::BUILD_ID)
+}
+
 /// Design F.4 / review C17: registers the post-reboot check when the journal says a restart is
 /// pending, whatever the session returned (`mklm_client::run_once`). Problems are warnings: the
-/// journal keeps the state.
+/// journal keeps the state. A request applies the rule inside [`run_request`] and shows it here.
 ///
 /// Only an unelevated process registers. An elevated one (an elevated console, `--in-process`)
 /// may run as another administrator than the signed-in user, so its `HKCU` would be the wrong
 /// account's; it tells the user instead. When elevation cannot be checked, it tells the user too.
 fn post_reboot_rule(ui: &mut Ui) {
-    match apply_run_once_rule(PostRebootCommand::Cli) {
+    show_post_reboot_rule(ui, apply_run_once_rule(post_reboot_command()));
+}
+
+/// What [`post_reboot_rule`] says about the rule's outcome.
+fn show_post_reboot_rule(ui: &mut Ui, outcome: Result<RunOnceOutcome, RunOnceError>) {
+    match outcome {
         Ok(RunOnceOutcome::NotNeeded | RunOnceOutcome::Registered(_)) => {}
         Ok(RunOnceOutcome::TellUser) => {
             let _ = ui.say(
@@ -300,17 +335,11 @@ fn elevated() -> Result<bool> {
     elevation::is_elevated().context("checking for elevation failed")
 }
 
-/// What to add after a session's result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum After {
-    Nothing,
-    /// `recover`: say so when entries still wait for the user (design review C7).
-    Recover,
-    /// `migrate`: the note about the Settings app once the migration waits for the restart.
-    Migrate,
-}
-
-/// One helper session for `request`, then the post-reboot rule (design F.2 steps 5 to 7).
+/// One request (design F.2 steps 5 to 7; m3 A.2.3, WP-C1): `mklm_client::run_once::run_request`
+/// launches the helper (UAC when unelevated, owned by this console), relays the request with the
+/// CLI's [`CliFrontend`], recovers at once with the same `apply` when the helper is lost after
+/// journaling (design E.7, review C8), and applies the post-reboot RunOnce rule on this thread,
+/// whatever happened (review C17). Then the report, and what the rule did.
 fn run_request(
     ui: &mut Ui,
     request: Request,
@@ -318,158 +347,25 @@ fn run_request(
     apply: ApplyOptions,
     after: After,
 ) -> Result<i32> {
-    let code = match session(ui, request, answer)? {
-        Ended::Launch(code) => code,
-        Ended::Session(end) => finish(ui, end, apply, after, true)?,
+    let launch = launch::config(elevated()?);
+    let outcome = {
+        let mut err = io::stderr();
+        let mut frontend =
+            CliFrontend::new(ui.console, answer, &mut ui.input, &mut ui.out, &mut err);
+        mklm_client::run_once::run_request(
+            launch,
+            request,
+            apply,
+            &mut frontend,
+            post_reboot_command(),
+        )
     };
-    post_reboot_rule(ui);
-    Ok(code)
-}
-
-enum Ended {
-    /// No session came up; the exit code.
-    Launch(i32),
-    Session(SessionEnd),
-}
-
-fn session(ui: &mut Ui, request: Request, answer: Option<AnswerArg>) -> Result<Ended> {
-    let mut session = match launch::start(elevated()?) {
-        Ok(session) => session,
-        Err(LaunchError::Declined) => {
-            ui.say("Cancelled: the administrator permission was declined; nothing was changed.")?;
-            return Ok(Ended::Launch(exit_code::CANCELLED));
-        }
-        Err(LaunchError::Failed { message, .. }) => {
-            eprintln!("error: {message}");
-            return Ok(Ended::Launch(exit_code::FAILURE));
-        }
+    let code = match outcome.report {
+        Ok(report) => ui.report(|report_to| report_to.request(report, after)),
+        Err(error) => Err(error.into()),
     };
-    let mut presenter = Presenter::new(ui.console, answer);
-    let end = relay::relay(
-        &mut session,
-        request,
-        &mut presenter,
-        &mut ui.input,
-        &mut ui.out,
-        RelayConfig::default(),
-    );
-    session.close();
-    Ok(Ended::Session(end?))
-}
-
-/// Shows how a session ended and returns the exit code. A helper lost after the operation was
-/// journaled is followed at once by a recovery with the same options (design E.7, review C8),
-/// unless `recover_lost` is false (that recovery itself).
-fn finish(
-    ui: &mut Ui,
-    end: SessionEnd,
-    apply: ApplyOptions,
-    after: After,
-    recover_lost: bool,
-) -> Result<i32> {
-    match end {
-        SessionEnd::Finished(result) => {
-            ui.say(&result_text(&result))?;
-            if let Some(next) = next_steps(&result) {
-                ui.say(&next)?;
-            }
-            if after == After::Migrate && result.outcome == Outcome::PendingReboot {
-                ui.say(
-                    "From now on, choosing \"Use connected keyboard layout\" in Settings is fine \
-                     (plan 1.3).",
-                )?;
-            }
-            if after == After::Recover {
-                recover_note(ui, &result)?;
-            }
-            Ok(result_exit_code(&result))
-        }
-        SessionEnd::Failed(info) => {
-            ui.out.flush()?;
-            eprint!("{}", error_text(&info));
-            Ok(error_exit_code(info.code))
-        }
-        SessionEnd::Unresponsive => {
-            eprintln!(
-                "error: the helper does not respond. Wait until it ends, or end mklm-helper.exe in \
-                 Task Manager, then run `mklm-cli recover`."
-            );
-            Ok(exit_code::FAILURE)
-        }
-        // The CLI's front end never asks to cancel (Ctrl+C ends the process, which closes the
-        // pipe); only the GUI leaves a session this way.
-        SessionEnd::Abandoned { .. } => {
-            ui.say("Cancelled.")?;
-            Ok(exit_code::CANCELLED)
-        }
-        SessionEnd::Lost {
-            exit_code: helper_code,
-            detail,
-            planned,
-            countdown,
-        } => {
-            let why = helper_code.map_or(detail, helper_exit_text);
-            eprintln!("error: the helper stopped before it answered: {why}");
-            let (journal, _) = read_journal()?;
-            let boot = boot_id()?;
-            let needs_recovery = journal.entries.iter().any(|entry| {
-                attention(entry, boot, liveness(&entry.owner)) == mklm_core::Attention::Recover
-            });
-            if !(recover_lost && needs_recovery) {
-                if planned || needs_recovery {
-                    eprintln!(
-                        "Run `mklm-cli recover` to finish or undo the interrupted operation \
-                         (`mklm-cli journal` shows where it stopped)."
-                    );
-                }
-                return Ok(exit_code::FAILURE);
-            }
-            // Recovery may finish the operation as well as undo it (C.7): the result says which.
-            ui.say(if countdown {
-                "The helper stopped during the countdown; recovering now."
-            } else {
-                "Recovering what the helper left unfinished now."
-            })?;
-            let request = Request::Recover { apply };
-            match session(ui, request, None)? {
-                Ended::Launch(code) => {
-                    eprintln!("Run `mklm-cli recover` as soon as possible.");
-                    Ok(code)
-                }
-                Ended::Session(SessionEnd::Finished(result)) => {
-                    finish(
-                        ui,
-                        SessionEnd::Finished(result.clone()),
-                        apply,
-                        After::Recover,
-                        false,
-                    )?;
-                    Ok(lost_recovery_exit_code(&result))
-                }
-                Ended::Session(end) => finish(ui, end, apply, After::Nothing, false),
-            }
-        }
-    }
-}
-
-/// Design review C7: a recovery that left entries waiting for the user says so.
-fn recover_note(ui: &mut Ui, result: &OperationResult) -> Result<()> {
-    let (journal, _) = read_journal()?;
-    let waiting: Vec<&JournalEntry> = journal
-        .open_entries()
-        .into_iter()
-        .filter(|entry| !entry.state.is_in_flight())
-        .collect();
-    if result.recovered.is_empty() && waiting.is_empty() {
-        ui.say("Nothing needed recovery.")?;
-    }
-    for entry in waiting {
-        ui.say(&format!(
-            "Still waiting for you: {}. `mklm-cli undo` puts it back.",
-            entry_line(entry)
-        ))?;
-    }
-    Ok(())
+    show_post_reboot_rule(ui, outcome.run_once);
+    code
 }
 
 /// The keyboard of a command, echoed with its name and instance ID (design F.1).
@@ -844,8 +740,8 @@ fn run_in_process(ui: &mut Ui, request: &InProcessRequest, apply: ApplyOptions) 
         InProcessRequest::Undo | InProcessRequest::Restore { .. } => After::Nothing,
     };
     let code = match result {
-        Ok(result) => finish(ui, SessionEnd::Finished(result), apply, after, false)?,
-        Err(info) => finish(ui, SessionEnd::Failed(info), apply, After::Nothing, false)?,
+        Ok(result) => ui.report(|report| report.end(SessionEnd::Finished(result), after))?,
+        Err(info) => ui.report(|report| report.end(SessionEnd::Failed(info), After::Nothing))?,
     };
     post_reboot_rule(ui);
     Ok(code)
@@ -1400,7 +1296,12 @@ pub fn journal(json_output: bool) -> Result<String> {
     .map(|report| report.snapshot);
     let current = current_of(snapshot.as_ref());
     let current: Option<CurrentValue<'_>> = snapshot.as_ref().map(|_| &current as CurrentValue<'_>);
+    // Local time (design m3 G.1); the JSON above keeps the stored UTC milliseconds.
     Ok(super::journal_view::journal_text(
-        &journal, boot, &liveness, current,
+        &journal,
+        boot,
+        &liveness,
+        current,
+        &super::journal_view::timestamp_text,
     ))
 }

@@ -1,23 +1,23 @@
 //! The CLI's side of one request (design E.1, E.7, F.3): the text and the answers. The relay loop
-//! itself is `mklm_client::session::relay` (shared with the GUI, design m3 A.2); this module is its
-//! CLI front end.
+//! and the request as a whole (launch, relay, the recovery after a lost helper, the RunOnce rule)
+//! are `mklm_client` (shared with the GUI, design m3 A.2, WP-C1); this module is their CLI front
+//! end.
 //!
-//! [`Presenter`] turns events into text and answers into [`Decision`]s; the pipe relay
-//! ([`relay`], through [`CliFrontend`]) and the in-process fallback's console sink both drive it.
-//! The relay works over any [`Link`], so that tests can play the helper's part and type the user's
+//! [`Presenter`] turns events into text and answers into [`Decision`]s; the pipe relay (through
+//! [`CliFrontend`]) and the in-process fallback's console sink both drive it. The relay works over
+//! any `mklm_client::session::Link`, so that tests can play the helper's part and type the user's
 //! answers ([`super::input::ScriptedInput`]).
 
+use std::fmt;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
-use mklm_client::session::{self, Frontend, SessionView};
+use mklm_client::session::{Frontend, Notice, SessionKind, SessionView};
 use mklm_core::{Decision, Event, ExpectedKeyboard, KeyboardType, OpId, OpState};
-use mklm_ipc::Request;
-
-pub use mklm_client::session::{Link, RelayConfig, SessionEnd};
 
 use super::AnswerArg;
 use super::input::{Input, Line, YesNo, yes_no};
+use super::report::helper_stopped_text;
 
 /// With `--answer keep` on the reconnect path: how long to wait for the keyboard before
 /// answering revert (the engine waits as long, design D.2 b).
@@ -27,29 +27,51 @@ const REDIRECTED_TICK_EVERY: u32 = 5;
 /// Reconnect path: a "still waiting" line after this many `WaitingForReconnect` events (10 s each).
 const RECONNECT_REMINDER_EVERY: u32 = 6;
 
-/// Sends `request` and relays until the result, showing it with `presenter` and reading answers
-/// from `input` (the shared relay with the CLI front end).
-pub fn relay(
-    link: &mut dyn Link,
-    request: Request,
-    presenter: &mut Presenter,
-    input: &mut dyn Input,
-    out: &mut dyn Write,
-    config: RelayConfig,
-) -> io::Result<SessionEnd> {
-    let mut frontend = CliFrontend {
-        presenter,
-        input,
-        out,
-    };
-    session::relay(link, request, &mut frontend, config)
-}
-
-/// The CLI as a [`Frontend`]: text through the [`Presenter`], answers from an [`Input`].
-struct CliFrontend<'a> {
-    presenter: &'a mut Presenter,
+/// The CLI as a [`Frontend`] (design m3 A.2.2): events as text through a [`Presenter`], answers
+/// from an [`Input`], and the orchestrator's notices between sessions (WP-C1). `out` is standard
+/// output, `err` standard error.
+///
+/// It keeps the defaults of the other two methods: it never asks to cancel (Ctrl+C ends the
+/// process, which closes the pipe, and the helper reverts a countdown by itself, review C8), and
+/// it lets the recovery after a lost helper start at once (design m2 E.7).
+pub struct CliFrontend<'a> {
+    presenter: Presenter,
+    console: bool,
+    /// `--answer`, for the request only: the recovery after a lost helper asks nothing of it.
+    answer: Option<AnswerArg>,
     input: &'a mut dyn Input,
     out: &'a mut dyn Write,
+    err: &'a mut dyn Write,
+}
+
+impl<'a> CliFrontend<'a> {
+    /// `console`: standard output is a console (the countdown line is rewritten in place).
+    pub fn new(
+        console: bool,
+        answer: Option<AnswerArg>,
+        input: &'a mut dyn Input,
+        out: &'a mut dyn Write,
+        err: &'a mut dyn Write,
+    ) -> Self {
+        Self {
+            presenter: Presenter::new(console, answer),
+            console,
+            answer,
+            input,
+            out,
+            err,
+        }
+    }
+}
+
+impl fmt::Debug for CliFrontend<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CliFrontend")
+            .field("presenter", &self.presenter)
+            .field("console", &self.console)
+            .field("answer", &self.answer)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Frontend for CliFrontend<'_> {
@@ -73,6 +95,37 @@ impl Frontend for CliFrontend<'_> {
 
     fn finish(&mut self) -> io::Result<()> {
         self.presenter.finish(self.out)
+    }
+
+    fn notice(&mut self, notice: &Notice) -> io::Result<()> {
+        match notice {
+            // Every session starts with a fresh presenter (its keyboards, its question).
+            Notice::Starting(kind) => {
+                let answer = match kind {
+                    SessionKind::Request => self.answer,
+                    SessionKind::Recovery => None,
+                };
+                self.presenter = Presenter::new(self.console, answer);
+            }
+            Notice::Connected(_) => {}
+            Notice::HelperLost { exit, detail } => {
+                // A diagnostic that cannot be written must not stop the recovery that follows.
+                let _ = self.out.flush();
+                let _ = writeln!(self.err, "{}", helper_stopped_text(*exit, detail));
+                let _ = self.err.flush();
+            }
+            // Recovery may finish the operation as well as undo it (C.7): the result says which.
+            Notice::RecoveringAfterLoss { countdown } => {
+                let text = if *countdown {
+                    "The helper stopped during the countdown; recovering now."
+                } else {
+                    "Recovering what the helper left unfinished now."
+                };
+                writeln!(self.out, "{text}")?;
+                self.out.flush()?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -477,12 +530,16 @@ impl Presenter {
 mod tests {
     use std::collections::VecDeque;
 
-    use mklm_client::session::Recv;
-    use mklm_core::{
-        ErrorInfo, FailureReason, LayoutTable, OperationResult, Outcome, PendingAction, PlanStep,
-        PlannedWrite, WriteTarget, value_names,
+    use mklm_client::LaunchError;
+    use mklm_client::orchestrator::{
+        HelperLink, JournalSource, Launcher, Orchestrator, RequestEnd, RequestReport,
     };
-    use mklm_ipc::{CallerMessage, HelperMessage};
+    use mklm_client::session::{Link, Recv, RelayConfig, SessionEnd, relay};
+    use mklm_core::{
+        ApplyOptions, ErrorInfo, FailureReason, LayoutTable, OperationResult, Outcome,
+        PendingAction, PlanStep, PlannedWrite, RecoveredOp, WriteTarget, value_names,
+    };
+    use mklm_ipc::{CallerMessage, HelperMessage, Request};
 
     use super::super::input::{Line, ScriptedInput};
     use super::*;
@@ -669,13 +726,20 @@ mod tests {
         answer: Option<AnswerArg>,
     ) -> (SessionEnd, String) {
         let mut out = Vec::new();
-        let mut presenter = Presenter::new(console, answer);
-        let config = RelayConfig {
+        let mut err = Vec::new();
+        let end = {
+            let mut frontend = CliFrontend::new(console, answer, input, &mut out, &mut err);
+            relay(helper, request(), &mut frontend, fast()).unwrap()
+        };
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+        (end, String::from_utf8(out).unwrap())
+    }
+
+    fn fast() -> RelayConfig {
+        RelayConfig {
             tick: Duration::ZERO,
             silence_limit: Duration::from_millis(50),
-        };
-        let end = relay(helper, request(), &mut presenter, input, &mut out, config).unwrap();
-        (end, String::from_utf8(out).unwrap())
+        }
     }
 
     #[test]
@@ -901,20 +965,11 @@ mod tests {
             discarded: 0,
         };
         let mut out = Vec::new();
-        let mut presenter = Presenter::new(true, None);
-        let config = RelayConfig {
-            tick: Duration::ZERO,
-            silence_limit: Duration::from_millis(50),
+        let mut err = Vec::new();
+        let end = {
+            let mut frontend = CliFrontend::new(true, None, &mut input, &mut out, &mut err);
+            relay(&mut helper, request(), &mut frontend, fast()).unwrap()
         };
-        let end = relay(
-            &mut helper,
-            request(),
-            &mut presenter,
-            &mut input,
-            &mut out,
-            config,
-        )
-        .unwrap();
         assert_eq!(input.discarded, 1);
         assert!(helper.decisions().is_empty());
         assert_eq!(
@@ -943,5 +998,180 @@ mod tests {
         let (end, out) = run(&mut helper, &mut ScriptedInput::new([]), false, None);
         assert_eq!(end, SessionEnd::Failed(info));
         assert!(out.contains("warning: a warning"));
+    }
+
+    // The whole request through `mklm_client`'s orchestrator with the CLI front end (WP-C1).
+
+    impl HelperLink for FakeHelper {
+        fn close(self: Box<Self>) {}
+    }
+
+    /// Hands out prepared helpers; panics on a launch nobody prepared.
+    #[derive(Debug)]
+    struct FakeLauncher(VecDeque<Result<FakeHelper, LaunchError>>);
+
+    impl Launcher for FakeLauncher {
+        fn launch(&mut self) -> Result<Box<dyn HelperLink>, LaunchError> {
+            match self.0.pop_front() {
+                Some(Ok(helper)) => Ok(Box::new(helper)),
+                Some(Err(error)) => Err(error),
+                None => panic!("an unexpected launch"),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeJournal(Result<bool, String>);
+
+    impl JournalSource for FakeJournal {
+        fn needs_recovery(&mut self) -> Result<bool, String> {
+            self.0.clone()
+        }
+    }
+
+    /// Runs `request()` with the CLI front end (redirected output, no typed answers): the report,
+    /// standard output and standard error.
+    fn orchestrate(
+        helpers: Vec<Result<FakeHelper, LaunchError>>,
+        needs_recovery: Result<bool, String>,
+        answer: Option<AnswerArg>,
+    ) -> (RequestReport, String, String) {
+        let mut orchestrator =
+            Orchestrator::new(FakeLauncher(helpers.into()), FakeJournal(needs_recovery));
+        orchestrator.config = fast();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut input = ScriptedInput::new([]);
+        let report = {
+            let mut frontend = CliFrontend::new(false, answer, &mut input, &mut out, &mut err);
+            orchestrator
+                .run(request(), ApplyOptions::default(), &mut frontend)
+                .unwrap()
+        };
+        assert!(orchestrator.launcher.0.is_empty(), "every helper was used");
+        (
+            report,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_helper_lost_during_the_countdown_is_recovered_at_once() {
+        let mut dying = FakeHelper::new(live_reset_events(true));
+        dying.ticks.truncate(3);
+        dying.answered = true;
+        dying.closed = true;
+        dying.exit_code = Some(1);
+        let mut recovered = result(Outcome::Recovered, None);
+        recovered.op_id = None;
+        recovered.recovered.push(RecoveredOp {
+            op_id: op(),
+            from: OpState::AwaitingConfirm,
+            to: OpState::Reverted,
+            decision: "roll-back".into(),
+        });
+        let mut recovering = FakeHelper::new(vec![HelperMessage::Result(recovered.clone())]);
+        recovering.ticks.clear();
+        recovering.answered = true;
+
+        let (report, out, err) = orchestrate(vec![Ok(dying), Ok(recovering)], Ok(true), None);
+        assert!(matches!(
+            report.first,
+            RequestEnd::Ended(SessionEnd::Lost {
+                planned: true,
+                countdown: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            report.recovery,
+            Some(RequestEnd::Ended(SessionEnd::Finished(recovered)))
+        );
+        // The two lines between the sessions (design m3 A.2.2), as M2's CLI printed them.
+        assert_eq!(
+            err,
+            format!(
+                "error: the helper stopped before it answered: {}\n",
+                mklm_client::HelperExit(1)
+            )
+        );
+        let question = "Keep this layout? [y/N]  reverting automatically in 20 s\n";
+        let recovering = "The helper stopped during the countdown; recovering now.\n";
+        let (Some(asked), Some(said)) = (out.find(question), out.find(recovering)) else {
+            panic!("{out}");
+        };
+        assert!(asked < said, "{out}");
+        assert!(out.ends_with(recovering), "{out}");
+    }
+
+    #[test]
+    fn the_recovery_after_a_lost_helper_is_not_answered_by_answer() {
+        // `--answer revert` is for the request; the recovery session asks as without it.
+        let mut dying = FakeHelper::new(live_reset_events(true));
+        dying.frames.truncate(4); // Locked, Planned, StepWritten, Written
+        dying.ticks.clear();
+        dying.answered = true;
+        dying.closed = true;
+        let mut recovering = FakeHelper::new(vec![event(Event::CountdownStarted {
+            op_id: op(),
+            seconds: 20,
+            verified: true,
+        })]);
+        recovering.ticks.truncate(2);
+
+        let (report, out, err) = orchestrate(
+            vec![Ok(dying), Ok(recovering)],
+            Ok(true),
+            Some(AnswerArg::Revert),
+        );
+        assert!(matches!(
+            report.first,
+            RequestEnd::Ended(SessionEnd::Lost {
+                planned: true,
+                countdown: false,
+                ..
+            })
+        ));
+        assert_eq!(
+            report.recovery,
+            Some(RequestEnd::Ended(SessionEnd::Finished(result(
+                Outcome::Reverted,
+                Some(FailureReason::CountdownExpired)
+            ))))
+        );
+        assert_eq!(
+            err,
+            "error: the helper stopped before it answered: the helper closed the pipe\n"
+        );
+        let (Some(said), Some(asked)) = (
+            out.find("Recovering what the helper left unfinished now.\n"),
+            out.find("Keep this layout? [y/N]  reverting automatically in 20 s\n"),
+        ) else {
+            panic!("{out}");
+        };
+        assert!(said < asked, "{out}");
+        assert!(!out.contains("Reverting the change."), "{out}");
+    }
+
+    #[test]
+    fn no_recovery_when_the_journal_does_not_ask_for_it() {
+        let mut dying = FakeHelper::new(vec![event(Event::Locked)]);
+        dying.ticks.clear();
+        dying.answered = true;
+        dying.closed = true;
+        dying.exit_code = Some(1);
+        let (report, out, err) = orchestrate(vec![Ok(dying)], Ok(false), None);
+        assert_eq!(report.lost_needs_recovery, Some(Ok(false)));
+        assert_eq!(report.recovery, None);
+        assert_eq!(out, "");
+        assert!(
+            err.starts_with("error: the helper stopped before it answered: the helper"),
+            "{err}"
+        );
+
+        // A declined UAC prompt: nothing between sessions; the report says it.
+        let (report, out, err) = orchestrate(vec![Err(LaunchError::Declined)], Ok(true), None);
+        assert_eq!(report.first, RequestEnd::NotLaunched(LaunchError::Declined));
+        assert_eq!((out.as_str(), err.as_str()), ("", ""));
     }
 }

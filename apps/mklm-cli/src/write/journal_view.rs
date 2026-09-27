@@ -1,7 +1,12 @@
 //! `mklm-cli journal`: the journal as read unelevated (design C.1), as text or JSON.
+//!
+//! The text shows times in local time with their offset from UTC (design m3 G.1; the M2
+//! real-machine test R4 found them in UTC) and words `LiveResetUnconfirmed` by whether the reset
+//! was reached (m3 G.2, R5). The JSON is for programs and keeps the stored UTC milliseconds.
 
 use std::fmt::Write as _;
 
+use mklm_client::describe::reset_phase;
 use mklm_core::{
     Attention, BaselineRecord, BootId, Journal, JournalEntry, Liveness, ProcessIdentity, Timestamp,
     attention,
@@ -14,8 +19,30 @@ use crate::text::pending_name_long;
 /// Where the journal lives, as shown to the user.
 const JOURNAL_PATH: &str = r"HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Journal";
 
-/// `YYYY-MM-DD HH:MM:SS UTC` of a journal timestamp (milliseconds since the Unix epoch).
+/// How the text form writes a journal timestamp ([`timestamp_text`]; tests pass a fixed one).
+pub type TimeText<'a> = &'a dyn Fn(Timestamp) -> String;
+
+/// `YYYY-MM-DD HH:MM:SS +HH:MM` in local time, with the time zone rules of that moment
+/// (`mklm_win::time::local_time`, design m3 G.1); the UTC form of [`utc_timestamp_text`] when the
+/// conversion fails.
 pub fn timestamp_text(at: Timestamp) -> String {
+    local_timestamp_text(at).unwrap_or_else(|| utc_timestamp_text(at))
+}
+
+#[cfg(windows)]
+fn local_timestamp_text(at: Timestamp) -> Option<String> {
+    mklm_win::time::local_time(at)
+        .ok()
+        .map(|local| local.to_iso_text())
+}
+
+#[cfg(not(windows))]
+fn local_timestamp_text(_: Timestamp) -> Option<String> {
+    None
+}
+
+/// `YYYY-MM-DD HH:MM:SS UTC` of a journal timestamp (milliseconds since the Unix epoch).
+pub fn utc_timestamp_text(at: Timestamp) -> String {
     let seconds = at.0 / 1000;
     let (days, rest) = (seconds / 86_400, seconds % 86_400);
     let (year, month, day) = civil_from_days(days);
@@ -53,12 +80,14 @@ fn attention_text(attention: Attention) -> Option<&'static str> {
     }
 }
 
-/// The text form. `current` gives the value stored now for a record, when a snapshot was read.
+/// The text form. `current` gives the value stored now for a record, when a snapshot was read;
+/// `time` writes the timestamps ([`timestamp_text`]).
 pub fn journal_text(
     journal: &Journal,
     boot: Option<BootId>,
     liveness: &dyn Fn(&ProcessIdentity) -> Liveness,
     current: Option<CurrentValue<'_>>,
+    time: TimeText<'_>,
 ) -> String {
     let mut out = String::new();
     put!(out, "Journal ({JOURNAL_PATH})");
@@ -72,7 +101,7 @@ pub fn journal_text(
         put!(out, "  none");
     }
     for entry in &journal.entries {
-        entry_text(&mut out, entry, boot, liveness, current);
+        entry_text(&mut out, entry, boot, liveness, current, time);
     }
     put!(out);
     put!(out, "Values before MKLM (baselines)");
@@ -80,7 +109,7 @@ pub fn journal_text(
         put!(out, "  none");
     }
     for baseline in &journal.baselines {
-        baseline_text(&mut out, baseline);
+        baseline_text(&mut out, baseline, time);
     }
     if !journal.unreadable.is_empty() {
         put!(out);
@@ -101,6 +130,7 @@ fn entry_text(
     boot: Option<BootId>,
     liveness: &dyn Fn(&ProcessIdentity) -> Liveness,
     current: Option<CurrentValue<'_>>,
+    time: TimeText<'_>,
 ) {
     put!(out, "  {}", entry_line(entry));
     put!(
@@ -108,8 +138,8 @@ fn entry_text(
         "      {}  #{}  created {}, updated {}",
         entry.op_id,
         entry.seq,
-        timestamp_text(entry.created_at),
-        timestamp_text(entry.updated_at)
+        time(entry.created_at),
+        time(entry.updated_at)
     );
     if let Some(boot) = boot
         && let Some(text) = attention_text(attention(entry, boot, liveness(&entry.owner)))
@@ -120,7 +150,11 @@ fn entry_text(
         put!(out, "      Takes effect: {}", pending_name_long(apply));
     }
     if let Some(failure) = &entry.failure {
-        put!(out, "      Reason: {}", failure_text(failure));
+        put!(
+            out,
+            "      Reason: {}",
+            failure_text(failure, reset_phase(entry))
+        );
     }
     if let Some(pending) = &entry.apply_pending {
         put!(
@@ -135,7 +169,7 @@ fn entry_text(
     }
 }
 
-fn baseline_text(out: &mut String, baseline: &BaselineRecord) {
+fn baseline_text(out: &mut String, baseline: &BaselineRecord, time: TimeText<'_>) {
     put!(
         out,
         "  {}\\{} = {}  (recorded by {} on {})",
@@ -143,7 +177,7 @@ fn baseline_text(out: &mut String, baseline: &BaselineRecord) {
         baseline.key.name,
         value_text(&baseline.value),
         baseline.captured_by.short(),
-        timestamp_text(baseline.captured_at)
+        time(baseline.captured_at)
     );
 }
 
@@ -210,15 +244,94 @@ mod tests {
     use super::*;
 
     #[test]
-    fn timestamps() {
-        assert_eq!(timestamp_text(Timestamp(0)), "1970-01-01 00:00:00 UTC");
+    fn utc_timestamps() {
+        assert_eq!(utc_timestamp_text(Timestamp(0)), "1970-01-01 00:00:00 UTC");
         assert_eq!(
-            timestamp_text(Timestamp(1_790_500_004_000)),
+            utc_timestamp_text(Timestamp(1_790_500_004_000)),
             "2026-09-27 09:06:44 UTC"
         );
         assert_eq!(
-            timestamp_text(Timestamp(951_782_400_000)),
+            utc_timestamp_text(Timestamp(951_782_400_000)),
             "2000-02-29 00:00:00 UTC"
+        );
+    }
+
+    /// Day count since 1970-01-01 of a proleptic Gregorian date (H. Hinnant's
+    /// `days_from_civil`), to check [`civil_from_days`] and the local times independently.
+    fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+        let year = if month <= 2 { year - 1 } else { year };
+        let era = year.div_euclid(400);
+        let yoe = year - era * 400;
+        let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146_097 + doe - 719_468
+    }
+
+    /// Seconds since the Unix epoch of `YYYY-MM-DD HH:MM:SS +HH:MM`.
+    fn epoch_seconds_of_local_text(text: &str) -> i64 {
+        let number = |range: std::ops::Range<usize>| -> i64 { text[range].parse().unwrap() };
+        let days = days_from_civil(number(0..4), number(5..7), number(8..10));
+        let local = days * 86_400 + number(11..13) * 3600 + number(14..16) * 60 + number(17..19);
+        let offset = number(21..23) * 3600 + number(24..26) * 60;
+        match &text[20..21] {
+            "+" => local - offset,
+            "-" => local + offset,
+            sign => panic!("unexpected offset sign {sign:?} in {text:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn journal_times_are_local_with_their_offset() {
+        // Design m3 G.1 (R4): the shape `2026-09-27 22:22:05 +09:00`, whatever this PC's zone,
+        // and the same instant as the stored UTC milliseconds.
+        for at in [1_790_515_325_000, 1_790_515_887_721, 951_782_400_000] {
+            let text = timestamp_text(Timestamp(at));
+            assert_eq!(text.len(), "2026-09-27 22:22:05 +09:00".len(), "{text}");
+            for (index, separator) in [
+                (4, '-'),
+                (7, '-'),
+                (10, ' '),
+                (13, ':'),
+                (16, ':'),
+                (19, ' '),
+                (23, ':'),
+            ] {
+                assert_eq!(text.chars().nth(index), Some(separator), "{text}");
+            }
+            assert!(!text.ends_with("UTC"), "{text}");
+            assert_eq!(
+                epoch_seconds_of_local_text(&text),
+                i64::try_from(at / 1000).unwrap(),
+                "{text}"
+            );
+        }
+        // The same days as the UTC form (checks `civil_from_days` both ways).
+        for days in [0, 11_016, 20_723, 20_724, 47_540] {
+            let (year, month, day) = civil_from_days(days);
+            assert_eq!(
+                days_from_civil(year as i64, month as i64, day as i64),
+                days as i64
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_fixed_local_time_reads_as_the_journal_shows_it() {
+        let local = mklm_win::time::LocalTime {
+            year: 2026,
+            month: 9,
+            day: 27,
+            hour: 22,
+            minute: 22,
+            second: 5,
+            utc_offset_minutes: 540,
+        };
+        assert_eq!(local.to_iso_text(), "2026-09-27 22:22:05 +09:00");
+        assert_eq!(
+            epoch_seconds_of_local_text(&local.to_iso_text()),
+            1_790_515_325
         );
     }
 
@@ -274,26 +387,46 @@ mod tests {
     #[test]
     fn text_and_json() {
         let dead = |_: &ProcessIdentity| Liveness::Dead;
-        let empty = journal_text(&Journal::default(), Some(BootId(1)), &dead, None);
+        let empty = journal_text(
+            &Journal::default(),
+            Some(BootId(1)),
+            &dead,
+            None,
+            &utc_timestamp_text,
+        );
         assert!(empty.contains("Empty: MKLM has not changed anything"));
 
         let journal = Journal {
             entries: vec![entry()],
             ..Journal::default()
         };
-        let text = journal_text(&journal, Some(BootId(1)), &dead, None);
+        let text = journal_text(&journal, Some(BootId(1)), &dead, None, &utc_timestamp_text);
         assert!(text.contains("3f2a9c1e  set HID"), "{text}");
         assert!(text.contains("(waiting for keep or revert)"), "{text}");
         assert!(
             text.contains("Attention: waits for `mklm-cli keep`"),
             "{text}"
         );
+        assert!(
+            text.contains("created 2026-09-27 09:06:40 UTC, updated 2026-09-27 09:06:44 UTC"),
+            "{text}"
+        );
         assert!(text.contains("[1] Enum\\HID\\"), "{text}");
         assert!(text.contains("last written 7"), "{text}");
         assert!(!text.contains("device removed"), "{text}");
         let current = |_: &ValueRecord| Some(RegValue::Dword { value: 7 });
-        let text = journal_text(&journal, Some(BootId(1)), &dead, Some(&current));
+        let text = journal_text(
+            &journal,
+            Some(BootId(1)),
+            &dead,
+            Some(&current),
+            &|at: Timestamp| format!("<{}>", at.0),
+        );
         assert!(text.contains("now 7"), "{text}");
+        assert!(
+            text.contains("created <1790500000000>, updated <1790500004000>"),
+            "{text}"
+        );
 
         let document = journal_document(&journal, Some(1), Some(BootId(1)), &dead);
         let json = serde_json::to_value(&document).unwrap();
@@ -304,5 +437,88 @@ mod tests {
         assert_eq!(json["entries"][0]["state"], "awaiting-confirm");
         assert_eq!(json["entries"][0]["attention"], "awaiting-user");
         assert_eq!(json["store_version"], 1);
+        // Machine-readable: the stored UTC milliseconds, not the local text (design m3 G.1).
+        assert_eq!(json["entries"][0]["created_at"], 1_790_500_000_000_u64);
+    }
+
+    /// The schema-1 entry of the M2 real-machine test R5, as an M2 build stored it (helper killed
+    /// after its first write, before the keyboard reset; recovery rolled it back).
+    const R5_ENTRY: &str = r#"{"schema_version":1,"op_id":"8e9a9970-f7bf-46c7-b779-f914f17bd40d","seq":7,"kind":{"kind":"set-layout","requested":"HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000","instance_ids":["HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000"],"layout":"jis"},"state":"reverted","boot_id":"4c703377-b861-11f1-a1dd-d9f1d0b3ec70","owner":{"pid":4668,"creation_time":134349894905676290},"created_at":1790515887721,"updated_at":1790516010637,"apply":"reset-keyboard","countdown":null,"records":[{"target":{"kind":"device","instance_id":"HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000"},"key_path":"Enum\\HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000\\Device Parameters","name":"KeyboardTypeOverride","baseline":{"kind":"dword","value":4},"before":{"kind":"dword","value":4},"intended":{"kind":"dword","value":7},"last_written":{"kind":"dword","value":4},"conflict":null,"resolve_to":null,"write_error":null,"skipped":null},{"target":{"kind":"device","instance_id":"HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000"},"key_path":"Enum\\HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000\\Device Parameters","name":"KeyboardSubtypeOverride","baseline":{"kind":"dword","value":0},"before":{"kind":"dword","value":0},"intended":{"kind":"dword","value":2},"last_written":{"kind":"dword","value":0},"conflict":null,"resolve_to":null,"write_error":null,"skipped":null}],"context":[],"failure":{"kind":"live-reset-unconfirmed"},"revert_mode":null,"apply_pending":null,"history":[{"from":null,"to":"planned","at":1790515887721,"boot":"4c703377-b861-11f1-a1dd-d9f1d0b3ec70","by":{"pid":20644,"creation_time":134349894876176557},"reason":"set-layout","boot_time_hint":134349552405000000},{"from":"planned","to":"revert-pending","at":1790515890626,"boot":"4c703377-b861-11f1-a1dd-d9f1d0b3ec70","by":{"pid":4668,"creation_time":134349894905676290},"reason":"recover:roll-back","boot_time_hint":134349552405000000},{"from":"revert-pending","to":"reverted","at":1790516010637,"boot":"4c703377-b861-11f1-a1dd-d9f1d0b3ec70","by":{"pid":4668,"creation_time":134349894905676290},"reason":"recover:roll-back","boot_time_hint":134349552405000000}]}"#;
+
+    /// A schema-1 baseline stored by the same M2 build.
+    const M2_BASELINE: (&str, &str) = (
+        r"device|HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000|KeyboardTypeOverride",
+        r#"{"schema_version":1,"key":{"target":{"kind":"device","instance_id":"HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000"},"name":"KeyboardTypeOverride"},"key_path":"Enum\\HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000\\Device Parameters","value":{"kind":"dword","value":4},"captured_at":1790515162813,"captured_by":"bfaca7cd-fdef-4dd0-8d75-6f311d32bc37"}"#,
+    );
+
+    fn m2_journal() -> Journal {
+        Journal::parse(
+            &[(
+                "8e9a9970-f7bf-46c7-b779-f914f17bd40d".to_string(),
+                R5_ENTRY.to_string(),
+            )],
+            &[(M2_BASELINE.0.to_string(), M2_BASELINE.1.to_string())],
+        )
+    }
+
+    #[test]
+    fn schema_1_entries_and_baselines_from_m2_are_shown() {
+        let journal = m2_journal();
+        assert!(journal.unreadable.is_empty(), "{:?}", journal.unreadable);
+        assert_eq!(journal.entries.len(), 1);
+        assert_eq!(journal.baselines.len(), 1);
+        let dead = |_: &ProcessIdentity| Liveness::Dead;
+        let text = journal_text(&journal, Some(BootId(1)), &dead, None, &utc_timestamp_text);
+        assert!(text.contains("8e9a9970  set HID"), "{text}");
+        assert!(text.contains("(reverted)"), "{text}");
+        assert!(
+            text.contains("created 2026-09-27 13:31:27 UTC, updated 2026-09-27 13:33:30 UTC"),
+            "{text}"
+        );
+        // Design m3 G.2 (R5): the helper stopped before the reset.
+        assert!(
+            text.contains(
+                "Reason: the writer stopped before the keyboard reset; recovery put the values \
+                 back (the keyboard never switched)"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("after the keyboard reset"), "{text}");
+        assert!(
+            text.contains(
+                "KeyboardTypeOverride = 4  (recorded by bfaca7cd on 2026-09-27 13:19:22 UTC)"
+            ),
+            "{text}"
+        );
+
+        // The same entry had it reached the reset: the M2 wording.
+        let mut reached = journal.entries[0].clone();
+        let mut restarting = reached.history[0].clone();
+        restarting.from = Some(OpState::Written);
+        restarting.to = OpState::Restarting;
+        reached.history.insert(1, restarting);
+        let journal = Journal {
+            entries: vec![reached],
+            ..Journal::default()
+        };
+        let text = journal_text(&journal, None, &dead, None, &utc_timestamp_text);
+        assert!(
+            text.contains(
+                "Reason: the change was never kept after the keyboard reset; recovery put it back"
+            ),
+            "{text}"
+        );
+
+        // The JSON keeps the stored documents as they are.
+        let journal = m2_journal();
+        let document = journal_document(&journal, Some(1), None, &dead);
+        let json = serde_json::to_value(&document).unwrap();
+        assert_eq!(json["entries"][0]["schema_version"], 1);
+        assert_eq!(
+            json["entries"][0]["failure"]["kind"],
+            "live-reset-unconfirmed"
+        );
+        assert_eq!(json["entries"][0]["updated_at"], 1_790_516_010_637_u64);
+        assert_eq!(json["baselines"][0]["captured_at"], 1_790_515_162_813_u64);
     }
 }

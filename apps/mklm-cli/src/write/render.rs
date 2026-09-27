@@ -3,10 +3,11 @@
 
 use std::fmt::Write as _;
 
+use mklm_client::describe::{ResetPhase, reset_phase_from};
 use mklm_core::{
     ConflictInfo, ErrorCode, ErrorInfo, FailureReason, JournalEntry, Layout, LayoutChoice, OpKind,
-    OpState, OperationResult, Outcome, PendingAction, RegValue, RestoreScope, ValueKey,
-    ValueRecord, WriteTarget,
+    OpState, OperationResult, Outcome, PendingAction, RecoveredOp, RegValue, RestoreScope,
+    ValueKey, ValueRecord, WriteTarget,
 };
 
 pub use mklm_client::values::{model_value, op_value};
@@ -124,7 +125,10 @@ pub fn kind_text(kind: &OpKind) -> String {
     }
 }
 
-pub fn failure_text(failure: &FailureReason) -> String {
+/// Why an operation did not end as requested. `phase` tells whether it got as far as the
+/// keyboard reset (`mklm_client::describe`): `LiveResetUnconfirmed` is recorded both before and
+/// after the reset, and only the words differ (design m3 G.2; M2 real-machine test R5).
+pub fn failure_text(failure: &FailureReason, phase: ResetPhase) -> String {
     match failure {
         FailureReason::ConcurrentChange { name } => {
             format!("{name} changed between planning and writing; nothing was written")
@@ -136,9 +140,14 @@ pub fn failure_text(failure: &FailureReason) -> String {
         FailureReason::Interrupted => {
             "the writer stopped halfway; recovery put the values back".into()
         }
-        FailureReason::LiveResetUnconfirmed => {
-            "the change was never kept after the keyboard reset; recovery put it back".into()
-        }
+        FailureReason::LiveResetUnconfirmed => match phase {
+            ResetPhase::NotReached => "the writer stopped before the keyboard reset; recovery put \
+                                       the values back (the keyboard never switched)"
+                .into(),
+            ResetPhase::Reached => {
+                "the change was never kept after the keyboard reset; recovery put it back".into()
+            }
+        },
         FailureReason::CountdownExpired => "no answer before the countdown ran out".into(),
         FailureReason::KeyboardDidNotReturn => {
             "the keyboard did not come back after the reset, or Windows asked for a restart".into()
@@ -241,6 +250,33 @@ fn conflict_lines(out: &mut String, conflicts: &[ConflictInfo]) {
     }
 }
 
+/// How far the operation of a result got, for its reason (design m3 G.2): a recovered row for the
+/// same operation tells (`reset_phase_from`, its state when recovery found it). Without one the
+/// reset counts as reached, the wording M2 used: a result's own `LiveResetUnconfirmed` comes
+/// only from recovery, and saying the keyboard never switched is only right when it is known.
+fn result_reset_phase(result: &OperationResult) -> ResetPhase {
+    result
+        .recovered
+        .iter()
+        .find(|recovered| result.op_id.as_ref() == Some(&recovered.op_id))
+        .map_or(ResetPhase::Reached, |recovered| {
+            reset_phase_from(recovered.from)
+        })
+}
+
+/// The end of a recovered row (design m3 G.2, B.12): an operation that recovery put back
+/// (`Reverted`) from a state before its keyboard reset (`Planned`, `Written`) never switched the
+/// keyboard, which the user should know (M2 real-machine test R5). Put back into a state that
+/// needs a restart, or from a later state, nothing is added.
+fn recovered_note(recovered: &RecoveredOp) -> &'static str {
+    match (recovered.to, reset_phase_from(recovered.from)) {
+        (OpState::Reverted, ResetPhase::NotReached) => {
+            "; stopped before the keyboard reset, so the keyboard never switched"
+        }
+        _ => "",
+    }
+}
+
 /// The final answer of a request.
 pub fn result_text(result: &OperationResult) -> String {
     let mut out = String::new();
@@ -266,16 +302,21 @@ pub fn result_text(result: &OperationResult) -> String {
     };
     put!(out, "{op}{headline}");
     if let Some(failure) = &result.failure {
-        put!(out, "  Reason: {}", failure_text(failure));
+        put!(
+            out,
+            "  Reason: {}",
+            failure_text(failure, result_reset_phase(result))
+        );
     }
     for recovered in &result.recovered {
         put!(
             out,
-            "  {}: {} -> {} ({})",
+            "  {}: {} -> {} ({}{})",
             recovered.op_id.short(),
             state_text(recovered.from),
             state_text(recovered.to),
-            recovered.decision
+            recovered.decision,
+            recovered_note(recovered)
         );
     }
     if !result.conflicts.is_empty() {
@@ -362,9 +403,87 @@ pub fn error_text(info: &ErrorInfo) -> String {
 
 #[cfg(test)]
 mod tests {
-    use mklm_core::{ValueOp, fixtures, value_names};
+    use mklm_core::{OpId, ValueOp, fixtures, value_names};
 
     use super::*;
+
+    #[test]
+    fn reasons_follow_the_reset_phase() {
+        // Design m3 G.2 (R5): `LiveResetUnconfirmed` before and after the reset.
+        let unconfirmed = FailureReason::LiveResetUnconfirmed;
+        assert_eq!(
+            failure_text(&unconfirmed, ResetPhase::NotReached),
+            "the writer stopped before the keyboard reset; recovery put the values back (the \
+             keyboard never switched)"
+        );
+        assert_eq!(
+            failure_text(&unconfirmed, ResetPhase::Reached),
+            "the change was never kept after the keyboard reset; recovery put it back"
+        );
+        for phase in [ResetPhase::NotReached, ResetPhase::Reached] {
+            assert_eq!(
+                failure_text(&FailureReason::CountdownExpired, phase),
+                "no answer before the countdown ran out"
+            );
+        }
+
+        // A result's own reason: the recovered row of the same operation tells the phase;
+        // without one, the reset counts as reached (the M2 wording).
+        let op = OpId::parse("3f2a9c1e-5b7d-4e8a-9c0f-1a2b3c4d5e6f").unwrap();
+        let mut result = OperationResult {
+            op_id: Some(op.clone()),
+            outcome: Outcome::Reverted,
+            failure: Some(unconfirmed),
+            pending_action: None,
+            conflicts: Vec::new(),
+            inv_ps2_violation: None,
+            recovered: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let text = result_text(&result);
+        assert!(
+            text.contains(
+                "  Reason: the change was never kept after the keyboard reset; recovery put it back"
+            ),
+            "{text}"
+        );
+        result.recovered.push(RecoveredOp {
+            op_id: op,
+            from: OpState::Written,
+            to: OpState::Reverted,
+            decision: "roll-back".into(),
+        });
+        let text = result_text(&result);
+        assert!(
+            text.contains("  Reason: the writer stopped before the keyboard reset;"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "  3f2a9c1e: written (interrupted?) -> reverted (roll-back; stopped before the \
+                 keyboard reset, so the keyboard never switched)\n"
+            ),
+            "{text}"
+        );
+
+        // Put back into a state that needs a restart, or after the reset: no claim about the
+        // keyboard.
+        result.recovered[0].to = OpState::RevertedPendingReboot;
+        assert!(result_text(&result).contains(
+            "  3f2a9c1e: written (interrupted?) -> reverted; the PC must restart (roll-back)\n"
+        ));
+        result.recovered[0].from = OpState::Restarting;
+        result.recovered[0].to = OpState::Reverted;
+        let text = result_text(&result);
+        assert!(
+            text.contains("  3f2a9c1e: resetting the keyboard -> reverted (roll-back)\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  Reason: the change was never kept after the keyboard reset"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn values_and_keys() {
