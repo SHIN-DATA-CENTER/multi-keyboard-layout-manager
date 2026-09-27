@@ -10,10 +10,9 @@ repository.workspace = true
 
 [dependencies]
 serde.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
+# Journal entries and baseline records are stored as JSON (`JournalEntry::to_json`).
 serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

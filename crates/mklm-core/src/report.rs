@@ -269,3 +269,305 @@ pub struct ErrorInfo {
     pub op_id: Option<OpId>,
     pub plan_error: Option<PlanError>,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Debug;
+
+    use serde::de::DeserializeOwned;
+
+    use super::*;
+    use crate::allowlist::{AllowlistError, PlannedWrite, WriteTarget};
+    use crate::model::value_names;
+
+    fn round_trip<T: Serialize + DeserializeOwned + PartialEq + Debug>(value: &T) -> String {
+        let json = serde_json::to_string(value).unwrap();
+        let back: T = serde_json::from_str(&json).unwrap();
+        assert_eq!(&back, value, "{json}");
+        json
+    }
+
+    fn op() -> OpId {
+        OpId::parse("3f2a9c1e-5b7d-4e8a-9c0f-1a2b3c4d5e6f").unwrap()
+    }
+
+    fn keychron() -> String {
+        r"HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000".to_string()
+    }
+
+    fn step() -> PlanStep {
+        PlanStep {
+            target: WriteTarget::Device {
+                instance_id: keychron(),
+            },
+            writes: vec![
+                PlannedWrite::set(value_names::HID_TYPE, 7),
+                PlannedWrite::set(value_names::HID_SUBTYPE, 2),
+            ],
+        }
+    }
+
+    fn violation() -> InvPs2Violation {
+        InvPs2Violation {
+            keyboards: vec![r"ACPI\PNP0303\4&1&0".to_string()],
+        }
+    }
+
+    #[test]
+    fn options_plans_and_choices() {
+        for allow_live_reset in [false, true] {
+            for other_input_available in [false, true] {
+                round_trip(&ApplyOptions {
+                    allow_live_reset,
+                    other_input_available,
+                });
+            }
+        }
+        assert_eq!(
+            round_trip(&ApplyOptions::default()),
+            r#"{"allow_live_reset":false,"other_input_available":false}"#
+        );
+        round_trip(&ExpectedPlan {
+            steps: vec![step()],
+            apply: Some(PendingAction::ResetKeyboard),
+        });
+        round_trip(&ExpectedPlan {
+            steps: vec![],
+            apply: None,
+        });
+        for policy in [
+            ConflictPolicy::Report,
+            ConflictPolicy::Skip,
+            ConflictPolicy::Overwrite,
+        ] {
+            round_trip(&policy);
+        }
+        for choice in [
+            ResolutionChoice::KeepCurrent,
+            ResolutionChoice::UseBefore,
+            ResolutionChoice::UseIntended,
+            ResolutionChoice::UseBaseline,
+        ] {
+            round_trip(&ValueChoice { record: 3, choice });
+        }
+        assert_eq!(
+            round_trip(&ResolutionChoice::KeepCurrent),
+            "\"keep-current\""
+        );
+        assert_eq!(
+            round_trip(&Decision::Keep { op_id: op() }),
+            r#"{"kind":"keep","op_id":"3f2a9c1e-5b7d-4e8a-9c0f-1a2b3c4d5e6f"}"#
+        );
+        round_trip(&Decision::RevertNow { op_id: op() });
+    }
+
+    #[test]
+    fn events() {
+        let events = vec![
+            Event::Locked,
+            Event::Planned {
+                op_id: op(),
+                steps: vec![step()],
+                apply: Some(PendingAction::RestartPc),
+                keyboards: vec![
+                    ExpectedKeyboard {
+                        instance_id: keychron(),
+                        display_name: "Keychron Receiver".into(),
+                        expected_type: Some(KeyboardType::JIS),
+                        layout_after: Some(LayoutTable::Jis),
+                        changes: true,
+                    },
+                    ExpectedKeyboard {
+                        instance_id: r"TS_INPT\TS_KBD\1".into(),
+                        display_name: "RDP".into(),
+                        expected_type: None,
+                        layout_after: Some(LayoutTable::Other("kbdnec.dll".into())),
+                        changes: false,
+                    },
+                ],
+            },
+            Event::StateChanged {
+                op_id: op(),
+                state: OpState::RevertedPendingReboot,
+            },
+            Event::StepWritten {
+                op_id: op(),
+                step: 1,
+                of: 3,
+            },
+            Event::ResettingKeyboard {
+                instance_id: keychron(),
+            },
+            Event::KeyboardArrived {
+                instance_id: keychron(),
+                reported: None,
+                expected: KeyboardType::US,
+            },
+            Event::CountdownStarted {
+                op_id: op(),
+                seconds: 20,
+                verified: true,
+            },
+            Event::CountdownTick {
+                op_id: op(),
+                remaining: 7,
+            },
+            Event::WaitingForReconnect {
+                op_id: op(),
+                instance_ids: vec![keychron()],
+            },
+            Event::RecoveryAssetsWritten {
+                directory: r"C:\ProgramData\SHIN DATA CENTER\MKLM\Recovery".into(),
+                skipped: 1,
+            },
+            Event::Warning {
+                message: "標準に従う設定は未確認です".into(),
+            },
+            Event::Heartbeat,
+        ];
+        for event in &events {
+            round_trip(event);
+        }
+        assert_eq!(round_trip(&Event::Heartbeat), r#"{"kind":"heartbeat"}"#);
+    }
+
+    #[test]
+    fn results_and_errors() {
+        for outcome in [
+            Outcome::NoChange,
+            Outcome::Confirmed,
+            Outcome::AwaitingConfirm,
+            Outcome::PendingReboot,
+            Outcome::Reverted,
+            Outcome::RevertedPendingReboot,
+            Outcome::Failed,
+            Outcome::Conflict,
+            Outcome::Recovered,
+        ] {
+            round_trip(&outcome);
+        }
+        let conflict = ConflictInfo {
+            op_id: op(),
+            record: 0,
+            key_path: format!(r"Enum\{}\Device Parameters", keychron()),
+            name: value_names::HID_TYPE.into(),
+            baseline: RegValue::Absent,
+            before: RegValue::Dword { value: 4 },
+            intended: RegValue::Dword { value: 7 },
+            last_written: Some(RegValue::Dword { value: 7 }),
+            current: RegValue::Other {
+                reg_type: 1,
+                data_hex: "340000".into(),
+            },
+            write_error: Some("access denied".into()),
+        };
+        round_trip(&conflict);
+        round_trip(&RecoveredOp {
+            op_id: op(),
+            from: OpState::Planned,
+            to: OpState::Reverted,
+            decision: "roll-back".into(),
+        });
+        let failures = [
+            FailureReason::ConcurrentChange {
+                name: value_names::HID_TYPE.into(),
+            },
+            FailureReason::WriteError {
+                message: "x".into(),
+            },
+            FailureReason::CallerDisconnected,
+            FailureReason::Interrupted,
+            FailureReason::LiveResetUnconfirmed,
+            FailureReason::CountdownExpired,
+            FailureReason::KeyboardDidNotReturn,
+            FailureReason::NothingWritten,
+            FailureReason::ConflictKeptCurrent,
+            FailureReason::Superseded { by: op() },
+        ];
+        for failure in failures {
+            round_trip(&OperationResult {
+                op_id: Some(op()),
+                outcome: Outcome::Reverted,
+                failure: Some(failure),
+                pending_action: Some(PendingAction::Reconnect),
+                conflicts: vec![conflict.clone()],
+                inv_ps2_violation: Some(violation()),
+                recovered: vec![],
+                warnings: vec!["w".into()],
+            });
+        }
+        round_trip(&OperationResult {
+            op_id: None,
+            outcome: Outcome::Recovered,
+            failure: None,
+            pending_action: None,
+            conflicts: vec![],
+            inv_ps2_violation: None,
+            recovered: vec![RecoveredOp {
+                op_id: op(),
+                from: OpState::PendingReboot,
+                to: OpState::AwaitingConfirm,
+                decision: "reboot-observed".into(),
+            }],
+            warnings: vec![],
+        });
+        let codes = [
+            ErrorCode::Busy,
+            ErrorCode::OpInProgress,
+            ErrorCode::RecoveryNeeded,
+            ErrorCode::JournalUnreadable,
+            ErrorCode::PlanRejected,
+            ErrorCode::PlanChanged,
+            ErrorCode::MigrationRequired,
+            ErrorCode::NotFixedMode,
+            ErrorCode::UnknownKeyboard,
+            ErrorCode::UnknownOp,
+            ErrorCode::NotLatest,
+            ErrorCode::InvalidState,
+            ErrorCode::InventoryIncomplete,
+            ErrorCode::RecoveryAssetsUnavailable,
+            ErrorCode::Cancelled,
+            ErrorCode::Registry,
+            ErrorCode::Device,
+            ErrorCode::Host,
+            ErrorCode::Protocol,
+            ErrorCode::Internal,
+        ];
+        for code in codes {
+            round_trip(&code);
+        }
+        assert_eq!(
+            round_trip(&ErrorCode::RecoveryAssetsUnavailable),
+            "\"recovery-assets-unavailable\""
+        );
+        let plan_errors = [
+            None,
+            Some(PlanError::InvPs2(violation())),
+            Some(PlanError::Device {
+                instance_id: keychron(),
+                error: AllowlistError::TypeNotAllowed {
+                    keyboard_type: KeyboardType::new(7, 0),
+                },
+            }),
+            Some(PlanError::Global {
+                error: AllowlistError::ValueNotAllowed {
+                    name: "Start".into(),
+                },
+            }),
+            Some(PlanError::UnknownKeyboard {
+                instance_id: "x".into(),
+            }),
+            Some(PlanError::DuplicateKeyboard {
+                instance_id: "x".into(),
+            }),
+        ];
+        for plan_error in plan_errors {
+            round_trip(&ErrorInfo {
+                code: ErrorCode::PlanRejected,
+                message: "refused".into(),
+                op_id: Some(op()),
+                plan_error,
+            });
+        }
+    }
+}
