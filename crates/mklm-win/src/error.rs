@@ -47,6 +47,10 @@ pub enum Error {
     /// The process at the other end of the pipe is not the expected one (M2).
     #[error("pipe peer is process {found}, expected {expected}")]
     PeerMismatch { expected: u32, found: u32 },
+    /// The helper exited before it connected to the pipe (M2). `exit_code` is its process exit
+    /// code (design E.8).
+    #[error("process {pid} exited with code {exit_code} before connecting")]
+    PeerExited { pid: u32, exit_code: u32 },
     /// `regwrite` refuses a value name outside `mklm_core::DEVICE_VALUE_NAMES` /
     /// `GLOBAL_VALUE_NAMES` (M2, last line of defence under the engine's checks).
     #[error("{name:?} is not a value MKLM may write on {path}")]
@@ -158,5 +162,52 @@ impl ReadIssue {
 impl fmt::Display for ReadIssue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.subject, self.error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_inventory_issues_block_writes() {
+        // Design A.3: the devnode set, identities, drivers and presence decide INV-PS2 and the
+        // allowlist; everything else is a warning.
+        let table = [
+            (ReadIssueKind::Locate, true),
+            (ReadIssueKind::Identity, true),
+            (ReadIssueKind::Driver, true),
+            (ReadIssueKind::Presence, true),
+            (ReadIssueKind::Status, false),
+            (ReadIssueKind::Container, false),
+            (ReadIssueKind::Topology, false),
+            (ReadIssueKind::Descriptive, false),
+            (ReadIssueKind::Values, false),
+            (ReadIssueKind::RawInput, false),
+            (ReadIssueKind::Environment, false),
+        ];
+        for (kind, blocks) in table {
+            assert_eq!(kind.blocks_writes(), blocks, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn codes_of_wrapped_errors() {
+        let win32 = Error::Win32 {
+            function: "F",
+            code: 5,
+        };
+        assert_eq!(win32.win32_code(), Some(5));
+        assert_eq!(win32.config_ret(), None);
+        let cr = Error::ConfigRet {
+            function: "CM",
+            code: 0x0d,
+        };
+        assert_eq!(cr.config_ret(), Some(0x0d));
+        assert_eq!(cr.win32_code(), None);
+        assert_eq!(
+            ReadIssue::new(ReadIssueKind::Values, r"HKLM\x", win32).to_string(),
+            r"HKLM\x: F failed with Win32 error 5"
+        );
     }
 }
