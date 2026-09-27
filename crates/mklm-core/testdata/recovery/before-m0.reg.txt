@@ -1,0 +1,19 @@
+Windows Registry Editor Version 5.00
+
+; MKLM baseline (values before MKLM changed them), generated 2026-09-27 04:00 UTC by MKLM 0.1.0
+; Order: PS/2 values set, global values set, HID keyboards, global values deleted, PS/2 values deleted.
+; global values set
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\i8042prt\Parameters]
+"OverrideKeyboardType"=dword:00000007
+"OverrideKeyboardSubtype"=dword:00000002
+
+; HID keyboards
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000\Device Parameters]
+"KeyboardTypeOverride"=-
+"KeyboardSubtypeOverride"=-
+
+; PS/2 values deleted
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\ACPI\FUJ0309\4&320DB4C2&0\Device Parameters]
+"OverrideKeyboardType"=-
+"OverrideKeyboardSubtype"=-
+

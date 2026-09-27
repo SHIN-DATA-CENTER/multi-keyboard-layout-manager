@@ -20,16 +20,17 @@
 //! If the end state satisfies INV-PS2, no intermediate state breaks it: pins only grow before the
 //! pair is removed (phase 4), and the pair is present whenever a pin is removed (phase 5). The plan
 //! is still replayed step by step and checked, like [`crate::check_plan`] does for new writes.
-
-// Skeleton (M2): the bodies below are `todo!()`; remove this allow once they are implemented.
-#![allow(unused_variables)]
+//!
+//! For INV-PS2 a value only counts as a pin or as part of the global pair when it is a `REG_DWORD`:
+//! a [`RegValue::Other`] baseline (say, a `REG_SZ` "7") is restored byte for byte but is not
+//! assumed to pin anything.
 
 use serde::{Deserialize, Serialize};
 
-use crate::allowlist::WriteTarget;
-use crate::journal::{RegValue, ValueRecord};
-use crate::model::{GlobalSettings, KeyboardDevice};
-use crate::safety::InvPs2Violation;
+use crate::allowlist::{DEVICE_VALUE_NAMES, GLOBAL_VALUE_NAMES, WriteTarget};
+use crate::journal::{RegValue, ValueRecord, is_ps2_value_name, same_target, value_eq};
+use crate::model::{DeviceOverrides, GlobalSettings, KeyboardDevice, KeyboardDriver, value_names};
+use crate::safety::{InvPs2Violation, check_inv_ps2};
 
 /// Which recorded value a restore writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -41,6 +42,17 @@ pub enum RestoreTo {
     Baseline,
     /// `resolve_to`: a conflict resolution (design review C5).
     Resolution,
+}
+
+impl RestoreTo {
+    /// The value `record` is restored to, or `None` for a resolution without `resolve_to`.
+    pub fn value(self, record: &ValueRecord) -> Option<&RegValue> {
+        match self {
+            RestoreTo::Before => Some(&record.before),
+            RestoreTo::Baseline => Some(&record.baseline),
+            RestoreTo::Resolution => record.resolve_to.as_ref(),
+        }
+    }
 }
 
 /// What the current value must be for a restore write to go ahead (compare-and-swap). A current
@@ -110,17 +122,128 @@ pub enum RestoreError {
     InvPs2(InvPs2Violation),
 }
 
+const HID_NAMES: [&str; 2] = [value_names::HID_TYPE, value_names::HID_SUBTYPE];
+const PS2_NAMES: [&str; 2] = [value_names::PS2_TYPE, value_names::PS2_SUBTYPE];
+
+fn find_keyboard(keyboards: &[KeyboardDevice], instance_id: &str) -> Option<usize> {
+    keyboards
+        .iter()
+        .position(|kb| kb.instance_id.eq_ignore_ascii_case(instance_id))
+}
+
 /// Checks one record against the journal rules: device names must be the type/subtype pair of the
 /// keyboard's driver (either stack's pair when the devnode is gone), global names must be one of
 /// the four global names ([`crate::GLOBAL_VALUE_NAMES`]), and [`RegValue::Other`] may only be
 /// restored as the record's `baseline` (or as a `resolve_to` equal to the baseline or to the value
 /// the user saw).
+///
+/// Names compare exactly (MKLM records the canonical spelling). A value MKLM may not write (an
+/// `Other` that is not the baseline) is reported as [`RestoreError::NameNotAllowed`] for that
+/// name. Errors name record 0; [`plan_restore`] reports the record's real index.
 pub fn check_restore_record(
     record: &ValueRecord,
     keyboards: &[KeyboardDevice],
     to: RestoreTo,
 ) -> Result<(), RestoreError> {
-    todo!("M2")
+    check_record(0, record, keyboards, to)
+}
+
+fn check_record(
+    index: usize,
+    record: &ValueRecord,
+    keyboards: &[KeyboardDevice],
+    to: RestoreTo,
+) -> Result<(), RestoreError> {
+    let not_allowed = || RestoreError::NameNotAllowed {
+        target: record.target.clone(),
+        name: record.name.clone(),
+    };
+    let allowed: &[&str] = match &record.target {
+        WriteTarget::Global => &GLOBAL_VALUE_NAMES,
+        WriteTarget::Device { instance_id } => match find_keyboard(keyboards, instance_id) {
+            Some(i) => match keyboards[i].driver {
+                KeyboardDriver::Kbdhid => &HID_NAMES,
+                KeyboardDriver::I8042prt => &PS2_NAMES,
+                KeyboardDriver::Other(_) => &[],
+            },
+            None => &DEVICE_VALUE_NAMES,
+        },
+    };
+    if !allowed.contains(&record.name.as_str()) {
+        return Err(not_allowed());
+    }
+    let value = to
+        .value(record)
+        .ok_or(RestoreError::NoResolution { record: index })?;
+    if matches!(value, RegValue::Other { .. }) {
+        let is_baseline = value_eq(&record.name, value, &record.baseline);
+        let seen_by_user = to == RestoreTo::Resolution
+            && record
+                .conflict
+                .as_ref()
+                .is_some_and(|seen| value_eq(&record.name, value, seen));
+        if !is_baseline && !seen_by_user {
+            return Err(not_allowed());
+        }
+    }
+    Ok(())
+}
+
+/// The model's view of a stored DWORD: only a `REG_DWORD` counts.
+fn as_dword(value: &RegValue) -> Option<u32> {
+    match value {
+        RegValue::Dword { value } => Some(*value),
+        _ => None,
+    }
+}
+
+fn as_string(value: &RegValue) -> Option<String> {
+    match value {
+        RegValue::Sz { value } => Some(value.clone()),
+        _ => None,
+    }
+}
+
+/// Applies restore writes to a keyboard's override values (as the drivers would read them).
+fn apply_device(overrides: &mut DeviceOverrides, writes: &[RestoreWrite]) {
+    for write in writes {
+        let slot = match write.name.as_str() {
+            value_names::HID_TYPE => &mut overrides.keyboard_type_override,
+            value_names::HID_SUBTYPE => &mut overrides.keyboard_subtype_override,
+            value_names::PS2_TYPE => &mut overrides.override_keyboard_type,
+            value_names::PS2_SUBTYPE => &mut overrides.override_keyboard_subtype,
+            _ => continue,
+        };
+        *slot = as_dword(&write.value);
+    }
+}
+
+/// Applies restore writes to the global values.
+fn apply_global(global: &mut GlobalSettings, writes: &[RestoreWrite]) {
+    for write in writes {
+        match write.name.as_str() {
+            value_names::PS2_TYPE => global.override_keyboard_type = as_dword(&write.value),
+            value_names::PS2_SUBTYPE => global.override_keyboard_subtype = as_dword(&write.value),
+            value_names::LAYER_DRIVER_JPN => global.layer_driver_jpn = as_string(&write.value),
+            value_names::KEYBOARD_IDENTIFIER => {
+                global.override_keyboard_identifier = as_string(&write.value);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// True when the restore puts every i8042prt device value and every global value it writes back
+/// to the record's baseline: then a violation it leaves is the one MKLM found (and says so).
+/// Vacuously true for a restore of HID values only, which cannot change INV-PS2 either way.
+fn restores_baselines_only(records: &[ValueRecord], to: RestoreTo) -> bool {
+    records
+        .iter()
+        .filter(|record| record.is_boot_time())
+        .all(|record| {
+            to.value(record)
+                .is_some_and(|value| value_eq(&record.name, value, &record.baseline))
+        })
 }
 
 /// Builds the ordered restore plan for `records` (phases in the module docs) and replays it on
@@ -128,6 +251,11 @@ pub fn check_restore_record(
 /// out by the caller (`SkipReason::DeviceRemoved`).
 ///
 /// `expect(i)` gives the compare-and-swap expectation of record `i`.
+///
+/// One step per registry key, in the order the key first appears in `records`, then sorted by
+/// phase (stable, so forward order is kept inside a phase). The replay follows `check_plan`: no
+/// step may turn a state that satisfies INV-PS2 into one that violates it, and the end state must
+/// satisfy it, unless [`RestorePlan::restores_inv_ps2_violation`] applies.
 pub fn plan_restore(
     records: &[ValueRecord],
     to: RestoreTo,
@@ -135,5 +263,679 @@ pub fn plan_restore(
     keyboards: &[KeyboardDevice],
     global: &GlobalSettings,
 ) -> Result<RestorePlan, RestoreError> {
-    todo!("M2")
+    let mut steps: Vec<RestoreStep> = Vec::new();
+    for (index, record) in records.iter().enumerate() {
+        check_record(index, record, keyboards, to)?;
+        let value = to
+            .value(record)
+            .ok_or(RestoreError::NoResolution { record: index })?
+            .clone();
+        let write = RestoreWrite {
+            record: index,
+            name: record.name.clone(),
+            value,
+            expect: expect(index),
+        };
+        match steps
+            .iter_mut()
+            .find(|step| same_target(&step.target, &record.target))
+        {
+            Some(step) => step.writes.push(write),
+            None => steps.push(RestoreStep {
+                // Decided below, once every write of the key is known.
+                phase: RestorePhase::Other,
+                target: record.target.clone(),
+                writes: vec![write],
+            }),
+        }
+    }
+
+    for step in &mut steps {
+        step.phase = match &step.target {
+            WriteTarget::Global => {
+                let mut after = global.clone();
+                apply_global(&mut after, &step.writes);
+                if after.fixed_type().is_some() {
+                    RestorePhase::GlobalWithPair
+                } else {
+                    RestorePhase::GlobalWithoutPair
+                }
+            }
+            WriteTarget::Device { instance_id } => {
+                let known = find_keyboard(keyboards, instance_id).map(|i| &keyboards[i]);
+                let is_ps2 = match known {
+                    Some(kb) => kb.driver == KeyboardDriver::I8042prt,
+                    // A devnode that is gone: its names say which stack it was.
+                    None => step.writes.iter().all(|w| is_ps2_value_name(&w.name)),
+                };
+                if is_ps2 {
+                    let mut after = known.map(|kb| kb.overrides.clone()).unwrap_or_default();
+                    apply_device(&mut after, &step.writes);
+                    if after.ps2_type().is_some() {
+                        RestorePhase::AddPins
+                    } else {
+                        RestorePhase::RemovePins
+                    }
+                } else {
+                    RestorePhase::Other
+                }
+            }
+        };
+    }
+    steps.sort_by_key(|step| step.phase);
+
+    // Replay: the same rule as `check_plan`.
+    let mut state_keyboards = keyboards.to_vec();
+    let mut state_global = global.clone();
+    let mut violation = check_inv_ps2(&state_global, &state_keyboards).err();
+    let mut broken_by_step = None;
+    for step in &steps {
+        match &step.target {
+            WriteTarget::Global => apply_global(&mut state_global, &step.writes),
+            WriteTarget::Device { instance_id } => {
+                if let Some(i) = find_keyboard(&state_keyboards, instance_id) {
+                    apply_device(&mut state_keyboards[i].overrides, &step.writes);
+                }
+            }
+        }
+        let now = check_inv_ps2(&state_global, &state_keyboards).err();
+        if violation.is_none() && broken_by_step.is_none() {
+            broken_by_step.clone_from(&now);
+        }
+        violation = now;
+    }
+    match (violation, broken_by_step) {
+        (Some(end), _) if restores_baselines_only(records, to) => Ok(RestorePlan {
+            steps,
+            restores_inv_ps2_violation: Some(end),
+        }),
+        (Some(end), _) => Err(RestoreError::InvPs2(end)),
+        (None, Some(broken)) => Err(RestoreError::InvPs2(broken)),
+        (None, None) => Ok(RestorePlan {
+            steps,
+            restores_inv_ps2_violation: None,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures;
+    use crate::model::value_names::*;
+    use crate::test_support::*;
+
+    fn keychron_id() -> String {
+        fixtures::keychron().instance_id
+    }
+
+    fn ps2_id() -> String {
+        fixtures::internal_ps2().instance_id
+    }
+
+    fn with_overrides(kb: KeyboardDevice, overrides: DeviceOverrides) -> KeyboardDevice {
+        KeyboardDevice { overrides, ..kb }
+    }
+
+    fn ps2_pinned(ty: u32, subtype: u32) -> KeyboardDevice {
+        with_overrides(
+            fixtures::internal_ps2(),
+            DeviceOverrides {
+                override_keyboard_type: Some(ty),
+                override_keyboard_subtype: Some(subtype),
+                ..Default::default()
+            },
+        )
+    }
+
+    fn ps2_bare() -> KeyboardDevice {
+        with_overrides(fixtures::internal_ps2(), DeviceOverrides::default())
+    }
+
+    fn keychron_with(pair: Option<(u32, u32)>) -> KeyboardDevice {
+        with_overrides(
+            fixtures::keychron(),
+            DeviceOverrides {
+                keyboard_type_override: pair.map(|p| p.0),
+                keyboard_subtype_override: pair.map(|p| p.1),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Replays `plan` the way the engine writes it and checks INV-PS2 after every step.
+    fn replay(plan: &RestorePlan, keyboards: &[KeyboardDevice], global: &GlobalSettings) {
+        let mut keyboards = keyboards.to_vec();
+        let mut global = global.clone();
+        for (n, step) in plan.steps.iter().enumerate() {
+            match &step.target {
+                WriteTarget::Global => apply_global(&mut global, &step.writes),
+                WriteTarget::Device { instance_id } => {
+                    let i = find_keyboard(&keyboards, instance_id).unwrap();
+                    apply_device(&mut keyboards[i].overrides, &step.writes);
+                }
+            }
+            assert_eq!(
+                check_inv_ps2(&global, &keyboards),
+                Ok(()),
+                "after step {n}: {step:?}"
+            );
+        }
+    }
+
+    fn last_written(records: &[ValueRecord]) -> impl Fn(usize) -> Expect + '_ {
+        |i| Expect::Value {
+            value: records[i].intended.clone(),
+        }
+    }
+
+    fn phases(plan: &RestorePlan) -> Vec<(RestorePhase, WriteTarget)> {
+        plan.steps
+            .iter()
+            .map(|s| (s.phase, s.target.clone()))
+            .collect()
+    }
+
+    /// Records of the migration of the development machine from fixed JIS (plan 1.3), in forward
+    /// order: pin the PS/2 keyboard, assign the Keychron US, delete the global pair.
+    fn migration_records() -> Vec<ValueRecord> {
+        vec![
+            record(device(&ps2_id()), PS2_TYPE, RegValue::Absent, dword(7)),
+            record(device(&ps2_id()), PS2_SUBTYPE, RegValue::Absent, dword(2)),
+            record(device(&keychron_id()), HID_TYPE, RegValue::Absent, dword(4)),
+            record(
+                device(&keychron_id()),
+                HID_SUBTYPE,
+                RegValue::Absent,
+                dword(0),
+            ),
+            record(WriteTarget::Global, PS2_TYPE, dword(7), RegValue::Absent),
+            record(WriteTarget::Global, PS2_SUBTYPE, dword(2), RegValue::Absent),
+        ]
+    }
+
+    #[test]
+    fn migrated_back_to_fixed_mode_adds_the_pair_first() {
+        let records = migration_records();
+        let keyboards = vec![ps2_pinned(7, 2), keychron_with(Some((4, 0)))];
+        let global = fixtures::global_per_keyboard();
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Before,
+            &last_written(&records),
+            &keyboards,
+            &global,
+        )
+        .unwrap();
+        assert_eq!(
+            phases(&plan),
+            vec![
+                (RestorePhase::GlobalWithPair, WriteTarget::Global),
+                (RestorePhase::Other, device(&keychron_id())),
+                (RestorePhase::RemovePins, device(&ps2_id())),
+            ]
+        );
+        // The reverse of the forward order, as plan 1.3 says for this direction.
+        let order: Vec<usize> = plan
+            .steps
+            .iter()
+            .flat_map(|s| s.writes.iter().map(|w| w.record))
+            .collect();
+        assert_eq!(order, vec![4, 5, 2, 3, 0, 1]);
+        assert_eq!(plan.steps[0].writes[0].value, dword(7));
+        assert_eq!(
+            plan.steps[0].writes[0].expect,
+            Expect::Value {
+                value: RegValue::Absent
+            }
+        );
+        assert_eq!(plan.restores_inv_ps2_violation, None);
+        replay(&plan, &keyboards, &global);
+    }
+
+    #[test]
+    fn fixed_back_to_per_keyboard_mode_pins_first() {
+        // Undo of a restore-to-baseline that had gone back to fixed mode: its records, listed with
+        // the global key first on purpose.
+        let records = vec![
+            record(WriteTarget::Global, PS2_TYPE, RegValue::Absent, dword(7)),
+            record(WriteTarget::Global, PS2_SUBTYPE, RegValue::Absent, dword(2)),
+            record(device(&keychron_id()), HID_TYPE, dword(4), RegValue::Absent),
+            record(
+                device(&keychron_id()),
+                HID_SUBTYPE,
+                dword(0),
+                RegValue::Absent,
+            ),
+            record(device(&ps2_id()), PS2_TYPE, dword(7), RegValue::Absent),
+            record(device(&ps2_id()), PS2_SUBTYPE, dword(2), RegValue::Absent),
+        ];
+        let keyboards = vec![ps2_bare(), keychron_with(None)];
+        let global = fixtures::global_fixed_jis();
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Before,
+            &last_written(&records),
+            &keyboards,
+            &global,
+        )
+        .unwrap();
+        assert_eq!(
+            phases(&plan),
+            vec![
+                (RestorePhase::AddPins, device(&ps2_id())),
+                (RestorePhase::Other, device(&keychron_id())),
+                (RestorePhase::GlobalWithoutPair, WriteTarget::Global),
+            ]
+        );
+        replay(&plan, &keyboards, &global);
+        // A fixed "global first" order would have been refused.
+        let bare = vec![ps2_bare(), keychron_with(None)];
+        let mut global_first = global.clone();
+        global_first.override_keyboard_type = None;
+        global_first.override_keyboard_subtype = None;
+        assert!(check_inv_ps2(&global_first, &bare).is_err());
+    }
+
+    #[test]
+    fn ps2_value_change_keeps_the_pin() {
+        // Revert of "PS/2 → US" in per-keyboard mode.
+        let records = vec![
+            record(device(&ps2_id()), PS2_TYPE, dword(7), dword(4)),
+            record(device(&ps2_id()), PS2_SUBTYPE, dword(2), dword(0)),
+        ];
+        let keyboards = vec![ps2_pinned(4, 0), keychron_with(Some((4, 0)))];
+        let global = fixtures::global_per_keyboard();
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Before,
+            &last_written(&records),
+            &keyboards,
+            &global,
+        )
+        .unwrap();
+        assert_eq!(
+            phases(&plan),
+            vec![(RestorePhase::AddPins, device(&ps2_id()))]
+        );
+        replay(&plan, &keyboards, &global);
+    }
+
+    #[test]
+    fn standard_only_changes() {
+        let records = vec![
+            record(
+                WriteTarget::Global,
+                LAYER_DRIVER_JPN,
+                sz("kbd106.dll"),
+                sz("kbd101.dll"),
+            ),
+            record(
+                WriteTarget::Global,
+                KEYBOARD_IDENTIFIER,
+                sz("PCAT_106KEY"),
+                sz("PCAT_101KEY"),
+            ),
+        ];
+        let keyboards = vec![ps2_pinned(7, 2)];
+        let per_keyboard = GlobalSettings {
+            layer_driver_jpn: Some("kbd101.dll".into()),
+            override_keyboard_identifier: Some("PCAT_101KEY".into()),
+            ..fixtures::global_per_keyboard()
+        };
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Before,
+            &last_written(&records),
+            &keyboards,
+            &per_keyboard,
+        )
+        .unwrap();
+        assert_eq!(
+            phases(&plan),
+            vec![(RestorePhase::GlobalWithoutPair, WriteTarget::Global)]
+        );
+        assert_eq!(plan.steps[0].writes.len(), 2);
+        replay(&plan, &keyboards, &per_keyboard);
+        let fixed = GlobalSettings {
+            override_keyboard_type: Some(7),
+            override_keyboard_subtype: Some(0),
+            ..per_keyboard
+        };
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Before,
+            &last_written(&records),
+            &[ps2_bare()],
+            &fixed,
+        )
+        .unwrap();
+        assert_eq!(
+            phases(&plan),
+            vec![(RestorePhase::GlobalWithPair, WriteTarget::Global)]
+        );
+    }
+
+    #[test]
+    fn value_names_are_checked_against_the_driver() {
+        let keyboards = vec![ps2_pinned(7, 2), keychron_with(Some((4, 0)))];
+        let rejected = |r: ValueRecord| {
+            assert_eq!(
+                check_restore_record(&r, &keyboards, RestoreTo::Before),
+                Err(RestoreError::NameNotAllowed {
+                    target: r.target.clone(),
+                    name: r.name.clone()
+                }),
+                "{r:?}"
+            );
+        };
+        rejected(record(WriteTarget::Global, "Start", dword(1), dword(4)));
+        rejected(record(
+            WriteTarget::Global,
+            LAYER_DRIVER_KOR,
+            sz("a"),
+            sz("b"),
+        ));
+        rejected(record(WriteTarget::Global, HID_TYPE, dword(4), dword(7)));
+        rejected(record(device(&ps2_id()), HID_TYPE, dword(4), dword(7)));
+        rejected(record(device(&keychron_id()), PS2_TYPE, dword(4), dword(7)));
+        rejected(record(
+            device(&keychron_id()),
+            HID_TOTAL_KEYS,
+            dword(4),
+            dword(7),
+        ));
+        rejected(record(
+            device(&keychron_id()),
+            "keyboardtypeoverride",
+            dword(4),
+            dword(7),
+        ));
+        let rdp = KeyboardDevice {
+            instance_id: r"TS_INPT\TS_KBD\1".into(),
+            driver: KeyboardDriver::Other("TermDD".into()),
+            ..fixtures::keychron()
+        };
+        let with_rdp = vec![rdp.clone()];
+        assert!(matches!(
+            check_restore_record(
+                &record(device(&rdp.instance_id), HID_TYPE, dword(4), dword(7)),
+                &with_rdp,
+                RestoreTo::Before
+            ),
+            Err(RestoreError::NameNotAllowed { .. })
+        ));
+        for ok in [
+            record(WriteTarget::Global, PS2_TYPE, dword(7), RegValue::Absent),
+            record(WriteTarget::Global, KEYBOARD_IDENTIFIER, sz("x"), sz("y")),
+            record(
+                device(&ps2_id().to_ascii_lowercase()),
+                PS2_SUBTYPE,
+                dword(2),
+                dword(0),
+            ),
+            record(device(&keychron_id()), HID_SUBTYPE, dword(0), dword(2)),
+        ] {
+            assert_eq!(
+                check_restore_record(&ok, &keyboards, RestoreTo::Before),
+                Ok(())
+            );
+        }
+        // A devnode that is gone: either stack's pair, nothing else.
+        let gone = device(r"HID\VID_1111&PID_2222\1");
+        for name in DEVICE_VALUE_NAMES {
+            assert_eq!(
+                check_restore_record(
+                    &record(gone.clone(), name, dword(4), dword(7)),
+                    &keyboards,
+                    RestoreTo::Before
+                ),
+                Ok(())
+            );
+        }
+        rejected(record(gone, "Start", dword(4), dword(7)));
+        // plan_restore reports the record's index.
+        let records = vec![
+            record(device(&keychron_id()), HID_TYPE, dword(4), dword(7)),
+            record(WriteTarget::Global, "Start", dword(1), dword(4)),
+        ];
+        assert!(matches!(
+            plan_restore(
+                &records,
+                RestoreTo::Before,
+                &|_| Expect::Any,
+                &keyboards,
+                &fixtures::global_per_keyboard()
+            ),
+            Err(RestoreError::NameNotAllowed { name, .. }) if name == "Start"
+        ));
+    }
+
+    #[test]
+    fn other_values_are_restored_only_as_the_baseline() {
+        let keyboards = vec![keychron_with(Some((4, 0)))];
+        let odd = RegValue::Other {
+            reg_type: 1,
+            data_hex: "340000".into(),
+        };
+        // Op 1 wrote over a REG_SZ "4": its before is the baseline.
+        let first = record(device(&keychron_id()), HID_TYPE, odd.clone(), dword(7));
+        for to in [RestoreTo::Before, RestoreTo::Baseline] {
+            assert_eq!(check_restore_record(&first, &keyboards, to), Ok(()));
+        }
+        // An `Other` that is not the baseline is never written.
+        let mut foreign = record(device(&keychron_id()), HID_TYPE, odd.clone(), dword(7));
+        foreign.baseline = dword(4);
+        assert!(matches!(
+            check_restore_record(&foreign, &keyboards, RestoreTo::Before),
+            Err(RestoreError::NameNotAllowed { .. })
+        ));
+        assert_eq!(
+            check_restore_record(&foreign, &keyboards, RestoreTo::Baseline),
+            Ok(())
+        );
+        // A resolution may keep the value the user saw.
+        foreign.resolve_to = Some(odd.clone());
+        assert!(check_restore_record(&foreign, &keyboards, RestoreTo::Resolution).is_err());
+        foreign.conflict = Some(odd.clone());
+        assert_eq!(
+            check_restore_record(&foreign, &keyboards, RestoreTo::Resolution),
+            Ok(())
+        );
+        foreign.resolve_to = Some(RegValue::Other {
+            reg_type: 3,
+            data_hex: "00".into(),
+        });
+        assert!(check_restore_record(&foreign, &keyboards, RestoreTo::Resolution).is_err());
+        // Restored byte for byte, but not taken for a pin.
+        let plan = plan_restore(
+            std::slice::from_ref(&first),
+            RestoreTo::Baseline,
+            &|_| Expect::Any,
+            &keyboards,
+            &fixtures::global_per_keyboard(),
+        )
+        .unwrap();
+        assert_eq!(plan.steps[0].writes[0].value, odd);
+    }
+
+    #[test]
+    fn resolutions_need_a_value_for_every_record() {
+        let keyboards = vec![keychron_with(Some((7, 2)))];
+        let mut records = vec![
+            record(device(&keychron_id()), HID_TYPE, dword(4), dword(7)),
+            record(device(&keychron_id()), HID_SUBTYPE, dword(0), dword(2)),
+        ];
+        records[0].resolve_to = Some(dword(4));
+        assert_eq!(
+            plan_restore(
+                &records,
+                RestoreTo::Resolution,
+                &|_| Expect::Any,
+                &keyboards,
+                &fixtures::global_per_keyboard()
+            ),
+            Err(RestoreError::NoResolution { record: 1 })
+        );
+        records[1].resolve_to = Some(dword(0));
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Resolution,
+            &|i| Expect::Value {
+                value: records[i].intended.clone(),
+            },
+            &keyboards,
+            &fixtures::global_per_keyboard(),
+        )
+        .unwrap();
+        let values: Vec<&RegValue> = plan.steps[0].writes.iter().map(|w| &w.value).collect();
+        assert_eq!(values, vec![&dword(4), &dword(0)]);
+        assert_eq!(
+            check_restore_record(
+                &record(device(&keychron_id()), HID_TYPE, dword(4), dword(7)),
+                &keyboards,
+                RestoreTo::Resolution
+            ),
+            Err(RestoreError::NoResolution { record: 0 })
+        );
+    }
+
+    #[test]
+    fn a_pre_existing_violation_may_only_come_back_as_the_baseline() {
+        // Before MKLM: per-keyboard mode, the PS/2 keyboard unpinned (it typed US). MKLM pinned it.
+        let records = vec![
+            record(device(&ps2_id()), PS2_TYPE, RegValue::Absent, dword(7)),
+            record(device(&ps2_id()), PS2_SUBTYPE, RegValue::Absent, dword(2)),
+        ];
+        let keyboards = vec![ps2_pinned(7, 2)];
+        let global = fixtures::global_per_keyboard();
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Baseline,
+            &last_written(&records),
+            &keyboards,
+            &global,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.restores_inv_ps2_violation,
+            Some(InvPs2Violation {
+                keyboards: vec![ps2_id()]
+            })
+        );
+        assert_eq!(plan.steps[0].phase, RestorePhase::RemovePins);
+
+        // Removing a pin that was not there before MKLM is refused.
+        let mut not_baseline = records.clone();
+        for r in &mut not_baseline {
+            r.baseline = r.intended.clone();
+        }
+        assert_eq!(
+            plan_restore(
+                &not_baseline,
+                RestoreTo::Before,
+                &last_written(&not_baseline),
+                &keyboards,
+                &global
+            ),
+            Err(RestoreError::InvPs2(InvPs2Violation {
+                keyboards: vec![ps2_id()]
+            }))
+        );
+
+        // A HID-only restore cannot change INV-PS2: an existing violation (an unpinned phantom that
+        // appeared) is reported, not a reason to refuse.
+        let phantom = KeyboardDevice {
+            instance_id: r"ACPI\PNP0303\4&1&0".into(),
+            present: false,
+            ..ps2_bare()
+        };
+        let hid = vec![record(device(&keychron_id()), HID_TYPE, dword(4), dword(7))];
+        let plan = plan_restore(
+            &hid,
+            RestoreTo::Before,
+            &last_written(&hid),
+            &[keychron_with(Some((7, 2))), phantom.clone()],
+            &global,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.restores_inv_ps2_violation,
+            Some(InvPs2Violation {
+                keyboards: vec![phantom.instance_id.clone()]
+            })
+        );
+    }
+
+    #[test]
+    fn steps_group_writes_per_key_and_keep_expectations() {
+        let records = migration_records();
+        let keyboards = vec![ps2_pinned(7, 2), keychron_with(Some((4, 0)))];
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Baseline,
+            &|i| {
+                if i == 2 {
+                    Expect::Any
+                } else {
+                    Expect::Value {
+                        value: records[i].intended.clone(),
+                    }
+                }
+            },
+            &keyboards,
+            &fixtures::global_per_keyboard(),
+        )
+        .unwrap();
+        assert_eq!(plan.steps.len(), 3);
+        for step in &plan.steps {
+            assert_eq!(step.writes.len(), 2);
+            for write in &step.writes {
+                assert_eq!(write.name, records[write.record].name);
+                assert_eq!(write.value, records[write.record].baseline);
+            }
+        }
+        assert_eq!(plan.steps[1].writes[0].expect, Expect::Any);
+        // An empty restore is an empty plan.
+        assert_eq!(
+            plan_restore(
+                &[],
+                RestoreTo::Before,
+                &|_| Expect::Any,
+                &keyboards,
+                &fixtures::global_per_keyboard()
+            ),
+            Ok(RestorePlan {
+                steps: vec![],
+                restores_inv_ps2_violation: None
+            })
+        );
+    }
+
+    #[test]
+    fn a_removed_ps2_devnode_is_phased_by_its_values() {
+        let gone = r"ACPI\PNP0303\4&9&0";
+        let records = vec![
+            record(device(gone), PS2_TYPE, RegValue::Absent, dword(7)),
+            record(device(gone), PS2_SUBTYPE, RegValue::Absent, dword(2)),
+            record(WriteTarget::Global, PS2_TYPE, dword(7), RegValue::Absent),
+            record(WriteTarget::Global, PS2_SUBTYPE, dword(2), RegValue::Absent),
+        ];
+        let keyboards = vec![ps2_pinned(7, 2)];
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Before,
+            &last_written(&records),
+            &keyboards,
+            &fixtures::global_per_keyboard(),
+        )
+        .unwrap();
+        assert_eq!(
+            phases(&plan),
+            vec![
+                (RestorePhase::GlobalWithPair, WriteTarget::Global),
+                (RestorePhase::RemovePins, device(gone)),
+            ]
+        );
+    }
 }

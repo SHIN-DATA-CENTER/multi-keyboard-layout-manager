@@ -37,6 +37,8 @@ pub mod transport;
 
 #[cfg(any(test, feature = "test-fixtures"))]
 pub mod fixtures;
+#[cfg(test)]
+mod test_support;
 
 pub use allowlist::*;
 pub use assess::*;

@@ -1,0 +1,70 @@
+﻿MKLM 復旧用ファイル / MKLM recovery files
+生成: 2026-09-27 04:00 UTC、MKLM 0.1.0 / Generated 2026-09-27 04:00 UTC by MKLM 0.1.0
+
+■ 最初に試すこと
+1. コマンドプロンプト（管理者でなくてよい）で mklm-cli undo を実行する。確認待ち、再起動待ち、衝突の変更をまとめて元に戻します（UAC の確認が出ます）。
+2. それで直らなければ mklm-cli recover、次に mklm-cli restore --baseline --all を実行する。
+3. 最後に PC を「再起動」する（「シャットダウン」ではなく「再起動」）。
+
+■ このフォルダーのファイル
+- restore-offline.cmd: MKLM が変えたキーボードの値を、MKLM 導入前の値に戻すスクリプト。
+    restore-offline.cmd online       Windows かセーフモードの、管理者のコマンドプロンプトで実行
+    restore-offline.cmd offline D:   回復環境（WinRE）のコマンドプロンプトで実行。D: は Windows のドライブ
+- mklm-baseline.reg: 同じ内容のレジストリファイル。Windows 上でダブルクリックして取り込む（UAC の確認が出ます）。
+- README.txt: このファイル。
+
+■ 回復環境（WinRE）での手順（詳しくは docs/recovery.md）
+1. サインイン画面の電源ボタン → Shift を押しながら「再起動」→ トラブルシューティング → 詳細オプション → コマンド プロンプト。
+2. BitLocker の回復キーを求められたら入力する（https://aka.ms/myrecoverykey で確認できます）。
+3. Windows のドライブを確かめる（WinRE では D: のことが多い。dir D:\Windows）。
+4. cd /d "D:\ProgramData\SHIN DATA CENTER\MKLM\Recovery"
+5. restore-offline.cmd offline D:
+   " のキーは、JIS 配列では Shift+2、US 配列では Shift+'（Enter の左）。
+6. exit と入力し、「続行」で Windows を起動する。
+
+■ USB メモリへのコピー
+このフォルダーを USB メモリなどにコピーしておくと、インスタンス ID と手順を読むための控えになります。
+ただし、実行するのはディスク上の ...\ProgramData\SHIN DATA CENTER\MKLM\Recovery\restore-offline.cmd だけにしてください。USB メモリ上のファイルは書き換えられるおそれがあり、WinRE では SYSTEM 権限で実行されるためです。
+
+■ 記録した値（MKLM 導入前の値）
+#6 HKLM\SYSTEM\CurrentControlSet\Services\i8042prt\Parameters
+   OverrideKeyboardType = REG_DWORD 7 (0x7)
+#3 HKLM\SYSTEM\CurrentControlSet\Services\i8042prt\Parameters
+   OverrideKeyboardSubtype = REG_DWORD 2 (0x2)
+#1 HKLM\SYSTEM\CurrentControlSet\Enum\HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000\Device Parameters
+   KeyboardTypeOverride = (値なし: 削除 / absent: delete)
+#4 HKLM\SYSTEM\CurrentControlSet\Enum\HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000\Device Parameters
+   KeyboardSubtypeOverride = (値なし: 削除 / absent: delete)
+#5 HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\FUJ0309\4&320DB4C2&0\Device Parameters
+   OverrideKeyboardType = (値なし: 削除 / absent: delete)
+#2 HKLM\SYSTEM\CurrentControlSet\Enum\ACPI\FUJ0309\4&320DB4C2&0\Device Parameters
+   OverrideKeyboardSubtype = (値なし: 削除 / absent: delete)
+
+---- English ----
+
+First try:
+1. In a command prompt (no administrator needed), run mklm-cli undo. It reverts every change that waits for a confirmation or a restart, or is in conflict (a UAC prompt appears).
+2. If that does not help, run mklm-cli recover, then mklm-cli restore --baseline --all.
+3. Then restart the PC (a restart, not a shutdown).
+
+Files in this folder:
+- restore-offline.cmd: puts every keyboard value MKLM changed back to its value before MKLM.
+    restore-offline.cmd online       from an administrator prompt in Windows or Safe Mode
+    restore-offline.cmd offline D:   from the WinRE command prompt; D: is the Windows drive
+- mklm-baseline.reg: the same values as a registry file; double-click it in Windows (a UAC prompt appears).
+- README.txt: this file.
+
+In the recovery environment (WinRE; details in docs/recovery.md):
+1. On the sign-in screen, hold Shift and choose Power > Restart, then Troubleshoot > Advanced options > Command Prompt.
+2. Enter the BitLocker recovery key if asked (see https://aka.ms/myrecoverykey).
+3. Find the Windows drive (often D: in WinRE: dir D:\Windows).
+4. cd /d "D:\ProgramData\SHIN DATA CENTER\MKLM\Recovery"
+5. restore-offline.cmd offline D:
+   The " key is Shift+2 on a JIS keyboard and Shift+' (left of Enter) on a US keyboard.
+6. Type exit and choose Continue to start Windows.
+
+Copying to a USB stick:
+A copy of this folder is a reference for the instance IDs and the steps. Only ever run
+...\ProgramData\SHIN DATA CENTER\MKLM\Recovery\restore-offline.cmd on the Windows drive: a file on a USB stick can be altered, and WinRE runs it with SYSTEM rights.
+
+Recorded values (before MKLM): see the list above.
