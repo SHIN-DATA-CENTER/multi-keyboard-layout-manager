@@ -370,6 +370,7 @@ mod tests {
     const RESET_AND_OTHER_INPUT: ApplyOptions = ApplyOptions {
         allow_live_reset: true,
         other_input_available: true,
+        countdown_seconds: crate::report::DEFAULT_COUNTDOWN_SECONDS,
     };
 
     /// Another collection of the Keychron receiver (same container, different interface).
@@ -612,6 +613,7 @@ mod tests {
         let alone = ApplyOptions {
             allow_live_reset: true,
             other_input_available: false,
+            ..ApplyOptions::default()
         };
         let plan = plan_set_layout(
             &snapshot.keyboards,
@@ -629,6 +631,7 @@ mod tests {
             let no_reset = ApplyOptions {
                 allow_live_reset: false,
                 other_input_available,
+                ..ApplyOptions::default()
             };
             let plan = plan_set_layout(
                 &snapshot.keyboards,

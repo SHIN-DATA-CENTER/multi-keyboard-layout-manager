@@ -35,6 +35,97 @@ pub const GLOBAL_VALUE_NAMES: [&str; 4] = [
     value_names::PS2_TYPE,
     value_names::PS2_SUBTYPE,
 ];
+/// Every value name MKLM may write under `crate::MACHINE_SETTINGS_KEY` (design m3 A.5, WP-E2): the
+/// static gate of `mklm_win::machine_settings` and of the engine's backends.
+pub const MACHINE_SETTING_NAMES: [&str; 1] = [crate::journal::RESTORE_ON_UNINSTALL_VALUE];
+
+/// The type/subtype pair of the *other* driver stack: names a keyboard served by `driver` never
+/// reads (kbdhid reads `KeyboardTypeOverride` / `KeyboardSubtypeOverride`, i8042prt
+/// `OverrideKeyboardType` / `OverrideKeyboardSubtype`). Empty for any other driver, whose reads
+/// MKLM does not know. The only names `CleanupValues` may delete (design m3 A.5, WP-E1).
+pub fn unread_value_names(driver: &KeyboardDriver) -> &'static [&'static str] {
+    const PS2_PAIR: [&str; 2] = [value_names::PS2_TYPE, value_names::PS2_SUBTYPE];
+    const HID_PAIR: [&str; 2] = [value_names::HID_TYPE, value_names::HID_SUBTYPE];
+    match driver {
+        KeyboardDriver::Kbdhid => &PS2_PAIR,
+        KeyboardDriver::I8042prt => &HID_PAIR,
+        KeyboardDriver::Other(_) => &[],
+    }
+}
+
+/// The values "削除する" may offer for a keyboard (first-run wizard, design m3 B.1): the names of
+/// [`unread_value_names`] that exist on it as `REG_DWORD`s, in allowlist order. Deleting them
+/// changes nothing for its driver (it never reads them), so INV-PS2 and the keyboard's layout stay
+/// as they are. Empty for virtual keyboards and drivers other than kbdhid and i8042prt, which MKLM
+/// never writes (plan 1.5).
+///
+/// Only the four names of [`DEVICE_VALUE_NAMES`] are ever candidates: the kbdhid extras
+/// (`KeyboardNumber*Override`) on an i8042prt devnode are not on the write allowlist and are left
+/// to the user, like values on non-keyboard collections.
+pub fn cleanup_candidates(device: &KeyboardDevice) -> Vec<&'static str> {
+    if device.transport == Transport::Virtual {
+        return Vec::new();
+    }
+    let present = device.overrides.present_value_names();
+    unread_value_names(&device.driver)
+        .iter()
+        .copied()
+        .filter(|name| present.contains(name))
+        .collect()
+}
+
+/// True when `name` on `target` is a value its keyboard's driver does not read
+/// ([`unread_value_names`] of the devnode's driver in `keyboards`). False for the global key, for a
+/// devnode missing from `keyboards` and for other drivers: unknown counts as read, on the safe side.
+pub fn is_unread_value(keyboards: &[KeyboardDevice], target: &WriteTarget, name: &str) -> bool {
+    let WriteTarget::Device { instance_id } = target else {
+        return false;
+    };
+    keyboards
+        .iter()
+        .find(|kb| kb.instance_id.eq_ignore_ascii_case(instance_id))
+        .is_some_and(|kb| {
+            unread_value_names(&kb.driver)
+                .iter()
+                .any(|unread| unread.eq_ignore_ascii_case(name))
+        })
+}
+
+/// Checks a "delete the values the driver does not read" request for one keyboard (design m3
+/// A.5, WP-E1) and returns its writes (deletes, in the order asked).
+///
+/// Allowed: names of [`unread_value_names`] (exact, canonical spelling), each at most once, on a
+/// kbdhid or i8042prt keyboard that is not virtual. Refused: a name the driver reads
+/// ([`AllowlistError::OperationNotAllowed`]), any other name ([`AllowlistError::ValueNotAllowed`]),
+/// other drivers ([`AllowlistError::ReadOnlyDriver`]) and virtual keyboards. A name whose value does
+/// not exist is allowed; there is simply nothing to delete.
+pub fn check_cleanup(
+    device: &KeyboardDevice,
+    names: &[String],
+) -> Result<Vec<PlannedWrite>, AllowlistError> {
+    let own = pair_names(&device.driver)?;
+    if device.transport == Transport::Virtual {
+        return Err(AllowlistError::VirtualKeyboard);
+    }
+    let unread = unread_value_names(&device.driver);
+    let mut writes: Vec<PlannedWrite> = Vec::with_capacity(names.len());
+    for name in names {
+        if writes.iter().any(|w| w.name == *name) {
+            return Err(AllowlistError::DuplicateValue { name: name.clone() });
+        }
+        if [own.0, own.1].contains(&name.as_str()) {
+            return Err(AllowlistError::OperationNotAllowed {
+                name: name.clone(),
+                op: ValueOp::Delete,
+            });
+        }
+        if !unread.contains(&name.as_str()) {
+            return Err(AllowlistError::ValueNotAllowed { name: name.clone() });
+        }
+        writes.push(PlannedWrite::delete(name));
+    }
+    Ok(writes)
+}
 
 /// Operation on one registry value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1104,5 +1195,142 @@ mod tests {
             check_plan(&keyboards, &g, &[], &[PlannedWrite::delete("Start")]),
             Err(PlanError::Global { .. })
         ));
+    }
+
+    /// The PS/2 keyboard with the HID pair written to it (a guide's advice gone wrong) and the
+    /// Keychron with the PS/2 pair (the other way round), as the first-run wizard finds them.
+    fn with_foreign_values() -> (KeyboardDevice, KeyboardDevice) {
+        let mut ps2 = fixtures::internal_ps2();
+        ps2.overrides.keyboard_type_override = Some(7);
+        ps2.overrides.keyboard_subtype_override = Some(2);
+        let mut keychron = fixtures::keychron();
+        keychron.overrides.override_keyboard_type = Some(7);
+        keychron.overrides.override_keyboard_subtype = Some(2);
+        (ps2, keychron)
+    }
+
+    #[test]
+    fn cleanup_candidates_are_the_values_the_driver_does_not_read() {
+        let (ps2, keychron) = with_foreign_values();
+        assert_eq!(cleanup_candidates(&ps2), vec![HID_TYPE, HID_SUBTYPE]);
+        assert_eq!(cleanup_candidates(&keychron), vec![PS2_TYPE, PS2_SUBTYPE]);
+        // Only what exists; the driver's own values never.
+        assert!(cleanup_candidates(&fixtures::internal_ps2()).is_empty());
+        assert!(cleanup_candidates(&fixtures::keychron()).is_empty());
+        let mut lone = fixtures::keychron();
+        lone.overrides.override_keyboard_subtype = Some(2);
+        assert_eq!(cleanup_candidates(&lone), vec![PS2_SUBTYPE]);
+        // The kbdhid extras on a PS/2 keyboard are not on the write allowlist.
+        let mut extras = fixtures::internal_ps2();
+        extras.overrides.number_total_keys_override = Some(104);
+        assert!(cleanup_candidates(&extras).is_empty());
+        // Other drivers and virtual keyboards are never written.
+        let other = KeyboardDevice {
+            driver: KeyboardDriver::Other("HidIr".into()),
+            ..keychron.clone()
+        };
+        assert!(cleanup_candidates(&other).is_empty());
+        let virtual_kb = KeyboardDevice {
+            transport: Transport::Virtual,
+            ..keychron.clone()
+        };
+        assert!(cleanup_candidates(&virtual_kb).is_empty());
+    }
+
+    #[test]
+    fn cleanup_refuses_what_the_driver_reads_and_anything_else() {
+        let (ps2, keychron) = with_foreign_values();
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            check_cleanup(&ps2, &names(&[HID_TYPE, HID_SUBTYPE])),
+            Ok(vec![
+                PlannedWrite::delete(HID_TYPE),
+                PlannedWrite::delete(HID_SUBTYPE)
+            ])
+        );
+        assert_eq!(
+            check_cleanup(&keychron, &names(&[PS2_SUBTYPE])),
+            Ok(vec![PlannedWrite::delete(PS2_SUBTYPE)])
+        );
+        // An absent value is fine: nothing to delete.
+        assert_eq!(
+            check_cleanup(&fixtures::keychron(), &names(&[PS2_TYPE])),
+            Ok(vec![PlannedWrite::delete(PS2_TYPE)])
+        );
+        assert_eq!(check_cleanup(&ps2, &[]), Ok(Vec::new()));
+        // The driver's own pair: INV-PS2 and the layout depend on it.
+        for (kb, name) in [
+            (&ps2, PS2_TYPE),
+            (&ps2, PS2_SUBTYPE),
+            (&keychron, HID_TYPE),
+            (&keychron, HID_SUBTYPE),
+        ] {
+            assert_eq!(
+                check_cleanup(kb, &names(&[name])),
+                Err(AllowlistError::OperationNotAllowed {
+                    name: name.into(),
+                    op: ValueOp::Delete
+                }),
+                "{name}"
+            );
+        }
+        for name in [
+            HID_TOTAL_KEYS,
+            "Start",
+            "keyboardtypeoverride",
+            LAYER_DRIVER_JPN,
+            "",
+        ] {
+            assert_eq!(
+                check_cleanup(&ps2, &names(&[name])),
+                Err(AllowlistError::ValueNotAllowed { name: name.into() }),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            check_cleanup(&ps2, &names(&[HID_TYPE, HID_TYPE])),
+            Err(AllowlistError::DuplicateValue {
+                name: HID_TYPE.into()
+            })
+        );
+        let other = KeyboardDevice {
+            driver: KeyboardDriver::Other("HidIr".into()),
+            ..keychron.clone()
+        };
+        assert!(matches!(
+            check_cleanup(&other, &names(&[PS2_TYPE])),
+            Err(AllowlistError::ReadOnlyDriver { .. })
+        ));
+        let virtual_kb = KeyboardDevice {
+            transport: Transport::Virtual,
+            ..keychron
+        };
+        assert_eq!(
+            check_cleanup(&virtual_kb, &names(&[PS2_TYPE])),
+            Err(AllowlistError::VirtualKeyboard)
+        );
+    }
+
+    #[test]
+    fn unread_values_need_a_known_driver() {
+        let (ps2, keychron) = with_foreign_values();
+        let keyboards = vec![ps2.clone(), keychron.clone()];
+        let at = |kb: &KeyboardDevice| WriteTarget::Device {
+            instance_id: kb.instance_id.to_ascii_lowercase(),
+        };
+        assert!(is_unread_value(&keyboards, &at(&ps2), HID_TYPE));
+        assert!(is_unread_value(
+            &keyboards,
+            &at(&ps2),
+            "keyboardsubtypeoverride"
+        ));
+        assert!(!is_unread_value(&keyboards, &at(&ps2), PS2_TYPE));
+        assert!(is_unread_value(&keyboards, &at(&keychron), PS2_SUBTYPE));
+        assert!(!is_unread_value(&keyboards, &at(&keychron), HID_TYPE));
+        assert!(!is_unread_value(&keyboards, &at(&keychron), HID_TOTAL_KEYS));
+        assert!(!is_unread_value(&keyboards, &WriteTarget::Global, PS2_TYPE));
+        // A devnode that is not listed: unknown, counted as read.
+        assert!(!is_unread_value(&[], &at(&keychron), PS2_TYPE));
+        assert_eq!(MACHINE_SETTING_NAMES, ["RestoreOnUninstall"]);
     }
 }

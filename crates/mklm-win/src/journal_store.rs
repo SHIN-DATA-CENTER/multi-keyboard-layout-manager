@@ -257,6 +257,38 @@ impl JournalStore {
     }
 }
 
+/// Creates or opens `SHIN DATA CENTER`, `MKLM` and `MKLM\<name>` (`path`, relative to
+/// `HKEY_LOCAL_MACHINE`) with [`JOURNAL_KEY_SDDL`], checking the owner and DACL of each level before
+/// anything is created under it and of the returned key, like [`JournalStore::open_or_create`].
+/// For the machine-wide settings (`crate::machine_settings`), which live beside the journal under
+/// the same protection.
+pub(crate) fn open_or_create_product_subkey(
+    name: &str,
+    path: &str,
+    access: REG_SAM_FLAGS,
+) -> Result<Key, Error> {
+    let sd = LocalSd::from_sddl(JOURNAL_KEY_SDDL)?;
+    let parent_access = KEY_READ | KEY_CREATE_SUB_KEY;
+    let vendor = create_key(
+        HKEY_LOCAL_MACHINE,
+        VENDOR_KEY,
+        VENDOR_KEY,
+        parent_access,
+        &sd,
+    )?;
+    check_key(&vendor, VENDOR_KEY)?;
+    let product = create_key(hkey(&vendor), "MKLM", PRODUCT_KEY, parent_access, &sd)?;
+    check_key(&product, PRODUCT_KEY)?;
+    let key = create_key(hkey(&product), name, path, access, &sd)?;
+    check_key(&key, path)?;
+    Ok(key)
+}
+
+/// The raw handle of an open key (for `regraw`).
+pub(crate) fn raw_key(key: &Key) -> HKEY {
+    hkey(key)
+}
+
 /// Owner and DACL of one journal key; `path` is relative to `HKEY_LOCAL_MACHINE`.
 fn check_key(key: &Key, path: &str) -> Result<(), Error> {
     let mut sd = key_security(hkey(key))?;

@@ -1,0 +1,10 @@
+[
+  [
+    "device|HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000|KeyboardTypeOverride",
+    {"schema_version":1,"key":{"target":{"kind":"device","instance_id":"HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000"},"name":"KeyboardTypeOverride"},"key_path":"Enum\\HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000\\Device Parameters","value":{"kind":"dword","value":4},"captured_at":1790515162813,"captured_by":"bfaca7cd-fdef-4dd0-8d75-6f311d32bc37"}
+  ],
+  [
+    "device|HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000|KeyboardSubtypeOverride",
+    {"schema_version":1,"key":{"target":{"kind":"device","instance_id":"HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000"},"name":"KeyboardSubtypeOverride"},"key_path":"Enum\\HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000\\Device Parameters","value":{"kind":"dword","value":0},"captured_at":1790515162813,"captured_by":"bfaca7cd-fdef-4dd0-8d75-6f311d32bc37"}
+  ]
+]

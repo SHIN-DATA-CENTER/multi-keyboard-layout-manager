@@ -362,17 +362,22 @@ pub enum CancelAction {
 
 /// True for the requests the engine journals (and announces with [`Event::Planned`]) before it
 /// writes anything, and that check for a caller that left before writing (design m2 S4):
-/// `SetLayout`, `Migrate`, `RestoreBaseline` (and the planned `CleanupValues`, design m3 A.5).
+/// `SetLayout`, `Migrate`, `RestoreBaseline` and `CleanupValues` (design m3 A.5).
 /// `Revert`, `Undo`, `Recover`, `Confirm` and `ResolveConflict` work on existing entries and
-/// may write or reset a keyboard without a `Planned` event.
+/// may write or reset a keyboard without a `Planned` event; `SetMachineSettings` writes one
+/// setting without a journal entry.
 pub fn plans_first(request: &Request) -> bool {
     match request {
-        Request::SetLayout(_) | Request::Migrate(_) | Request::RestoreBaseline(_) => true,
+        Request::SetLayout(_)
+        | Request::Migrate(_)
+        | Request::RestoreBaseline(_)
+        | Request::CleanupValues { .. } => true,
         Request::Revert { .. }
         | Request::Confirm { .. }
         | Request::Recover { .. }
         | Request::Undo { .. }
-        | Request::ResolveConflict(_) => false,
+        | Request::ResolveConflict(_)
+        | Request::SetMachineSettings { .. } => false,
     }
 }
 

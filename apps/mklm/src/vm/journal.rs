@@ -66,6 +66,7 @@ pub fn kind_text(kind: &OpKind, name_of: NameOf<'_>, lang: Lang) -> String {
                 format!("Back to before MKLM ({})", name_of(instance_id))
             }
         },
+        OpKind::Cleanup { instance_id, .. } => i18n::cleanup_text(&name_of(instance_id), lang),
     }
 }
 fn tone(entry: &JournalEntry) -> Tone {

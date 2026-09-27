@@ -121,6 +121,15 @@ pub fn table(table: &LayoutTable, lang: Lang) -> String {
     }
 }
 
+/// What a cleanup did, for the history (design m3 A.5, B.1 "削除する"): the values of
+/// `keyboard` (a display name) that its driver does not read were deleted.
+pub fn cleanup_text(keyboard: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{keyboard} のドライバーが読まない値を削除"),
+        Lang::En => format!("Remove the values {keyboard}'s driver does not read"),
+    }
+}
+
 /// What a keyboard types and why: "JIS", "標準に従う（JIS）", "固定モード（JIS）".
 pub fn effective(layout: &EffectiveLayout, lang: Lang) -> String {
     let name = table(&layout.table, lang);

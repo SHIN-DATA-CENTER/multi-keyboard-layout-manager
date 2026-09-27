@@ -27,4 +27,7 @@ pub use message::*;
 /// Version of the message set. Caller and helper ship together, so they must match exactly; bump it
 /// on any change to [`message`] or to a `mklm-core` type that messages embed (`mklm_core::report`
 /// included). The build ID check (`Hello::build_id`) catches what a forgotten bump would miss.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// 2 (M3, design m3 A.5): `Request::CleanupValues`, `Request::SetMachineSettings` and
+/// `ApplyOptions::countdown_seconds`.
+pub const PROTOCOL_VERSION: u32 = 2;

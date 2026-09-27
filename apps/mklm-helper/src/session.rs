@@ -4,8 +4,9 @@
 
 use mklm_core::OperationResult;
 use mklm_engine::{
-    DeviceController, Engine, EngineError, EventSink, Host, MigrateParams, RegistryBackend,
-    ResolveParams, RestoreBaselineParams, RestoreMode, SetLayoutParams,
+    CleanupParams, DeviceController, Engine, EngineError, EventSink, Host, MachineSettingsParams,
+    MigrateParams, RegistryBackend, ResolveParams, RestoreBaselineParams, RestoreMode,
+    SetLayoutParams,
 };
 use mklm_ipc::{Request, command_line_tail};
 
@@ -68,6 +69,21 @@ where
             },
             sink,
         ),
+        Request::CleanupValues { instance_id, names } => engine.cleanup_values(
+            &CleanupParams {
+                instance_id: instance_id.clone(),
+                names: names.clone(),
+            },
+            sink,
+        ),
+        Request::SetMachineSettings {
+            restore_on_uninstall,
+        } => engine.set_machine_settings(
+            &MachineSettingsParams {
+                restore_on_uninstall: *restore_on_uninstall,
+            },
+            sink,
+        ),
     }
 }
 
@@ -89,7 +105,9 @@ mod windows_session {
 
     use mklm_core::{Decision, ErrorCode, ErrorInfo, Event};
     use mklm_engine::win::{WinDevices, WinHost, WinRegistry};
-    use mklm_engine::{DecisionPoll, Engine, EngineConfig, EngineError, EventSink};
+    use mklm_engine::{
+        DecisionPoll, Engine, EngineConfig, EngineError, EventSink, SessionEnd, SessionEndSink,
+    };
     use mklm_ipc::{
         CallerMessage, FrameError, FrameReader, FrameSequencer, HANDSHAKE_TIMEOUT,
         HEARTBEAT_INTERVAL, Hello, HelperArgs, HelperMessage, MESSAGE_TIMEOUT,
@@ -98,6 +116,7 @@ mod windows_session {
     use mklm_win::elevation;
     use mklm_win::pipe::PipeConnection;
     use mklm_win::proc_identity;
+    use mklm_win::session_end::{self, SessionEndEvent, SessionEndWindow};
 
     use super::{dispatch, parse_args};
     use crate::exit;
@@ -112,6 +131,10 @@ mod windows_session {
     /// Longest wait for restart workers that outlived their deadline before the process exits
     /// (design review C18): a class-installer call is never cut short by the exit, within reason.
     const JOIN_PENDING_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+    /// How long the session-end window waits, on `WM_QUERYENDSESSION` for a running countdown's
+    /// values to be put back, and on `WM_ENDSESSION` for that revert to finish (design m3 WP-E3).
+    /// Under the 5 s after which Windows treats an application as blocking the end of the session.
+    const SESSION_END_WAIT: Duration = Duration::from_secs(3);
 
     type WinEngine = Engine<WinRegistry, WinDevices, WinHost>;
 
@@ -125,10 +148,16 @@ mod windows_session {
     ///    image must be in this executable's directory (`same_image_directory`, which works when
     ///    the caller runs as another user); send `Hello` (with the build ID), read and verify
     ///    `Welcome` (else `HANDSHAKE`).
-    /// 4. Start the writer thread; serve requests: `Request` → [`dispatch`] → `Result` or `Error`;
-    ///    `Bye` / closed pipe / `REQUEST_IDLE_TIMEOUT` → `OK`.
+    /// 4. Start the writer thread and the session-end window (design m3 WP-E3); serve requests:
+    ///    `Request` → [`dispatch`] → `Result` or `Error`; `Bye` / closed pipe /
+    ///    `REQUEST_IDLE_TIMEOUT` → `OK`.
     /// 5. Before exiting, `WinDevices::join_pending` (design review C18).
+    ///
+    /// Before all of it, the process asks to be shut down after its callers
+    /// (`SetProcessShutdownParameters(0x100, SHUTDOWN_NORETRY)`), best effort: the pipe
+    /// disconnect and the next start's recovery protect a countdown when it fails.
     pub fn run() -> ExitCode {
+        let _ = session_end::shut_down_after_callers();
         ExitCode::from(session())
     }
 
@@ -157,7 +186,29 @@ mod windows_session {
         let Some((reader, writer, sequencer, frames_in)) = handshake(&args) else {
             return exit::HANDSHAKE;
         };
-        serve(reader, writer, sequencer, frames_in)
+        let guard = Arc::new(SessionEnd::new());
+        // Best effort, like the shutdown order: without the window a session end is still
+        // covered by the pipe disconnect and by the recovery at the next start.
+        let window = watch_session_end(&guard);
+        let code = serve(reader, writer, sequencer, frames_in, &guard);
+        drop(window);
+        code
+    }
+
+    /// The hidden window that turns `WM_QUERYENDSESSION` / `WM_ENDSESSION` into [`SessionEnd`]
+    /// calls (design m3 WP-E3): a running countdown reverts as on `RevertNow`, and the window
+    /// waits a bounded time for it before the session goes on ending.
+    fn watch_session_end(guard: &Arc<SessionEnd>) -> Option<SessionEndWindow> {
+        let guard = Arc::clone(guard);
+        SessionEndWindow::spawn(move |event| match event {
+            SessionEndEvent::QueryEndSession => {
+                let _ = guard.query_end_session(SESSION_END_WAIT);
+            }
+            SessionEndEvent::EndSession { ending } => {
+                let _ = guard.end_session(ending, SESSION_END_WAIT);
+            }
+        })
+        .ok()
     }
 
     /// Connects and runs the handshake. Returns both ends of the connection, the sequencer of the
@@ -195,12 +246,14 @@ mod windows_session {
         Some((pipe, writer, sequencer, frames_in))
     }
 
-    /// Serves requests until the caller leaves; returns the exit code.
+    /// Serves requests until the caller leaves; returns the exit code. Every request's sink goes
+    /// through [`SessionEndSink`] (`guard`).
     fn serve(
         reader: PipeConnection,
         writer: PipeConnection,
         sequencer: FrameSequencer,
         frames_in: FrameReader,
+        guard: &SessionEnd,
     ) -> u8 {
         let busy = Arc::new(AtomicBool::new(false));
         let (frames, outbox) = mpsc::channel::<HelperMessage>();
@@ -232,6 +285,7 @@ mod windows_session {
                     let reply = match engine_for(&mut engine) {
                         Ok(engine) => {
                             let mut sink = PipeSink::new(&frames, &mut inbox);
+                            let mut sink = SessionEndSink::new(&mut sink, guard);
                             match dispatch(engine, &request, &mut sink) {
                                 Ok(result) => HelperMessage::Result(result),
                                 Err(error) => HelperMessage::Error(error.to_info()),

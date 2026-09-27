@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::allowlist::{DEVICE_VALUE_NAMES, GLOBAL_VALUE_NAMES, WriteTarget};
+use crate::allowlist::{DEVICE_VALUE_NAMES, GLOBAL_VALUE_NAMES, WriteTarget, unread_value_names};
 use crate::journal::{
     BaselineRecord, RegValue, ValueKey, ValueRecord, is_ps2_value_name, same_target, value_eq,
 };
@@ -136,8 +136,10 @@ fn find_keyboard(keyboards: &[KeyboardDevice], instance_id: &str) -> Option<usiz
 }
 
 /// Checks one record against the journal rules: device names must be the type/subtype pair of the
-/// keyboard's driver (either stack's pair when the devnode is gone), global names must be one of
-/// the four global names ([`crate::GLOBAL_VALUE_NAMES`]), and [`RegValue::Other`] may only be
+/// keyboard's driver, or the other stack's pair that it does not read (what `CleanupValues`
+/// deleted and a revert or a restore to baseline puts back, design m3 A.5), either stack's pair
+/// when the devnode is gone, and nothing on a devnode of another driver; global names must be one
+/// of the four global names ([`crate::GLOBAL_VALUE_NAMES`]); and [`RegValue::Other`] may only be
 /// restored as the record's `baseline` (or as a `resolve_to` equal to the baseline or to the value
 /// the user saw).
 ///
@@ -162,18 +164,23 @@ fn check_record(
         target: record.target.clone(),
         name: record.name.clone(),
     };
-    let allowed: &[&str] = match &record.target {
-        WriteTarget::Global => &GLOBAL_VALUE_NAMES,
+    let allowed: (&[&str], &[&str]) = match &record.target {
+        WriteTarget::Global => (&GLOBAL_VALUE_NAMES, &[]),
         WriteTarget::Device { instance_id } => match find_keyboard(keyboards, instance_id) {
-            Some(i) => match keyboards[i].driver {
-                KeyboardDriver::Kbdhid => &HID_NAMES,
-                KeyboardDriver::I8042prt => &PS2_NAMES,
-                KeyboardDriver::Other(_) => &[],
-            },
-            None => &DEVICE_VALUE_NAMES,
+            Some(i) => {
+                let driver = &keyboards[i].driver;
+                let own: &[&str] = match driver {
+                    KeyboardDriver::Kbdhid => &HID_NAMES,
+                    KeyboardDriver::I8042prt => &PS2_NAMES,
+                    KeyboardDriver::Other(_) => &[],
+                };
+                (own, unread_value_names(driver))
+            }
+            None => (&DEVICE_VALUE_NAMES, &[]),
         },
     };
-    if !allowed.contains(&record.name.as_str()) {
+    let name = record.name.as_str();
+    if !allowed.0.contains(&name) && !allowed.1.contains(&name) {
         return Err(not_allowed());
     }
     let value = to
@@ -250,9 +257,12 @@ fn restores_baselines_only(records: &[ValueRecord], to: RestoreTo) -> bool {
 }
 
 /// True when the plan writes a value INV-PS2 reads: an i8042prt pin or the global type/subtype
-/// pair (both use the PS/2 value names; HID keyboards never get them).
+/// pair (both use the PS/2 value names). The PS/2 names on a HID collection, which only a cleanup
+/// ever records, are read by no driver and do not count ([`ValueRecord::is_boot_time`]).
 fn touches_inv_ps2(records: &[ValueRecord]) -> bool {
-    records.iter().any(|record| is_ps2_value_name(&record.name))
+    records
+        .iter()
+        .any(|record| is_ps2_value_name(&record.name) && record.is_boot_time())
 }
 
 /// True when every value INV-PS2 reads is at its baseline in the end state (`keyboards`,
@@ -719,10 +729,14 @@ mod tests {
             sz("b"),
         ));
         rejected(record(WriteTarget::Global, HID_TYPE, dword(4), dword(7)));
-        rejected(record(device(&ps2_id()), HID_TYPE, dword(4), dword(7)));
-        rejected(record(device(&keychron_id()), PS2_TYPE, dword(4), dword(7)));
         rejected(record(
             device(&keychron_id()),
+            HID_TOTAL_KEYS,
+            dword(4),
+            dword(7),
+        ));
+        rejected(record(
+            device(&ps2_id()),
             HID_TOTAL_KEYS,
             dword(4),
             dword(7),
@@ -757,6 +771,15 @@ mod tests {
                 dword(0),
             ),
             record(device(&keychron_id()), HID_SUBTYPE, dword(0), dword(2)),
+            // The other stack's pair, which the driver does not read: what a cleanup deleted
+            // (design m3 A.5) and its revert or a restore to baseline puts back.
+            record(device(&ps2_id()), HID_TYPE, dword(7), RegValue::Absent),
+            record(
+                device(&keychron_id()),
+                PS2_SUBTYPE,
+                dword(2),
+                RegValue::Absent,
+            ),
         ] {
             assert_eq!(
                 check_restore_record(&ok, &keyboards, RestoreTo::Before),
@@ -789,6 +812,53 @@ mod tests {
                 &keyboards,
                 &fixtures::global_per_keyboard(), &[]),
             Err(RestoreError::NameNotAllowed { name, .. }) if name == "Start"
+        ));
+    }
+
+    #[test]
+    fn values_no_driver_reads_do_not_touch_inv_ps2() {
+        // Per-keyboard mode with an unpinned PS/2 keyboard: INV-PS2 is already broken.
+        let keyboards = vec![ps2_bare(), keychron_with(Some((4, 0)))];
+        let global = fixtures::global_per_keyboard();
+        assert!(check_inv_ps2(&global, &keyboards).is_err());
+        // Putting back what a cleanup deleted (the PS/2 pair on the Keychron, the HID pair on the
+        // PS/2 keyboard) changes nothing INV-PS2 reads: shown, not refused.
+        let records = vec![
+            record(device(&keychron_id()), PS2_TYPE, dword(7), RegValue::Absent),
+            record(
+                device(&keychron_id()),
+                PS2_SUBTYPE,
+                dword(2),
+                RegValue::Absent,
+            ),
+            record(device(&ps2_id()), HID_TYPE, dword(7), RegValue::Absent),
+        ];
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Before,
+            &last_written(&records),
+            &keyboards,
+            &global,
+            &[],
+        )
+        .unwrap();
+        assert!(plan.restores_inv_ps2_violation.is_some());
+        assert_eq!(plan.steps.iter().map(|s| s.writes.len()).sum::<usize>(), 3);
+        assert!(records.iter().all(|r| !r.is_boot_time()));
+        // The PS/2 keyboard's own pin does count (unless it goes back to its baseline).
+        let mut unpin = record(device(&ps2_id()), PS2_TYPE, RegValue::Absent, dword(4));
+        unpin.baseline = dword(7);
+        let pin = vec![unpin];
+        assert!(matches!(
+            plan_restore(
+                &pin,
+                RestoreTo::Before,
+                &last_written(&pin),
+                &keyboards,
+                &global,
+                &[]
+            ),
+            Err(RestoreError::InvPs2(_))
         ));
     }
 

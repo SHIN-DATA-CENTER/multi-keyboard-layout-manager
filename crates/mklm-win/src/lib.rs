@@ -24,6 +24,8 @@
 //! - [`pipe`], [`elevation`]: the helper pipe and the UAC launch.
 //! - [`session`]: boot ID, randomness, PC restart and the post-reboot RunOnce entry.
 //! - [`console`]: console control events for the in-process fallback of `mklm-cli`.
+//! - [`session_end`]: the helper's shutdown order and its hidden window for
+//!   `WM_QUERYENDSESSION` / `WM_ENDSESSION` (M3, design m3 WP-E3).
 //!
 //! GUI and front ends (M3, design m3 A.5):
 //! - [`instance`]: the GUI's single instance (mutex and the `activate` / `quit` pipe).
@@ -66,6 +68,7 @@ mod regraw;
 pub mod regwrite;
 mod security;
 pub mod session;
+pub mod session_end;
 mod sys;
 pub mod time;
 #[cfg(feature = "gui")]

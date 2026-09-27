@@ -7,16 +7,19 @@
 //! A.5). HKLM is opened for writing only here, in `regwrite` and in `journal_store` (design m2 K,
 //! extended by m3 J).
 
+use windows::Win32::System::Registry::{KEY_READ, KEY_SET_VALUE, REG_DWORD};
 use windows_registry::LOCAL_MACHINE;
 
 use crate::error::Error;
+use crate::journal_store::{open_or_create_product_subkey, raw_key};
 use crate::reg::{open_read, read_dword};
+use crate::regraw;
 
 /// The settings key, relative to `HKEY_LOCAL_MACHINE`.
-pub const SETTINGS_KEY: &str = r"SOFTWARE\SHIN DATA CENTER\MKLM\Settings";
+pub const SETTINGS_KEY: &str = mklm_core::MACHINE_SETTINGS_KEY;
 
 /// `REG_DWORD` 1 or 0. Absent means 1 (the plan's default: restore on uninstall).
-pub const RESTORE_ON_UNINSTALL_VALUE: &str = "RestoreOnUninstall";
+pub const RESTORE_ON_UNINSTALL_VALUE: &str = mklm_core::RESTORE_ON_UNINSTALL_VALUE;
 
 /// The machine-wide settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,15 +48,43 @@ pub fn read_machine_settings() -> Result<MachineSettings, Error> {
     })
 }
 
-/// Writes [`RESTORE_ON_UNINSTALL_VALUE`] (elevated helper only, under the write lock).
+/// Writes [`RESTORE_ON_UNINSTALL_VALUE`] (elevated helper only, under the write lock): 1 or 0.
 ///
-/// Implementation (WP-E2): create or open the key like `journal_store::JournalStore::open_or_create`
-/// (`RegCreateKeyExW` with `JOURNAL_KEY_SDDL`, owner and DACL verified on an existing key, the
-/// same `Insecure` rules), `RegSetValueExW(REG_DWORD, 0 or 1)`, `RegFlushKey`. The value name is
-/// checked against a static list, as `regwrite` does (design m2 S9).
+/// Creates or opens the key like `journal_store::JournalStore::open_or_create` (`RegCreateKeyExW`
+/// with `JOURNAL_KEY_SDDL`, owner and DACL of `SHIN DATA CENTER`, `MKLM` and `Settings` verified,
+/// the same `Insecure` rules), then `RegSetValueExW(REG_DWORD)` and `RegFlushKey`: durable once it
+/// returns.
 pub fn write_restore_on_uninstall(value: bool) -> Result<(), Error> {
-    let _ = value;
-    todo!("WP-E2: write HKLM\\...\\MKLM\\Settings\\RestoreOnUninstall in the helper")
+    write_setting(RESTORE_ON_UNINSTALL_VALUE, u32::from(value))
+}
+
+/// One `REG_DWORD` under [`SETTINGS_KEY`]. The name is checked against the static list
+/// `mklm_core::MACHINE_SETTING_NAMES` (exact spelling), as `regwrite` checks the keyboard values
+/// (design m2 S9), before any key is opened.
+fn write_setting(name: &str, value: u32) -> Result<(), Error> {
+    let path = format!(r"HKLM\{SETTINGS_KEY}");
+    check_setting_name(&path, name)?;
+    let key = open_or_create_product_subkey("Settings", SETTINGS_KEY, KEY_READ | KEY_SET_VALUE)?;
+    regraw::set_value(
+        raw_key(&key),
+        &path,
+        name,
+        REG_DWORD.0,
+        &value.to_le_bytes(),
+    )?;
+    regraw::flush(raw_key(&key), &path)
+}
+
+/// Only the names of `mklm_core::MACHINE_SETTING_NAMES` may be written.
+fn check_setting_name(path: &str, name: &str) -> Result<(), Error> {
+    if mklm_core::MACHINE_SETTING_NAMES.contains(&name) {
+        Ok(())
+    } else {
+        Err(Error::ValueNotAllowed {
+            path: path.to_string(),
+            name: name.to_string(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -66,5 +97,26 @@ mod tests {
         let settings = read_machine_settings().unwrap();
         let _ = settings.restore_on_uninstall;
         assert!(MachineSettings::default().restore_on_uninstall);
+    }
+
+    #[test]
+    fn only_the_listed_settings_may_be_written() {
+        // Checked before any key is opened: nothing here touches the registry.
+        let path = format!(r"HKLM\{SETTINGS_KEY}");
+        assert_eq!(
+            check_setting_name(&path, RESTORE_ON_UNINSTALL_VALUE),
+            Ok(())
+        );
+        for name in ["Start", "restoreonuninstall", "InstallDir", ""] {
+            assert!(
+                matches!(
+                    write_setting(name, 1),
+                    Err(Error::ValueNotAllowed { name: refused, .. }) if refused == name
+                ),
+                "{name}"
+            );
+        }
+        assert_eq!(SETTINGS_KEY, r"SOFTWARE\SHIN DATA CENTER\MKLM\Settings");
+        assert_eq!(RESTORE_ON_UNINSTALL_VALUE, "RestoreOnUninstall");
     }
 }

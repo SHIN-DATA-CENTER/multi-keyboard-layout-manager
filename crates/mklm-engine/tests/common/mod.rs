@@ -13,8 +13,8 @@ use mklm_engine::memory::{
     CrashImage, FakeDevices, FakeHost, FakeLockCell, MemoryRegistry, RegistryContents, ScriptedSink,
 };
 use mklm_engine::{
-    Engine, EngineConfig, EngineError, MigrateParams, RegistryBackend, RestoreBaselineParams,
-    RestoreMode, SetLayoutParams,
+    CleanupParams, Engine, EngineConfig, EngineError, JournalSlot, MigrateParams, RegistryBackend,
+    RestoreBaselineParams, RestoreMode, SetLayoutParams,
 };
 
 pub type TestEngine = Engine<MemoryRegistry, FakeDevices, FakeHost>;
@@ -29,11 +29,13 @@ pub const DOCK_PS2: &str = r"ACPI\PNP0303\4&1D401FB5&0";
 pub const LIVE: ApplyOptions = ApplyOptions {
     allow_live_reset: true,
     other_input_available: true,
+    countdown_seconds: mklm_core::DEFAULT_COUNTDOWN_SECONDS,
 };
 /// No reset (the defaults).
 pub const NO_RESET: ApplyOptions = ApplyOptions {
     allow_live_reset: false,
     other_input_available: false,
+    countdown_seconds: mklm_core::DEFAULT_COUNTDOWN_SECONDS,
 };
 
 pub fn device(instance_id: &str) -> WriteTarget {
@@ -287,6 +289,39 @@ impl World {
     pub fn restore_all(&mut self, mode: RestoreMode) -> Result<OperationResult, EngineError> {
         let params = restore_params(RestoreScope::All, ConflictPolicy::Report, mode);
         self.run(|e| e.restore_baseline(&params, &mut ScriptedSink::default()))
+    }
+
+    /// "削除する" of `names` on `instance_id` (design m3 A.5).
+    pub fn cleanup(
+        &mut self,
+        instance_id: &str,
+        names: &[&str],
+    ) -> Result<OperationResult, EngineError> {
+        let params = CleanupParams {
+            instance_id: instance_id.to_string(),
+            names: names.iter().map(|n| n.to_string()).collect(),
+        };
+        self.run(|e| e.cleanup_values(&params, &mut ScriptedSink::default()))
+    }
+
+    /// Puts journal documents into the store as they are (e.g. `fixtures::schema_1_journal`),
+    /// durable, and restarts the call count.
+    pub fn seed_journal(&mut self, ops: &[(String, String)], baselines: &[(String, String)]) {
+        for (name, json) in ops {
+            let op = OpId::parse(name).unwrap_or_else(|error| panic!("{name}: {error}"));
+            self.registry
+                .write_journal(&JournalSlot::Op(op), json)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+        for (name, json) in baselines {
+            self.registry
+                .write_journal(&JournalSlot::Baseline(name.clone()), json)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+        self.registry
+            .flush_journal()
+            .unwrap_or_else(|error| panic!("flush: {error}"));
+        *self = self.fork();
     }
 
     /// Runs `set`, `migrate`… and fails the test on an error.

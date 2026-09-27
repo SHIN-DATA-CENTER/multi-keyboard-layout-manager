@@ -31,17 +31,17 @@ use mklm_core::{
     ApplyOptions, ApplyPending, BASELINE_SCHEMA_VERSION, BaselineRecord, BootId, ConflictInfo,
     ConflictPolicy, ContextValue, Countdown, DN_STARTED, Decision, DeviceOverrides, Event, Expect,
     ExpectedKeyboard, ExpectedPlan, FailureReason, GlobalSettings, InputMethods, InvPs2Violation,
-    JOURNAL_SCHEMA_VERSION, Journal, JournalEntry, JournalError, KeyboardDevice, KeyboardDriver,
-    KeyboardType, LayoutChoice, MAX_HISTORY, Observation, OpId, OpKind, OpState, OperationError,
-    OperationPlan, OperationResult, OsInfo, Outcome, PendingAction, PlanStep, PlannedWrite,
-    ProcessIdentity, RecoveredOp, RecoveryContext, RecoveryDecision, RegValue, ResolutionChoice,
-    RestoreError, RestorePlan, RestoreScope, RestoreTo, RevertMode, STORE_VERSION,
-    STORE_VERSION_VALUE, SkipReason, SystemSnapshot, Timestamp, TransitionRecord, Transport,
-    UnreadableEntry, ValueKey, ValueOp, ValueRecord, WriteTarget, apply_method,
-    apply_pending_cleared, apply_pending_on_close, assess, check_inv_ps2, check_restore_record,
-    decide_recovery_with_removed, live_reset_bans, observe, physical_device_members,
-    plan_migration, plan_restore, plan_set_layout, render_recovery_assets, state_after_resolution,
-    value_eq, value_names,
+    Journal, JournalEntry, JournalError, KeyboardDevice, KeyboardDriver, KeyboardType,
+    LayoutChoice, MAX_HISTORY, Observation, OpId, OpKind, OpState, OperationError, OperationPlan,
+    OperationResult, OsInfo, Outcome, PendingAction, PlanError, PlanStep, PlannedWrite,
+    ProcessIdentity, RESTORE_ON_UNINSTALL_VALUE, RecoveredOp, RecoveryContext, RecoveryDecision,
+    RegValue, ResolutionChoice, RestoreError, RestorePlan, RestoreScope, RestoreTo, RevertMode,
+    STORE_VERSION, STORE_VERSION_VALUE, SkipReason, SystemSnapshot, Timestamp, TransitionRecord,
+    Transport, UnreadableEntry, ValueKey, ValueOp, ValueRecord, WriteTarget, apply_method,
+    apply_pending_cleared, apply_pending_on_close, assess, check_cleanup, check_inv_ps2,
+    check_restore_record, decide_recovery_with_removed, is_unread_value, live_reset_bans, observe,
+    physical_device_members, plan_migration, plan_restore, plan_set_layout, render_recovery_assets,
+    state_after_resolution, structural_reset_bans, value_eq, value_names,
 };
 
 use crate::backend::{BackendError, JournalSlot, RegistryBackend};
@@ -49,18 +49,20 @@ use crate::device::{Arrival, DeviceController, RestartOutcome};
 use crate::error::EngineError;
 use crate::host::{Host, HostError};
 use crate::params::{
-    MigrateParams, ResolveParams, RestoreBaselineParams, RestoreMode, SetLayoutParams,
+    CleanupParams, MachineSettingsParams, MigrateParams, ResolveParams, RestoreBaselineParams,
+    RestoreMode, SetLayoutParams,
 };
 use crate::sink::{DecisionPoll, EventSink};
 
 /// Tunables. The defaults are the product values; tests shorten nothing because the engine counts
 /// countdown ticks and the fake host's monotonic clock only moves when the test moves it.
+///
+/// The countdown's length is not here: each request carries it (`ApplyOptions::countdown_seconds`,
+/// 20 or 60 s; design m3 WP-E3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineConfig {
-    /// Keep-or-revert countdown after a live reset (plan 3.5: 15-20 s).
-    pub countdown_seconds: u32,
-    /// Extra monotonic time a countdown may take beyond `countdown_seconds` before it is treated
-    /// as expired whatever the sink does (design review C18).
+    /// Extra monotonic time a countdown may take beyond its seconds before it is treated as
+    /// expired whatever the sink does (design review C18).
     pub countdown_slack: Duration,
     /// Deadline of one `DeviceController::restart` call (design review C18).
     pub restart_timeout: Duration,
@@ -80,7 +82,6 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            countdown_seconds: 20,
             countdown_slack: Duration::from_secs(5),
             restart_timeout: Duration::from_secs(20),
             arrival_timeout: Duration::from_secs(15),
@@ -247,6 +248,21 @@ fn reverts_a_conflict(entry: &JournalEntry) -> bool {
 
 fn is_restore(entry: &JournalEntry) -> bool {
     matches!(entry.kind, OpKind::RestoreBaseline { .. })
+}
+
+fn is_cleanup(entry: &JournalEntry) -> bool {
+    matches!(entry.kind, OpKind::Cleanup { .. })
+}
+
+/// Design m3 WP-E3: a countdown of 20 or 60 s only; checked before anything else happens.
+fn check_countdown(apply: &ApplyOptions) -> Result<(), EngineError> {
+    if apply.countdown_allowed() {
+        Ok(())
+    } else {
+        Err(EngineError::CountdownNotAllowed {
+            seconds: apply.countdown_seconds,
+        })
+    }
 }
 
 fn device_target(instance_id: &str) -> WriteTarget {
@@ -554,6 +570,7 @@ where
         params: &SetLayoutParams,
         sink: &mut dyn EventSink,
     ) -> Result<OperationResult, EngineError> {
+        check_countdown(&params.apply)?;
         let lock = self.lock(sink)?;
         let mut s = self.open(sink, Gate::NewOp)?;
         let plan = plan_set_layout(
@@ -666,6 +683,7 @@ where
         apply: &ApplyOptions,
         sink: &mut dyn EventSink,
     ) -> Result<OperationResult, EngineError> {
+        check_countdown(apply)?;
         let _lock = self.lock(sink)?;
         let mut s = self.open(sink, Gate::Existing)?;
         let mut entry = Self::find_entry(&s, op_id)?;
@@ -770,7 +788,7 @@ where
         // Raw Input: which keyboards already run with the stored values (C1).
         self.refresh(&mut s)?;
         let mut reapplied = Vec::new();
-        for id in self.hid_keyboards(&entry) {
+        for id in Self::hid_keyboards(&s, &entry) {
             let Some(kb) = s.keyboard(&id).filter(|kb| kb.present) else {
                 continue;
             };
@@ -796,6 +814,7 @@ where
         params: &RestoreBaselineParams,
         sink: &mut dyn EventSink,
     ) -> Result<OperationResult, EngineError> {
+        check_countdown(&params.apply)?;
         let lock = self.lock(sink)?;
         let mut s = self.open(sink, Gate::Restore)?;
         let silent = params.mode == RestoreMode::Silent;
@@ -961,16 +980,30 @@ where
             .map(|e| e.op_id.clone())
             .collect();
 
-        let boot_time = records[..count].iter().any(ValueRecord::is_boot_time);
-        let apply = if boot_time {
-            PendingAction::RestartPc
+        // Values the keyboard's driver does not read (what a cleanup deleted, design m3 A.5)
+        // take no effect anywhere: they decide neither a restart nor a reset.
+        let read: Vec<ValueRecord> = records[..count]
+            .iter()
+            .filter(|r| !is_unread_value(&s.keyboards, &r.target, &r.name))
+            .cloned()
+            .collect();
+        let boot_time = read.iter().any(ValueRecord::is_boot_time);
+        let apply = if read.is_empty() {
+            None
+        } else if boot_time {
+            Some(PendingAction::RestartPc)
         } else {
-            let ids = Self::hid_ids(&records[..count]);
+            let ids = Self::hid_ids(&read);
             let targets: Vec<&KeyboardDevice> =
                 ids.iter().filter_map(|id| s.keyboard(id)).collect();
             let only_usable = !params.apply.other_input_available
                 || !other_keyboard_usable(&s.keyboards, &targets);
-            apply_method(&targets, false, only_usable, params.apply.allow_live_reset)
+            Some(apply_method(
+                &targets,
+                false,
+                only_usable,
+                params.apply.allow_live_reset,
+            ))
         };
         let (mut after_keyboards, mut after_global) = (s.keyboards.clone(), s.global.clone());
         for record in &records[..count] {
@@ -1000,7 +1033,7 @@ where
             silent,
             supersedes: supersedes.clone(),
         };
-        let mut entry = self.create(&mut s, kind, records, Some(apply), Vec::new(), keyboards)?;
+        let mut entry = self.create(&mut s, kind, records, apply, Vec::new(), keyboards)?;
         self.supersede(&mut s, &entry.op_id.clone(), &supersedes)?;
         if !self.run_restore(&mut s, &mut entry, &plan, &writes, silent)? {
             self.transition(&mut s, &mut entry, OpState::Conflict, "restore:conflict")?;
@@ -1026,6 +1059,7 @@ where
         apply: &ApplyOptions,
         sink: &mut dyn EventSink,
     ) -> Result<OperationResult, EngineError> {
+        check_countdown(apply)?;
         let _lock = self.lock(sink)?;
         let mut s = self.open(sink, Gate::Recover)?;
         let mut result = empty_result(None, Outcome::Recovered, &[]);
@@ -1042,6 +1076,7 @@ where
         apply: &ApplyOptions,
         sink: &mut dyn EventSink,
     ) -> Result<OperationResult, EngineError> {
+        check_countdown(apply)?;
         let _lock = self.lock(sink)?;
         let mut s = self.open(sink, Gate::Recover)?;
         let mut result = empty_result(None, Outcome::Recovered, &[]);
@@ -1091,6 +1126,7 @@ where
         params: &ResolveParams,
         sink: &mut dyn EventSink,
     ) -> Result<OperationResult, EngineError> {
+        check_countdown(&params.apply)?;
         let _lock = self.lock(sink)?;
         let mut s = self.open(sink, Gate::Existing)?;
         let mut entry = Self::find_entry(&s, &params.op_id)?;
@@ -1205,6 +1241,88 @@ where
         }
         self.prune(&mut s)?;
         Ok(self.entry_result(&s, &entry))
+    }
+
+    /// "削除する" (design m3 A.5, WP-E1): delete values of one Keyboard-class devnode that its
+    /// driver does not read, as a journaled change with the write/flush order of every new
+    /// operation (C.5: baselines + `Planned` → FJ, the deletes → FT, `Written` → FJ). Nothing
+    /// takes effect, so it then waits in `AwaitingConfirm` without a countdown for the user's
+    /// keep (`confirm`) or revert; it is never confirmed automatically.
+    ///
+    /// Refused like a new `set`: another open entry (`OpInProgress`), a devnode that is not in the
+    /// Keyboard-class inventory (`UnknownKeyboard`; a mouse collection never is), a name the driver
+    /// reads or any name outside the other stack's type/subtype pair (`PlanRejected`, see
+    /// `mklm_core::check_cleanup`), and a machine where INV-PS2 is already broken (`PlanRejected`,
+    /// as `check_plan` refuses every plan whose result breaks it, plan 1.5). Values that do not
+    /// exist are skipped; when none is left, `NoChange`.
+    pub fn cleanup_values(
+        &mut self,
+        params: &CleanupParams,
+        sink: &mut dyn EventSink,
+    ) -> Result<OperationResult, EngineError> {
+        let lock = self.lock(sink)?;
+        let mut s = self.open(sink, Gate::NewOp)?;
+        let Some(keyboard) = s.keyboard(&params.instance_id).cloned() else {
+            return Err(OperationError::UnknownKeyboard {
+                instance_id: params.instance_id.clone(),
+            }
+            .into());
+        };
+        let plan_error = |error| {
+            EngineError::from(OperationError::Plan(PlanError::Device {
+                instance_id: keyboard.instance_id.clone(),
+                error,
+            }))
+        };
+        let writes = check_cleanup(&keyboard, &params.names).map_err(plan_error)?;
+        if let Err(violation) = check_inv_ps2(&s.global, &s.keyboards) {
+            return Err(OperationError::Plan(PlanError::InvPs2(violation)).into());
+        }
+        let step = PlanStep {
+            target: device_target(&keyboard.instance_id),
+            writes,
+        };
+        let records = self.build_records(&s, std::slice::from_ref(&step))?;
+        if records.is_empty() {
+            return Ok(empty_result(None, Outcome::NoChange, &s.warnings));
+        }
+        let (mut after_keyboards, mut after_global) = (s.keyboards.clone(), s.global.clone());
+        for record in &records {
+            apply_to_model(
+                &mut after_keyboards,
+                &mut after_global,
+                &record.target,
+                &record.name,
+                &record.intended,
+            );
+        }
+        let ids = [keyboard.instance_id.clone()];
+        let keyboards =
+            self.expected_keyboards(&s, &after_keyboards, &after_global, Some(ids.as_slice()));
+        let kind = OpKind::Cleanup {
+            instance_id: keyboard.instance_id.clone(),
+            names: records.iter().map(|r| r.name.clone()).collect(),
+        };
+        let mut entry = self.create(&mut s, kind, records, None, Vec::new(), keyboards)?;
+        if let Some(result) = self.write_new(&mut s, &mut entry)? {
+            return Ok(result);
+        }
+        self.apply_change(&mut s, &mut entry, lock, ApplyOptions::default())
+    }
+
+    /// Saves the machine-wide settings (design m3 B.14, A.5, WP-E2): under the write lock, one
+    /// allowlisted `REG_DWORD` written and flushed (`RegistryBackend::write_machine_setting`). Not
+    /// journaled (it changes no keyboard); open or unreadable entries do not stop it. Ends
+    /// `Confirmed` (the setting is stored) with no operation ID.
+    pub fn set_machine_settings(
+        &mut self,
+        params: &MachineSettingsParams,
+        sink: &mut dyn EventSink,
+    ) -> Result<OperationResult, EngineError> {
+        let _lock = self.lock(sink)?;
+        let value = u32::from(params.restore_on_uninstall);
+        self.with_retry(|r| r.write_machine_setting(RESTORE_ON_UNINSTALL_VALUE, value))?;
+        Ok(empty_result(None, Outcome::Confirmed, &[]))
     }
 
     /// The parsed journal, without the lock (read-only; what `mklm-cli journal` shows).
@@ -1902,9 +2020,11 @@ where
             OpKind::SetLayout { .. } => "set-layout",
             OpKind::Migrate { .. } => "migrate",
             OpKind::RestoreBaseline { .. } => "restore-baseline",
+            OpKind::Cleanup { .. } => "cleanup",
         };
         let mut entry = JournalEntry {
-            schema_version: JOURNAL_SCHEMA_VERSION,
+            // 2 for a cleanup only, so that older builds keep reading the others (design m3 K.13).
+            schema_version: kind.schema_version(),
             op_id: op_id.clone(),
             seq: s.journal.next_seq(),
             kind,
@@ -2094,7 +2214,9 @@ where
     }
 
     /// D.2 step 10 (and D.5 step 8 for an interactive restore): how the written change takes
-    /// effect.
+    /// effect. Without an `apply` (a cleanup, or a restore of values no driver reads), nothing
+    /// has to take effect: `AwaitingConfirm` without a countdown, for the user's keep or revert
+    /// (design m3 A.5; never confirmed automatically).
     fn apply_change(
         &mut self,
         s: &mut Session<'_>,
@@ -2110,8 +2232,15 @@ where
                 self.commit(s, entry)?;
                 self.reconnect_wait(s, entry, lock, apply)
             }
-            Some(PendingAction::RestartPc) | None => {
+            Some(PendingAction::RestartPc) => {
                 self.move_to(s, entry, OpState::PendingReboot, "restart-pc")?;
+                entry.apply_pending = self.close_pending(s, entry, &[], false)?;
+                self.commit(s, entry)?;
+                drop(lock);
+                Ok(self.entry_result(s, entry))
+            }
+            None => {
+                self.move_to(s, entry, OpState::AwaitingConfirm, "nothing-to-apply")?;
                 entry.apply_pending = self.close_pending(s, entry, &[], false)?;
                 self.commit(s, entry)?;
                 drop(lock);
@@ -2143,10 +2272,14 @@ where
         }
         self.transition(s, entry, OpState::Restarting, "live-reset")?;
         self.refresh(s)?;
-        let targets: Vec<String> = self
-            .hid_keyboards(entry)
+        // `apply_method` chose the reset only for keyboards without a ban; this is a second net:
+        // never reset a PS/2, built-in, virtual or unproven keyboard in place (plan 1.4).
+        let targets: Vec<String> = Self::hid_keyboards(s, entry)
             .into_iter()
-            .filter(|id| s.keyboard(id).is_some_and(|kb| kb.present))
+            .filter(|id| {
+                s.keyboard(id)
+                    .is_some_and(|kb| kb.present && structural_reset_bans(kb).is_empty())
+            })
             .collect();
         let old: Vec<(String, Option<KeyboardType>)> = targets
             .iter()
@@ -2178,7 +2311,8 @@ where
             && arrived
                 .iter()
                 .all(|(id, reported)| reported.is_some() && *reported == s.expected_type(id));
-        let seconds = self.config.countdown_seconds;
+        // 20 or 60 s, checked when the request came in (design m3 WP-E3).
+        let seconds = apply.countdown_seconds;
         let now = self.host.now();
         entry.countdown = Some(Countdown {
             seconds,
@@ -2190,7 +2324,7 @@ where
             seconds,
             verified,
         });
-        let end = self.countdown(s, &entry.op_id.clone());
+        let end = self.countdown(s, &entry.op_id.clone(), seconds);
         match end {
             CountdownEnd::Keep => {
                 self.close_confirmed(s, entry, &reapplied, "keep")?;
@@ -2215,8 +2349,7 @@ where
     }
 
     /// D.2 a step 7: one tick per second; bounded by the monotonic clock too (C18).
-    fn countdown(&mut self, s: &mut Session<'_>, op_id: &OpId) -> CountdownEnd {
-        let seconds = self.config.countdown_seconds;
+    fn countdown(&mut self, s: &mut Session<'_>, op_id: &OpId, seconds: u32) -> CountdownEnd {
         let limit = Duration::from_secs(u64::from(seconds)) + self.config.countdown_slack;
         let start = self.host.monotonic();
         let mut remaining = seconds;
@@ -2258,7 +2391,7 @@ where
         drop(lock);
         self.refresh(s)?;
         let op_id = entry.op_id.clone();
-        let targets = self.hid_keyboards(entry);
+        let targets = Self::hid_keyboards(s, entry);
         let mut decision: Option<Decision> = None;
         let mut stray = 0;
         let start = self.host.monotonic();
@@ -2786,7 +2919,7 @@ where
         found: &[Option<RegValue>],
         target: &dyn Fn(&ValueRecord) -> Option<RegValue>,
     ) {
-        if entry.boot_id == s.boot {
+        if entry.boot_id == s.boot || is_cleanup(entry) {
             return;
         }
         let mut ids: Vec<String> = Vec::new();
@@ -2796,6 +2929,7 @@ where
             };
             if record.skipped.is_some()
                 || record.is_boot_time()
+                || is_unread_value(&s.keyboards, &record.target, &record.name)
                 || value_eq(&record.name, value, &target)
             {
                 continue;
@@ -2857,8 +2991,7 @@ where
             return Ok((Vec::new(), true));
         }
         self.refresh(s)?;
-        let ids: Vec<String> = self
-            .hid_keyboards(entry)
+        let ids: Vec<String> = Self::hid_keyboards(s, entry)
             .into_iter()
             .filter(|id| {
                 s.keyboard(id)
@@ -3648,10 +3781,22 @@ where
     // Keyboards
     // ---------------------------------------------------------------------------------------
 
-    /// Instance IDs of the HID keyboards an entry writes (records of `KeyboardTypeOverride` /
-    /// `KeyboardSubtypeOverride`), in record order.
-    fn hid_keyboards(&self, entry: &JournalEntry) -> Vec<String> {
-        Self::hid_ids(&entry.records)
+    /// Instance IDs of the HID keyboards whose running type an entry changes (records of values
+    /// that are not boot-time values), in record order. Values their keyboard's driver does not
+    /// read change nothing (a cleanup's, design m3 A.5): a cleanup lists none, and such records
+    /// of other entries (a restore to baseline that puts them back) are left out, so that no
+    /// keyboard is ever reset or waited for because of them.
+    fn hid_keyboards(s: &Session<'_>, entry: &JournalEntry) -> Vec<String> {
+        if is_cleanup(entry) {
+            return Vec::new();
+        }
+        let read: Vec<ValueRecord> = entry
+            .records
+            .iter()
+            .filter(|r| !is_unread_value(&s.keyboards, &r.target, &r.name))
+            .cloned()
+            .collect();
+        Self::hid_ids(&read)
     }
 
     fn hid_ids(records: &[ValueRecord]) -> Vec<String> {

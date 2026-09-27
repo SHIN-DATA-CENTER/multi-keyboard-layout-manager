@@ -239,6 +239,7 @@ fn apply_flags(args: &ApplyArgs) -> Option<ApplyOptions> {
     (args.no_reset || args.other_input).then_some(ApplyOptions {
         allow_live_reset: !args.no_reset,
         other_input_available: args.other_input,
+        ..ApplyOptions::default()
     })
 }
 
@@ -580,6 +581,7 @@ pub fn set(args: &SetArgs) -> Result<i32> {
         let mut options = flags.unwrap_or(ApplyOptions {
             allow_live_reset: true,
             other_input_available: true,
+            ..ApplyOptions::default()
         });
         let plan_for = |options: &ApplyOptions| {
             plan_set_layout(
@@ -1102,6 +1104,7 @@ pub fn restore(args: &RestoreArgs) -> Result<i32> {
         let mut options = flags.unwrap_or(ApplyOptions {
             allow_live_reset: true,
             other_input_available: true,
+            ..ApplyOptions::default()
         });
         let preview_for = |options: &ApplyOptions| {
             preview::preview_restore(&snapshot, &journal, &scope, policy, options)

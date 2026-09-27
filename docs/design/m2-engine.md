@@ -161,6 +161,8 @@ impl Engine {
     fn recover(&mut self, &ApplyOptions, ..);
     fn undo_open(&mut self, &ApplyOptions, ..);
     fn resolve_conflict(&mut self, &ResolveParams, ..);
+    fn cleanup_values(&mut self, &CleanupParams, ..);                  // M3（D.11）
+    fn set_machine_settings(&mut self, &MachineSettingsParams, ..);    // M3（D.12）
     fn read_journal(&self) -> Result<Journal, EngineError>;
 }
 ```
@@ -193,6 +195,7 @@ impl Engine {
 - パイプに書くのは**書き込み専用のスレッド**だけ。エンジンのイベントはチャネル経由で渡し、要求の実行中は 10 秒ごとに `Event::Heartbeat` を送る。エンジンが `restart()` やロック待ちで止まっていても、呼び出し元は helper が生きていると分かる（S7）。
 - `dispatch` で、パイプの `Request` を 1 つずつエンジンの呼び出しに写す（S5）。
 - 終了する前に `WinDevices::join_pending` で、期限を過ぎたリセットのスレッドが終わるのを待つ（C18）。
+- **M3 から（m3 WP-E3）: セッション終了への備え。** 起動直後に `SetProcessShutdownParameters(0x100, SHUTDOWN_NORETRY)`（`mklm_win::session_end::shut_down_after_callers`）で、呼び出し元（既定の 0x280）より後に終了させられるようにする。ハンドシェイクの後、表示しないトップレベル ウィンドウを持つスレッド（`SessionEndWindow`）を作る。`WM_QUERYENDSESSION` では `mklm_engine::SessionEnd::query_end_session` を呼び、動いているカウントダウンを `RevertNow` と同じ扱いで戻す（各要求のシンクを `SessionEndSink` で包み、カウントダウン中の判断待ちを 100 ms ごとに区切って確かめる。呼び出し元が先に答えていれば何もしない）。戻した値が書かれてフラッシュされるまで最大 3 秒待って `TRUE` を返す。`WM_ENDSESSION(TRUE)` では戻しが終わるまで最大 3 秒待つ。終了に向かう間は `check_cancelled` が true になり、新しい書き込みもリセットも始めない。再接続待ちの変更は `AwaitingConfirm` のまま（D.2 b）。`WM_ENDSESSION(FALSE)`（終了が取り消された）で元に戻る。どちらの準備も失敗は無視する（パイプの切断と次回起動時の回復が残る）。
 - 終了コードは E.8。
 
 ### A.7 mklm-cli
@@ -218,6 +221,8 @@ pub trait RegistryBackend {
     fn write_journal(&mut self, slot: &JournalSlot, json: &str) -> Result<(), BackendError>;
     fn delete_journal(&mut self, slot: &JournalSlot) -> Result<(), BackendError>;
     fn flush_journal(&mut self) -> Result<(), BackendError>;
+    // M3（D.12）: MACHINE_SETTINGS_KEY の REG_DWORD を 1 つ書いてフラッシュする。
+    fn write_machine_setting(&mut self, name: &str, value: u32) -> Result<(), BackendError>;
 }
 ```
 
@@ -355,10 +360,10 @@ HKLM\SOFTWARE\SHIN DATA CENTER\MKLM               （MSI のコンポーネン�
 
 | 項目 | 型 | 意味 |
 |---|---|---|
-| `schema_version` | u32 | `JOURNAL_SCHEMA_VERSION`（= 1） |
+| `schema_version` | u32 | `JOURNAL_SCHEMA_VERSION`（= 1）。**M3 から**: 読める最新は 2。書くときは種類で決まり（`OpKind::schema_version`）、`Cleanup` だけが 2、それ以外は 1 のまま（C.10、m3 K.13） |
 | `op_id` | `OpId` | 小文字でハイフン付きの UUID v4（波かっこなし）。値の名前にも使う |
 | `seq` | u64 | 作成順（既存の最大値＋1）。値ごとの「最新の操作」を決める |
-| `kind` | `OpKind` | `SetLayout { requested, instance_ids, layout }`、`Migrate { standard, assignments }`、`RestoreBaseline { scope, silent, supersedes }`（`supersedes` は D.5） |
+| `kind` | `OpKind` | `SetLayout { requested, instance_ids, layout }`、`Migrate { standard, assignments }`、`RestoreBaseline { scope, silent, supersedes }`（`supersedes` は D.5）。M3 で `Cleanup { instance_id, names }`（D.11） |
 | `state` | `OpState` | C.4 |
 | `boot_id` | `BootId` | 直近の書き込みフェーズ（`Planned` と `RevertPending`）の起動 ID（起動ごとの GUID。C2） |
 | `owner` | `ProcessIdentity` | 直近の書き込みフェーズを行ったプロセス（PID と作成時刻）。表示用。判断はロックで行う（C3） |
@@ -662,6 +667,7 @@ open な状態の操作がある間は、`set` と `migrate`、更新（M5）、
 - 読み手は、古い版をメモリ上で変換し、次の遷移のときに新しい版で書き直す。新しい版は `JournalError::NewerSchema` として `Journal.unreadable` に入れる。読めないエントリが 1 件でもあれば、書き込みを止める（`JournalUnreadable`）。GUI と CLI は「MKLM を更新してください」と表示する。
 - serde は未知のフィールドを無視するので、任意のフィールドを足すだけなら版を上げなくてよい。意味が変わる変更のときだけ上げる。レビューで足した `revert_mode`、`apply_pending`、`write_error`、`skipped`、`boot_time_hint` はすべて `#[serde(default)]` で、`BootId` の形式の変更（数値から GUID の文字列へ）は、まだどの PC にもジャーナルがない段階なので版 1 のままとする。
 - 更新（M5）の新しい版は、それ以前のすべてのスキーマを読めなければならない。MSI はジャーナルのキーを持たない。open な操作がある間は更新を始めない（計画 4.2 の手順 1）ので、更新の時点で残っているのは closed な操作だけになる。
+- **M3 の版 2**（m3 A.5、K.13）: `JOURNAL_SCHEMA_VERSION = 2` は `OpKind::Cleanup`（D.11）を足しただけ。版 2 で書くのは `Cleanup` のエントリだけで、ほかの種類は版 1 で書き続ける（`OpKind::schema_version`）。M2 のビルドは `Cleanup` のエントリを `NewerSchema` として扱い（書き込みを止めて「更新してください」）、ほかのエントリは読み続ける。版 1 の文書は変換なしにそのまま読める（開発機に M2 の実機テストで残ったエントリと baseline を `mklm_core::fixtures::schema_1_journal` に写し、core と engine のテストで読み書きを確かめる）。`BaselineRecord` と `StoreVersion` は 1 のまま。
 
 ### C.11 `apply_pending`（保存値がまだ効いていないこと）
 
@@ -744,8 +750,8 @@ C15 の指摘: 計画 2.2 は、サービスが再適用し直すループを防
 3. 対象のキーボード（接続中のもの）を 1 台ずつ: `Event::ResettingKeyboard` → `restart()`（別スレッドで 20 秒の期限付き。C18）→ `wait_for_arrival(15 秒)` → `Event::KeyboardArrived { reported, expected }`。
 4. `NeedsReboot`、`TimedOut`（リセットか到着の期限切れ）、エラーのいずれか: 値を戻す（`RevertPending(Rollback)`、`Expect = last_written`）→ `RevertedPendingReboot`、`failure = KeyboardDidNotReturn`、`apply_pending = RestartPc`。結果は `pending_action = RestartPc`（計画 1.4「規定時間内に戻らなければ、値を元に戻してから PC の再起動を案内する」）。
 5. 戻ってきたが種類が変わっていない（`reported` が以前の種類のまま）: リセットでは反映されなかったものとして、`AwaitingConfirm`（`countdown` なし、`apply = Reconnect`、`apply_pending = Reconnect`）にして b の手順 2 以降へ進む。
-6. すべて期待どおり（または Raw Input が読めない）: `AwaitingConfirm`（`countdown = 20 秒`）→ FJ → `Event::CountdownStarted { seconds, verified }`。
-7. カウントダウン: 残り 20 秒から 1 秒ずつ `Event::CountdownTick` を送り、`sink.wait_decision(1 秒)` を呼ぶ。`Host::monotonic` で「20 秒＋5 秒」を過ぎたら、呼び出し回数によらず時間切れとする（C18）。
+6. すべて期待どおり（または Raw Input が読めない）: `AwaitingConfirm`（`countdown = 20 秒`）→ FJ → `Event::CountdownStarted { seconds, verified }`。**M3 から**秒数は要求の `ApplyOptions::countdown_seconds`（20 か 60。GUI の設定「確認の時間を長くする」で 60。m3 WP-E3）。ほかの値の要求は、ロックを取る前に `PlanRejected`（`EngineError::CountdownNotAllowed`）で何もしない。
+7. カウントダウン: 残り 20 秒から 1 秒ずつ `Event::CountdownTick` を送り、`sink.wait_decision(1 秒)` を呼ぶ。`Host::monotonic` で「20 秒＋5 秒」（M3 から「要求の秒数＋5 秒」）を過ぎたら、呼び出し回数によらず時間切れとする（C18）。
    - `Keep`: `Confirmed` → FJ → 整理 → 結果 `Confirmed`。
    - `RevertNow`、`Disconnected`、時間切れ: 取り消す（次の手順）。
 8. リセット経路での取り消し: `RevertPending(Rollback)` → 値を戻す → FT → 対象を**もう一度リセット**して元の配列を反映する（元の、使えていた配列に戻すため。1 回目で別の入力手段を確かめている）。成功すれば `Reverted`（`failure` は `CountdownExpired` か `CallerDisconnected`。利用者の RevertNow なら `None`）。リセットに失敗したら `RevertedPendingReboot`（`apply_pending = RestartPc`、`pending_action = RestartPc`）。
@@ -939,6 +945,23 @@ C7 の指摘: 再起動した後に内蔵キーボードの配列がおかしい
 - `Confirmed` の操作は undo の対象にしない（取り消しは `revert <op>`）。
 - 取り消した値が起動時の値を含めば `RevertedPendingReboot` になり、再起動を案内する。
 
+### D.11 ドライバーが読まない値の削除（`CleanupValues`。M3 で追加）
+
+m3 A.5（WP-E1）の「削除する」。入力（`CleanupParams`）: `instance_id`、`names`。
+
+1. D.1（`set` と同じく、open なエントリがあれば `OpInProgress`）。
+2. `instance_id` は Keyboard クラスの列挙にあること（なければ `UnknownKeyboard`。マウスのコレクションなどはここで止まる）。`mklm_core::check_cleanup`: 名前は、そのキーボードのドライバーが読まない側の型とサブタイプの組（kbdhid なら `OverrideKeyboardType/Subtype`、i8042prt なら `KeyboardTypeOverride/SubtypeOverride`。`unread_value_names`）だけ。ドライバーが読む名前、ほかの名前、ほかのドライバー、仮想キーボードは `PlanRejected`。今の値で INV-PS2 が壊れていれば、`check_plan` と同じく `PlanRejected`。
+3. 記録を作る（値がない名前は除く。何も残らなければ `NoChange`）→ C.5 の新しい操作と同じ順序（B と J(`Planned`) → FJ → 削除 → FT → J(`Written`) → FJ）。`apply` は `None`（反映するものがない）。
+4. `Written` → `AwaitingConfirm`（カウントダウンなし、`apply_pending` なし）→ 結果 `AwaitingConfirm`。利用者が `Confirm`（確定）か `Revert` / `undo` で決める。自動では確定しない。
+
+- 回復は `SetLayout` と同じ判定（`Planned` の途中ならロールバック、書き終えていれば `AwaitingConfirm` へロールフォワード）。取り消しは `Reverted`（再起動は要らない）。`apply_pending_on_close` は常に `None`、リセットの対象にもならない。
+- 読まれない値は起動時の値でもない: HID コレクション（`HID\…`）の `OverrideKeyboard*` は `ValueRecord::is_boot_time` が false。i8042prt の devnode の HID の名前は元から起動時の値ではない。したがって復旧用ファイルは必須にならない（書けなければ警告）。`plan_restore` は、キーボードのドライバーが読まない側の組も戻してよい名前に含め（`check_restore_record`）、INV-PS2 に関わる値としては数えない。「導入前に戻す」で読まれない値だけを戻す場合も `apply = None` で、確認待ちになる。
+- ジャーナルの版は 2（C.10）。I1〜I7 のクラッシュの網羅テストに 4 つのシナリオ（削除、削除して確定、削除の取り消し、確定した削除の後の導入前に戻す）と I7 を足した。
+
+### D.12 マシン全体の設定（`SetMachineSettings`。M3 で追加）
+
+m3 B.14（WP-E2）の「アンインストール時にキーボードの設定を元に戻す」。`Engine::set_machine_settings` はロックを取り、`RegistryBackend::write_machine_setting`（`HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Settings` の `RestoreOnUninstall`、`MACHINE_SETTING_NAMES` の名前だけ。キーはジャーナルと同じ DACL で作り、書いてからフラッシュする）を 1 回呼ぶ。ジャーナルには書かない。open なエントリや読めないジャーナルでも止めない（キーボードの値に触れないため）。結果は `Confirmed`（`op_id` なし）。
+
 ---
 
 ## E. helper との通信（mklm-ipc）
@@ -1050,8 +1073,10 @@ mklm-helper.exe --pipe SHINDATACENTER.MKLM.<uuid> --nonce <64 桁の 16 進> --c
 | `Recover` | `apply` | `recover`（D.7） |
 | `Undo` | `apply` | `undo_open`（D.10） |
 | `ResolveConflict` | `op_id`、`choices`、`apply` | `resolve_conflict`（D.8） |
+| `CleanupValues`（M3） | `instance_id`、`names` | `cleanup_values`（D.11） |
+| `SetMachineSettings`（M3） | `restore_on_uninstall` | `set_machine_settings`（D.12） |
 
-`apply` は `ApplyOptions { allow_live_reset, other_input_available }`。キーボードをリセットし得るすべての要求に付ける。既定（両方 false）ではリセットしない（C9）。`expected` は `ExpectedPlan { steps, apply }`（S6）。
+`apply` は `ApplyOptions { allow_live_reset, other_input_available }`。キーボードをリセットし得るすべての要求に付ける。既定（両方 false）ではリセットしない（C9）。`expected` は `ExpectedPlan { steps, apply }`（S6）。M3（`PROTOCOL_VERSION` 2）で `countdown_seconds`（既定 20、20 か 60 だけ。D.2 a の 6）を足した。
 
 `Decision` は `Keep { op_id }` と `RevertNow { op_id }`。
 
@@ -1076,10 +1101,10 @@ mklm-helper.exe --pipe SHINDATACENTER.MKLM.<uuid> --nonce <64 桁の 16 進> --c
 
 これらの型（`Request` とその中身、`Hello`、`Welcome` を除く）は `mklm_core::report` にあり、ipc は再公開するだけ（S5）。
 
-フレームの例:
+フレームの例（M3 の `PROTOCOL_VERSION` 2。版 1 には `countdown_seconds` がなかった）:
 
 ```json
-{"v":1,"seq":2,"body":{"type":"request","data":{"kind":"set-layout","instance_id":"HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000","layout":"jis","apply":{"allow_live_reset":true,"other_input_available":true},"expected":null}}}
+{"v":2,"seq":2,"body":{"type":"request","data":{"kind":"set-layout","instance_id":"HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000","layout":"jis","apply":{"allow_live_reset":true,"other_input_available":true,"countdown_seconds":20},"expected":null}}}
 ```
 
 helper は、呼び出し元から受け取った値のうち上の項目以外を信用しない。デバイスは自分で列挙し直し、値は自分で読み直す（計画 2.2）。呼び出し元から来たインスタンス ID は、helper 自身の列挙結果を引くキーとしてだけ使い、Win32 に渡すのは列挙結果の文字列にする。

@@ -45,6 +45,10 @@ pub enum EngineError {
     /// The caller went away before the operation was journaled; nothing was written.
     #[error("cancelled by the caller")]
     Cancelled,
+    /// `ApplyOptions::countdown_seconds` is neither 20 nor 60 (design m3 WP-E3); nothing was
+    /// done. Reported as [`ErrorCode::PlanRejected`].
+    #[error("a countdown of {seconds} s is not allowed (only 20 or 60)")]
+    CountdownNotAllowed { seconds: u32 },
     #[error(transparent)]
     Backend(#[from] BackendError),
     #[error(transparent)]
@@ -115,6 +119,7 @@ impl EngineError {
                 (ErrorCode::RecoveryAssetsUnavailable, None, None)
             }
             EngineError::Cancelled => (ErrorCode::Cancelled, None, None),
+            EngineError::CountdownNotAllowed { .. } => (ErrorCode::PlanRejected, None, None),
             EngineError::Backend(_) => (ErrorCode::Registry, None, None),
             EngineError::Device(DeviceError::Incomplete { .. }) => {
                 (ErrorCode::InventoryIncomplete, None, None)
@@ -227,6 +232,10 @@ mod tests {
                 ErrorCode::RecoveryAssetsUnavailable,
             ),
             (EngineError::Cancelled, ErrorCode::Cancelled),
+            (
+                EngineError::CountdownNotAllowed { seconds: 30 },
+                ErrorCode::PlanRejected,
+            ),
             (BackendError::Crashed.into(), ErrorCode::Registry),
             (
                 DeviceError::Incomplete { issues: Vec::new() }.into(),
