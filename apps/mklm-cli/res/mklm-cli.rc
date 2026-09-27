@@ -1,0 +1,38 @@
+// Version information and application manifest of mklm-cli.exe, compiled by build.rs.
+// build.rs generates mklm-cli-version.rch (MKLM_VERSION_NUM, MKLM_VERSION_STR, MKLM_FILEFLAGS)
+// in OUT_DIR, which embed-resource puts on the include path.
+#pragma code_page(65001)
+
+#include <winresrc.h>
+#include "mklm-cli-version.rch"
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "mklm-cli.exe.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION MKLM_VERSION_NUM
+ PRODUCTVERSION MKLM_VERSION_NUM
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS MKLM_FILEFLAGS
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "SHIN DATA CENTER"
+            VALUE "FileDescription", "MKLM command-line interface"
+            VALUE "FileVersion", MKLM_VERSION_STR
+            VALUE "InternalName", "mklm-cli"
+            VALUE "LegalCopyright", "© 2026 SHIN DATA CENTER"
+            VALUE "OriginalFilename", "mklm-cli.exe"
+            VALUE "ProductName", "Multi Keyboard Layout Manager"
+            VALUE "ProductVersion", MKLM_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

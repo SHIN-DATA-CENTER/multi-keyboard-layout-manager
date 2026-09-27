@@ -1,0 +1,28 @@
+[package]
+name = "mklm-cli"
+description = "Command-line interface for Multi Keyboard Layout Manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "mklm-cli"
+path = "src/main.rs"
+
+[dependencies]
+mklm-core.workspace = true
+mklm-win.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/mklm-core", "crates/mklm-win", "apps/mklm-cli"]
+exclude = ["prototypes"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+authors = ["SHIN DATA CENTER"]
+repository = "https://github.com/SHIN-DATA-CENTER/multi-keyboard-layout-manager"
+
+[workspace.dependencies]
+mklm-core = { path = "crates/mklm-core" }
+mklm-win = { path = "crates/mklm-win" }
+# windows-registry stays on 0.6.x until `windows` itself moves to 0.100 (avoids duplicate windows-result/strings/link).
+windows = "0.62.2"
+windows-registry = "0.6.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+embed-resource = "3.0.11"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
