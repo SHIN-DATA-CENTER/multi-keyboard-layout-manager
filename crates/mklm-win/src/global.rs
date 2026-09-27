@@ -3,7 +3,7 @@
 use mklm_core::{GlobalSettings, value_names};
 use windows_registry::LOCAL_MACHINE;
 
-use crate::error::{Error, ReadIssue};
+use crate::error::{Error, ReadIssue, ReadIssueKind};
 use crate::reg::{open_read, read_dword, read_string};
 
 /// Key holding the global values, relative to `HKEY_LOCAL_MACHINE`.
@@ -20,7 +20,11 @@ pub fn read_global_settings(issues: &mut Vec<ReadIssue>) -> Result<GlobalSetting
     let path = format!(r"HKLM\{I8042PRT_PARAMETERS}");
     let mut string = |name: &str| {
         read_string(&key, &path, name).unwrap_or_else(|error| {
-            issues.push(ReadIssue::new(format!(r"{path}\{name}"), error));
+            issues.push(ReadIssue::new(
+                ReadIssueKind::Values,
+                format!(r"{path}\{name}"),
+                error,
+            ));
             None
         })
     };
@@ -29,7 +33,11 @@ pub fn read_global_settings(issues: &mut Vec<ReadIssue>) -> Result<GlobalSetting
     let override_keyboard_identifier = string(value_names::KEYBOARD_IDENTIFIER);
     let mut dword = |name: &str| {
         read_dword(&key, &path, name).unwrap_or_else(|error| {
-            issues.push(ReadIssue::new(format!(r"{path}\{name}"), error));
+            issues.push(ReadIssue::new(
+                ReadIssueKind::Values,
+                format!(r"{path}\{name}"),
+                error,
+            ));
             None
         })
     };

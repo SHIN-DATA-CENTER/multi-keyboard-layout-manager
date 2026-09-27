@@ -4,7 +4,7 @@ use mklm_core::InputMethods;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayoutList, HKL};
 use windows_registry::{CURRENT_USER, Key, USERS};
 
-use crate::error::{Error, ReadIssue};
+use crate::error::{Error, ReadIssue, ReadIssueKind};
 use crate::reg::{open_read, string_value};
 
 /// Current user's list, relative to `HKEY_CURRENT_USER`.
@@ -57,7 +57,11 @@ fn read_string_values(
         Ok(Some(key)) => key,
         Ok(None) => return Vec::new(),
         Err(error) => {
-            issues.push(ReadIssue::new(format!(r"{root_name}\{path}"), error));
+            issues.push(ReadIssue::new(
+                ReadIssueKind::Environment,
+                format!(r"{root_name}\{path}"),
+                error,
+            ));
             return Vec::new();
         }
     };
@@ -67,7 +71,11 @@ fn read_string_values(
             .collect(),
         Err(error) => {
             let full = format!(r"{root_name}\{path}");
-            issues.push(ReadIssue::new(full.clone(), Error::registry(full, &error)));
+            issues.push(ReadIssue::new(
+                ReadIssueKind::Environment,
+                full.clone(),
+                Error::registry(full, &error),
+            ));
             Vec::new()
         }
     }

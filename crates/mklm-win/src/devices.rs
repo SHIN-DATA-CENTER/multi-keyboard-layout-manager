@@ -14,7 +14,7 @@ use windows::Win32::Devices::Properties::{
     DEVPKEY_Device_ProblemCode, DEVPKEY_Device_Service,
 };
 
-use crate::error::{Error, ReadIssue};
+use crate::error::{Error, ReadIssue, ReadIssueKind};
 use crate::hwkey::read_overrides;
 use crate::props::{DevNode, device_id_list};
 use crate::rawinfo::RawKeyboard;
@@ -71,12 +71,13 @@ pub fn read_keyboard(
         Ok(node) => node,
         Err(error) => {
             if error.config_ret() != Some(CR_NO_SUCH_DEVNODE.0) {
-                issues.push(ReadIssue::new(instance_id, error));
+                issues.push(ReadIssue::new(ReadIssueKind::Locate, instance_id, error));
             }
             return None;
         }
     };
     let canonical = or_issue(
+        ReadIssueKind::Identity,
         node.string(&DEVPKEY_Device_InstanceId),
         instance_id,
         "DEVPKEY_Device_InstanceId",
@@ -87,6 +88,7 @@ pub fn read_keyboard(
         .filter(|found| !found.eq_ignore_ascii_case(instance_id))
     {
         issues.push(ReadIssue::new(
+            ReadIssueKind::Identity,
             instance_id,
             Error::OtherDevNode {
                 found: found.to_string(),
@@ -97,18 +99,21 @@ pub fn read_keyboard(
     let instance_id = canonical.as_deref().unwrap_or(instance_id);
 
     let dev_node_status = or_issue(
+        ReadIssueKind::Status,
         node.u32(&DEVPKEY_Device_DevNodeStatus),
         instance_id,
         "DEVPKEY_Device_DevNodeStatus",
         issues,
     );
     let problem_code = or_issue(
+        ReadIssueKind::Status,
         node.u32(&DEVPKEY_Device_ProblemCode),
         instance_id,
         "DEVPKEY_Device_ProblemCode",
         issues,
     );
     let present = or_issue(
+        ReadIssueKind::Presence,
         node.bool(&DEVPKEY_Device_IsPresent),
         instance_id,
         "DEVPKEY_Device_IsPresent",
@@ -116,6 +121,7 @@ pub fn read_keyboard(
     )
     .unwrap_or(dev_node_status.is_some());
     let container_id = or_issue(
+        ReadIssueKind::Container,
         node.guid(&DEVPKEY_Device_ContainerId),
         instance_id,
         "DEVPKEY_Device_ContainerId",
@@ -128,11 +134,17 @@ pub fn read_keyboard(
         Ok(Some(service)) => KeyboardDriver::from_service(&service),
         Ok(None) => KeyboardDriver::Other(String::new()),
         Err(error) => {
-            issues.push(property_issue(instance_id, "DEVPKEY_Device_Service", error));
+            issues.push(property_issue(
+                ReadIssueKind::Driver,
+                instance_id,
+                "DEVPKEY_Device_Service",
+                error,
+            ));
             driver_without_service(instance_id)
         }
     };
     let hardware_ids = or_issue(
+        ReadIssueKind::Descriptive,
         node.strings(&DEVPKEY_Device_HardwareIds),
         instance_id,
         "DEVPKEY_Device_HardwareIds",
@@ -207,19 +219,25 @@ fn driver_without_service(instance_id: &str) -> KeyboardDriver {
 }
 
 /// Issue for a property of `instance_id` that exists but could not be read.
-fn property_issue(instance_id: &str, property: &str, error: Error) -> ReadIssue {
-    ReadIssue::new(format!("{instance_id} ({property})"), error)
+fn property_issue(
+    kind: ReadIssueKind,
+    instance_id: &str,
+    property: &str,
+    error: Error,
+) -> ReadIssue {
+    ReadIssue::new(kind, format!("{instance_id} ({property})"), error)
 }
 
 /// The value of a property read, or its default (missing) after recording the failure as an issue.
 fn or_issue<T: Default>(
+    kind: ReadIssueKind,
     result: Result<T, Error>,
     instance_id: &str,
     property: &str,
     issues: &mut Vec<ReadIssue>,
 ) -> T {
     result.unwrap_or_else(|error| {
-        issues.push(property_issue(instance_id, property, error));
+        issues.push(property_issue(kind, instance_id, property, error));
         T::default()
     })
 }
@@ -246,7 +264,13 @@ fn read_name(
             "DEVPKEY_Device_BusReportedDeviceDesc",
         ),
     };
-    or_issue(node.string(key), instance_id, property, issues)
+    or_issue(
+        ReadIssueKind::Descriptive,
+        node.string(key),
+        instance_id,
+        property,
+        issues,
+    )
 }
 
 /// Same-container ancestors of a devnode.
@@ -280,19 +304,25 @@ fn walk_ancestors(
             // Only the root of the device tree has no parent.
             Ok(None) => break,
             Err(error) => {
-                issues.push(property_issue(&current_id, "DEVPKEY_Device_Parent", error));
+                issues.push(property_issue(
+                    ReadIssueKind::Topology,
+                    &current_id,
+                    "DEVPKEY_Device_Parent",
+                    error,
+                ));
                 break;
             }
         };
         let parent = match DevNode::locate(&parent_id) {
             Ok(parent) => parent,
             Err(error) => {
-                issues.push(ReadIssue::new(parent_id, error));
+                issues.push(ReadIssue::new(ReadIssueKind::Topology, parent_id, error));
                 break;
             }
         };
         // `DEVPKEY_Device_Parent` keeps whatever case the bus driver used; store the canonical ID.
         let parent_id = or_issue(
+            ReadIssueKind::Topology,
             parent.string(&DEVPKEY_Device_InstanceId),
             &parent_id,
             "DEVPKEY_Device_InstanceId",
@@ -302,6 +332,7 @@ fn walk_ancestors(
         if !bus_checked && !is_hid_enumerated(&parent_id) {
             bus_checked = true;
             out.bus_service = or_issue(
+                ReadIssueKind::Topology,
                 parent.string(&DEVPKEY_Device_Service),
                 &parent_id,
                 "DEVPKEY_Device_Service",
@@ -309,6 +340,7 @@ fn walk_ancestors(
             );
         }
         let parent_container = or_issue(
+            ReadIssueKind::Topology,
             parent.guid(&DEVPKEY_Device_ContainerId),
             &parent_id,
             "DEVPKEY_Device_ContainerId",

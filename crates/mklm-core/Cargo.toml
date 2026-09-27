@@ -17,3 +17,7 @@ serde_json.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# Makes `mklm_core::fixtures` (the development machine after M0) available to other crates' tests.
+test-fixtures = []

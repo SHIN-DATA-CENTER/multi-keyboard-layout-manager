@@ -12,7 +12,7 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
 use windows::Win32::System::Registry::{HKEY, KEY_READ};
 use windows_registry::Key;
 
-use crate::error::{Error, ReadIssue};
+use crate::error::{Error, ReadIssue, ReadIssueKind};
 use crate::props::{DevNode, config_ret};
 use crate::reg::read_dword;
 
@@ -53,13 +53,17 @@ pub(crate) fn read_overrides(
         Ok(Some(key)) => key,
         Ok(None) => return DeviceOverrides::default(),
         Err(error) => {
-            issues.push(ReadIssue::new(key_path, error));
+            issues.push(ReadIssue::new(ReadIssueKind::Values, key_path, error));
             return DeviceOverrides::default();
         }
     };
     let mut read = |name: &str| {
         read_dword(&key, &key_path, name).unwrap_or_else(|error| {
-            issues.push(ReadIssue::new(format!(r"{key_path}\{name}"), error));
+            issues.push(ReadIssue::new(
+                ReadIssueKind::Values,
+                format!(r"{key_path}\{name}"),
+                error,
+            ));
             None
         })
     };

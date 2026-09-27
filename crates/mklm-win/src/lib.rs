@@ -1,34 +1,54 @@
 //! Windows API layer for Multi Keyboard Layout Manager (MKLM).
 //!
-//! Every function in this crate is read-only with respect to the system for now (milestone M1).
 //! All `unsafe` Win32 calls are wrapped here so that the rest of the workspace stays safe code.
 //!
+//! Read-only (M1; safe to call unelevated at any time):
 //! - [`snapshot()`]: one read-only pass that fills [`mklm_core::SystemSnapshot`].
 //! - [`devices`]: Keyboard-class devnodes via CfgMgr32, with their "Device Parameters".
 //! - [`rawinfo`]: type/subtype reported by the drivers (Raw Input).
 //! - [`global`], [`input_lang`], [`os`]: global values, input methods and OS facts.
 //! - [`process`]: DLL search hardening every executable applies at startup, and output encoding.
+//! - [`journal_store::read_journal_store`], [`proc_identity`], [`elevation::is_elevated`].
 //!
-//! Registry keys are only ever opened with `KEY_READ`; device keys only through
+//! Registry keys in these modules are only ever opened with `KEY_READ`; device keys only through
 //! `CM_Open_DevNode_Key(CM_REGISTRY_HARDWARE)` with `RegDisposition_OpenExisting`.
+//!
+//! Write-capable (M2; called by `mklm-engine` inside the elevated helper or elevated CLI only,
+//! see docs/design/m2-engine.md section A.3):
+//! - [`regwrite`]: device hardware keys and `i8042prt\Parameters` opened for writing, `RegFlushKey`.
+//! - [`journal_store`]: the journal keys with their protected DACL.
+//! - [`devctl`]: live reset (`DIF_PROPERTYCHANGE`) and devnode state polling.
+//! - [`protected_dir`]: `%ProgramData%\SHIN DATA CENTER\MKLM` directories and the `LockFileEx` lock.
+//!
+//! Session plumbing (M2, either side of the pipe):
+//! - [`pipe`], [`elevation`]: the helper pipe and the UAC launch.
+//! - [`session`]: boot ID, randomness, PC restart and the post-reboot RunOnce entry.
 
 #![cfg(windows)]
 
+pub mod devctl;
 pub mod devices;
+pub mod elevation;
 mod error;
 pub mod global;
 mod hwkey;
 pub mod input_lang;
+pub mod journal_store;
 pub mod os;
+pub mod pipe;
+pub mod proc_identity;
 pub mod process;
 mod props;
+pub mod protected_dir;
 pub mod rawinfo;
 mod reg;
+pub mod regwrite;
+pub mod session;
 
 use mklm_core::SystemSnapshot;
 
 pub use devices::{KEYBOARD_CLASS_GUID, keyboard_instance_ids, read_keyboard, read_keyboards};
-pub use error::{Error, ReadIssue};
+pub use error::{Error, ReadIssue, ReadIssueKind};
 pub use global::read_global_settings;
 pub use input_lang::{loaded_layouts, read_input_methods};
 pub use os::read_os_info;
@@ -63,7 +83,7 @@ pub fn snapshot(opts: SnapshotOptions) -> Result<SystemSnapshot, Error> {
 pub fn snapshot_report(opts: SnapshotOptions) -> Result<SnapshotReport, Error> {
     let mut issues = Vec::new();
     let raw = raw_keyboards(&mut issues).unwrap_or_else(|error| {
-        issues.push(ReadIssue::new("Raw Input", error));
+        issues.push(ReadIssue::new(ReadIssueKind::RawInput, "Raw Input", error));
         Vec::new()
     });
     let keyboards = read_keyboards(opts.include_non_present, &raw, &mut issues)?;

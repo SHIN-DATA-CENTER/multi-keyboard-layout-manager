@@ -1,6 +1,6 @@
 [package]
-name = "mklm-cli"
-description = "Command-line interface for Multi Keyboard Layout Manager"
+name = "mklm-helper"
+description = "Elevated, short-lived helper that performs MKLM's registry writes"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,18 +10,20 @@ repository.workspace = true
 build = "build.rs"
 
 [[bin]]
-name = "mklm-cli"
+name = "mklm-helper"
 path = "src/main.rs"
+# The manifest requires elevation, so a test harness built from this target could not run
+# unelevated. Keep the logic in mklm-ipc / mklm-engine, where it is tested.
+test = false
+doctest = false
 
 [dependencies]
 mklm-core.workspace = true
-mklm-win.workspace = true
 mklm-ipc.workspace = true
 mklm-engine.workspace = true
-anyhow.workspace = true
-clap.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+mklm-win.workspace = true
 
 [build-dependencies]
 embed-resource.workspace = true

@@ -12,7 +12,7 @@ use windows::Win32::UI::Input::{
     RIDI_DEVICEINFO, RIDI_DEVICENAME, RIM_TYPEKEYBOARD,
 };
 
-use crate::error::{Error, ReadIssue};
+use crate::error::{Error, ReadIssue, ReadIssueKind};
 use crate::props::{from_wide, interface_instance_id};
 
 /// Attempts while the device list keeps growing between the size query and the read.
@@ -41,6 +41,7 @@ pub fn raw_keyboards(issues: &mut Vec<ReadIssue>) -> Result<Vec<RawKeyboard>, Er
             Ok(name) => normalize_interface_path(&name),
             Err(error) => {
                 issues.push(ReadIssue::new(
+                    ReadIssueKind::RawInput,
                     format!("Raw Input device {:?}", entry.hDevice.0),
                     error,
                 ));
@@ -53,7 +54,11 @@ pub fn raw_keyboards(issues: &mut Vec<ReadIssue>) -> Result<Vec<RawKeyboard>, Er
                 interface_path,
                 keyboard_type,
             }),
-            Err(error) => issues.push(ReadIssue::new(interface_path, error)),
+            Err(error) => issues.push(ReadIssue::new(
+                ReadIssueKind::RawInput,
+                interface_path,
+                error,
+            )),
         }
     }
     Ok(keyboards)

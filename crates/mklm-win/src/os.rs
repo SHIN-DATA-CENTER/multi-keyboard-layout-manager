@@ -10,7 +10,7 @@ use windows::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
 use windows_registry::LOCAL_MACHINE;
 
-use crate::error::{Error, ReadIssue, win32_code};
+use crate::error::{Error, ReadIssue, ReadIssueKind, win32_code};
 use crate::reg::{open_read, read_dword};
 
 /// Key holding `UBR`, relative to `HKEY_LOCAL_MACHINE`.
@@ -52,7 +52,11 @@ fn ubr(issues: &mut Vec<ReadIssue>) -> Option<u32> {
         None => Ok(None),
     });
     result.unwrap_or_else(|error| {
-        issues.push(ReadIssue::new(format!(r"{path}\UBR"), error));
+        issues.push(ReadIssue::new(
+            ReadIssueKind::Environment,
+            format!(r"{path}\UBR"),
+            error,
+        ));
         None
     })
 }
@@ -68,6 +72,7 @@ fn native_arch(issues: &mut Vec<ReadIssue>) -> String {
         Ok(()) => build_arch().to_string(),
         Err(error) => {
             issues.push(ReadIssue::new(
+                ReadIssueKind::Environment,
                 "IsWow64Process2",
                 Error::Win32 {
                     function: "IsWow64Process2",

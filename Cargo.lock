@@ -200,6 +200,8 @@ dependencies = [
  "clap",
  "embed-resource",
  "mklm-core",
+ "mklm-engine",
+ "mklm-ipc",
  "mklm-win",
  "serde",
  "serde_json",
@@ -209,6 +211,38 @@ dependencies = [
 name = "mklm-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "mklm-engine"
+version = "0.1.0"
+dependencies = [
+ "mklm-core",
+ "mklm-win",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "mklm-helper"
+version = "0.1.0"
+dependencies = [
+ "embed-resource",
+ "mklm-core",
+ "mklm-engine",
+ "mklm-ipc",
+ "mklm-win",
+]
+
+[[package]]
+name = "mklm-ipc"
+version = "0.1.0"
+dependencies = [
+ "mklm-core",
  "serde",
  "serde_json",
  "thiserror",

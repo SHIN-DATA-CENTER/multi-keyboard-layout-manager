@@ -19,6 +19,22 @@ pub const GLOBAL_FIXED_TYPES: [KeyboardType; 2] = [KeyboardType::JIS, KeyboardTy
 pub const LAYER_DRIVERS: [&str; 2] = [KBD106, KBD101];
 /// `OverrideKeyboardIdentifier` values MKLM may write.
 pub const KEYBOARD_IDENTIFIERS: [&str; 2] = [PCAT_106KEY, PCAT_101KEY];
+/// Every value name MKLM may write or delete on a keyboard's "Device Parameters" (both stacks).
+/// `mklm_win::regwrite` refuses any other name as a last line of defence under the engine's
+/// checks (design review S9).
+pub const DEVICE_VALUE_NAMES: [&str; 4] = [
+    value_names::HID_TYPE,
+    value_names::HID_SUBTYPE,
+    value_names::PS2_TYPE,
+    value_names::PS2_SUBTYPE,
+];
+/// Every value name MKLM may write or delete on `Services\i8042prt\Parameters` (same gate).
+pub const GLOBAL_VALUE_NAMES: [&str; 4] = [
+    value_names::LAYER_DRIVER_JPN,
+    value_names::KEYBOARD_IDENTIFIER,
+    value_names::PS2_TYPE,
+    value_names::PS2_SUBTYPE,
+];
 
 /// Operation on one registry value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,7 +402,7 @@ pub enum PlanError {
 }
 
 /// Registry key a [`PlanStep`] writes to.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum WriteTarget {
     /// A keyboard's "Device Parameters".

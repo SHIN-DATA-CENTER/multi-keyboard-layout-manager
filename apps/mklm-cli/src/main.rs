@@ -1,8 +1,12 @@
 //! `mklm-cli`: command-line interface of Multi Keyboard Layout Manager (MKLM).
 //!
-//! Every command only reads the system (milestone M1). Output is English for now; the GUI is localized.
+//! `list`, `status`, `global status` (milestone M1) and `journal` only read the system. The write
+//! commands of milestone M2 (`set`, `migrate`, `revert`, `restore`, `recover`, `keep`, `reboot`,
+//! `post-reboot`) are defined in [`mod@write`]; see docs/design/m2-engine.md, section F.
+//! Output is English for now; the GUI is localized.
 //! Results go to standard output; read problems go to standard error as `warning:` lines (and into
-//! the `issues` array of the JSON output). Exit code 0 on success, 1 on failure, 2 on usage errors.
+//! the `issues` array of the JSON output). Read-only commands exit with 0 on success, 1 on failure
+//! and 2 on usage errors; write commands use [`write::exit_code`].
 //! Redirected output is ASCII-only JSON, or text in the console's code page (as PowerShell and cmd
 //! decode it).
 
@@ -11,6 +15,7 @@
 mod json;
 mod table;
 mod text;
+mod write;
 
 use std::borrow::Cow;
 use std::io::{self, Write as _};
@@ -22,7 +27,7 @@ use clap::{Parser, Subcommand};
 /// Oldest Windows build MKLM supports (Windows 11 24H2).
 const MIN_BUILD: u32 = 26100;
 
-/// Multi Keyboard Layout Manager: shows which layout (JIS or US) each keyboard types with (read-only)
+/// Multi Keyboard Layout Manager: shows and assigns the layout (JIS or US) of each keyboard
 #[derive(Debug, Parser)]
 #[command(name = "mklm-cli", bin_name = "mklm-cli", version)]
 struct Cli {
@@ -52,6 +57,71 @@ enum Command {
         #[command(subcommand)]
         command: GlobalCommand,
     },
+    /// Assign a layout to a keyboard (and to the other collections of the same device).
+    Set(write::SetArgs),
+    /// Switch from fixed mode to per-keyboard mode (needs one PC restart).
+    Migrate(write::MigrateArgs),
+    /// Undo an operation (IDs as shown by `mklm-cli journal`).
+    Revert(write::RevertArgs),
+    /// Undo every change that still waits for you (keep/revert, a restart, or a conflict).
+    Undo(write::RecoverArgs),
+    /// Decide what the values of an operation in conflict become.
+    Resolve(write::ResolveArgs),
+    /// Put back the values from before MKLM.
+    Restore(write::RestoreArgs),
+    /// Finish or undo operations that were interrupted (crash, power loss, closed window).
+    Recover(write::RecoverArgs),
+    /// Keep an operation that waits for confirmation.
+    #[command(visible_alias = "confirm")]
+    Keep {
+        /// Operation ID, or a unique prefix of at least 8 hex digits.
+        op: String,
+    },
+    /// Restart Windows to apply pending changes (a restart, not a shutdown).
+    Reboot {
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Started after sign-in by the RunOnce entry: keep or revert changes that needed a restart.
+    #[command(hide = true)]
+    PostReboot,
+    /// Show MKLM's journal of operations (read-only).
+    Journal {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+impl Command {
+    /// Runs a write command (or `journal`) and returns its exit code; `None` for the read-only
+    /// commands handled by [`run`].
+    fn run_m2(&self) -> Option<Result<i32>> {
+        Some(match self {
+            Command::List { .. } | Command::Status { .. } | Command::Global { .. } => return None,
+            Command::Set(args) => write::set(args),
+            Command::Migrate(args) => write::migrate(args),
+            Command::Revert(args) => write::revert(args),
+            Command::Undo(args) => write::undo(args),
+            Command::Resolve(args) => write::resolve(args),
+            Command::Restore(args) => write::restore(args),
+            Command::Recover(args) => write::recover(args),
+            Command::Keep { op } => write::keep(op),
+            Command::Reboot { yes } => write::reboot(*yes),
+            Command::PostReboot => write::post_reboot(),
+            Command::Journal { json } => {
+                write::journal(*json).and_then(|output| print(&output).map(|()| 0))
+            }
+        })
+    }
+}
+
+/// Exit code of a write command; codes above 255 (3010) need `process::exit`.
+fn exit_with(code: i32) -> ExitCode {
+    match u8::try_from(code) {
+        Ok(code) => ExitCode::from(code),
+        Err(_) => std::process::exit(code),
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -71,6 +141,15 @@ fn main() -> ExitCode {
         eprintln!("warning: could not restrict DLL loading to System32: {error}");
     }
     let cli = Cli::parse();
+    if let Some(result) = cli.command.run_m2() {
+        return match result {
+            Ok(code) => exit_with(code),
+            Err(error) => {
+                eprintln!("error: {error:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match run(&cli.command).and_then(|output| print(&output)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -159,6 +238,7 @@ fn run(command: &Command) -> Result<String> {
                 Ok(text::global_status(&global, &input))
             }
         }
+        _ => unreachable!("M2 commands are dispatched by Command::run_m2"),
     }
 }
 
@@ -251,5 +331,104 @@ mod tests {
         assert!(parse(&["mklm-cli", "global"]).is_err());
         assert!(parse(&["mklm-cli", "set"]).is_err());
         assert!(parse(&["mklm-cli", "global", "status", "--all"]).is_err());
+    }
+
+    #[test]
+    fn parses_m2_commands() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|cli| cli.command);
+        assert!(matches!(
+            parse(&["mklm-cli", "set", "#2", "--layout", "us"]),
+            Ok(Command::Set(write::SetArgs {
+                keyboard: write::KeyboardRef::ListRow(2),
+                layout: write::LayoutArg::Us,
+                apply: write::ApplyArgs {
+                    no_reset: false,
+                    other_input: false
+                },
+                ..
+            }))
+        ));
+        assert!(parse(&["mklm-cli", "set", "#2"]).is_err());
+        // --yes needs an explicit reset choice (design review S12).
+        let id = r"HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000";
+        assert!(parse(&["mklm-cli", "set", id, "--layout", "jis", "--yes"]).is_err());
+        assert!(
+            parse(&[
+                "mklm-cli",
+                "set",
+                id,
+                "--layout",
+                "jis",
+                "--yes",
+                "--other-input"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&[
+                "mklm-cli",
+                "set",
+                id,
+                "--layout",
+                "jis",
+                "--yes",
+                "--no-reset"
+            ])
+            .is_ok()
+        );
+        assert!(parse(&["mklm-cli", "restore", "--baseline", "--all", "--yes"]).is_err());
+        assert!(matches!(
+            parse(&["mklm-cli", "undo", "--other-input"]),
+            Ok(Command::Undo(write::RecoverArgs {
+                apply: write::ApplyArgs {
+                    other_input: true,
+                    ..
+                },
+                in_process: false,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            parse(&["mklm-cli", "revert", "0f8c2d4e", "--no-reset"]),
+            Ok(Command::Revert(write::RevertArgs { .. }))
+        ));
+        assert!(matches!(
+            parse(&[
+                "mklm-cli", "resolve", "0f8c2d4e", "--all", "keep-current", "--value", "2=before"
+            ]),
+            Ok(Command::Resolve(write::ResolveArgs {
+                all: Some(write::ChoiceArg::KeepCurrent),
+                values,
+                ..
+            })) if values.len() == 1
+        ));
+        assert!(parse(&["mklm-cli", "resolve", "0f8c2d4e", "--all", "later"]).is_err());
+        assert!(parse(&["mklm-cli", "set", "#2", "--layout", "dvorak"]).is_err());
+        assert!(matches!(
+            parse(&[
+                "mklm-cli", "migrate", "--standard", "jis", "--also", "#2=us", "--also", "#3=standard"
+            ]),
+            Ok(Command::Migrate(write::MigrateArgs { also, .. })) if also.len() == 2
+        ));
+        assert!(matches!(
+            parse(&["mklm-cli", "restore", "--baseline", "--all"]),
+            Ok(Command::Restore(write::RestoreArgs { all: true, .. }))
+        ));
+        // Exactly one of --all and a keyboard; --baseline is required.
+        assert!(parse(&["mklm-cli", "restore", "--baseline"]).is_err());
+        assert!(parse(&["mklm-cli", "restore", "--baseline", "--all", "#1"]).is_err());
+        assert!(parse(&["mklm-cli", "restore", "--all"]).is_err());
+        assert!(matches!(
+            parse(&["mklm-cli", "confirm", "0f8c2d4e"]),
+            Ok(Command::Keep { .. })
+        ));
+        assert!(matches!(
+            parse(&["mklm-cli", "post-reboot"]),
+            Ok(Command::PostReboot)
+        ));
+        assert!(matches!(
+            parse(&["mklm-cli", "journal", "--json"]),
+            Ok(Command::Journal { json: true })
+        ));
     }
 }

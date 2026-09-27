@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/mklm-core", "crates/mklm-win", "apps/mklm-cli"]
+members = [
+    "crates/mklm-core",
+    "crates/mklm-win",
+    "crates/mklm-ipc",
+    "crates/mklm-engine",
+    "apps/mklm-cli",
+    "apps/mklm-helper",
+]
 exclude = ["prototypes"]
 
 [workspace.package]
@@ -14,6 +21,8 @@ repository = "https://github.com/SHIN-DATA-CENTER/multi-keyboard-layout-manager"
 [workspace.dependencies]
 mklm-core = { path = "crates/mklm-core" }
 mklm-win = { path = "crates/mklm-win" }
+mklm-ipc = { path = "crates/mklm-ipc" }
+mklm-engine = { path = "crates/mklm-engine" }
 # windows-registry stays on 0.6.x until `windows` itself moves to 0.100 (avoids duplicate windows-result/strings/link).
 windows = "0.62.2"
 windows-registry = "0.6.1"

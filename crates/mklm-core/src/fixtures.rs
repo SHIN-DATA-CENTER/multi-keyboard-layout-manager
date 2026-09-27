@@ -1,4 +1,7 @@
 //! Test fixtures reproducing the development machine after M0 (see `docs/research/m0-results.md`).
+//!
+//! Compiled for this crate's tests and, with the `test-fixtures` feature, for other crates' tests
+//! (`mklm-engine` drives its fakes with them). Never enable the feature in a shipped binary.
 
 use crate::model::*;
 
@@ -7,7 +10,7 @@ fn ids(list: &[&str]) -> Vec<String> {
 }
 
 /// Built-in Fujitsu PS/2 keyboard, pinned to 7/2 by the M0 migration.
-pub(crate) fn internal_ps2() -> KeyboardDevice {
+pub fn internal_ps2() -> KeyboardDevice {
     KeyboardDevice {
         instance_id: r"ACPI\FUJ0309\4&320DB4C2&0".into(),
         display_name: "日本語 PS/2 キーボード (106/109 キー Ctrl+英数)".into(),
@@ -40,7 +43,7 @@ pub(crate) fn internal_ps2() -> KeyboardDevice {
 }
 
 /// Keychron USB receiver, keyboard collection COL01, set to US (4/0).
-pub(crate) fn keychron() -> KeyboardDevice {
+pub fn keychron() -> KeyboardDevice {
     KeyboardDevice {
         instance_id: r"HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000".into(),
         display_name: "Keychron Receiver".into(),
@@ -77,7 +80,7 @@ pub(crate) fn keychron() -> KeyboardDevice {
 }
 
 /// Keyboard collection of the "VXE R1SE+" BLE mouse; no overrides.
-pub(crate) fn vxe_ble() -> KeyboardDevice {
+pub fn vxe_ble() -> KeyboardDevice {
     KeyboardDevice {
         instance_id: r"HID\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&0225A7_PID&FA6C_REV&0300_F977E93BA63F&COL02\B&B4852A&0&0001".into(),
         display_name: "VXE R1SE+".into(),
@@ -109,7 +112,7 @@ pub(crate) fn vxe_ble() -> KeyboardDevice {
 
 /// Keyboard collection of the non-present BLE mouse "X3-5.4 Mouse", which reports a Microsoft
 /// PnP ID (VID 045E, PID 0040). Not a keyboard, so it cannot stand in for a BLE keyboard test.
-pub(crate) fn ms_ble_phantom() -> KeyboardDevice {
+pub fn ms_ble_phantom() -> KeyboardDevice {
     KeyboardDevice {
         instance_id: r"HID\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&02045E_PID&0040_REV&0300_788712B99B19&COL01\B&1455DB79&0&0000".into(),
         display_name: "X3-5.4 Mouse".into(),
@@ -135,7 +138,7 @@ pub(crate) fn ms_ble_phantom() -> KeyboardDevice {
 }
 
 /// Global values after the M0 migration (per-keyboard mode, JIS standard).
-pub(crate) fn global_per_keyboard() -> GlobalSettings {
+pub fn global_per_keyboard() -> GlobalSettings {
     GlobalSettings {
         layer_driver_jpn: Some("kbd106.dll".into()),
         layer_driver_kor: Some("kbd101a.dll".into()),
@@ -146,7 +149,7 @@ pub(crate) fn global_per_keyboard() -> GlobalSettings {
 }
 
 /// Global values before the M0 migration (fixed JIS, what the Settings app writes for "Japanese").
-pub(crate) fn global_fixed_jis() -> GlobalSettings {
+pub fn global_fixed_jis() -> GlobalSettings {
     GlobalSettings {
         override_keyboard_type: Some(7),
         override_keyboard_subtype: Some(2),
@@ -154,7 +157,7 @@ pub(crate) fn global_fixed_jis() -> GlobalSettings {
     }
 }
 
-pub(crate) fn input_methods() -> InputMethods {
+pub fn input_methods() -> InputMethods {
     InputMethods {
         user_preload: ids(&["00000411", "00000409"]),
         // M0 recorded only 00000411; the live machine now also lists 00000409.
@@ -164,7 +167,7 @@ pub(crate) fn input_methods() -> InputMethods {
 }
 
 /// The development machine as verified at the end of M0.
-pub(crate) fn dev_machine() -> SystemSnapshot {
+pub fn dev_machine() -> SystemSnapshot {
     SystemSnapshot {
         keyboards: vec![internal_ps2(), keychron(), vxe_ble(), ms_ble_phantom()],
         global: global_per_keyboard(),

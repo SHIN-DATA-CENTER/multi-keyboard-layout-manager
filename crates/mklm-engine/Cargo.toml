@@ -1,0 +1,24 @@
+[package]
+name = "mklm-engine"
+description = "Journaled apply/revert/recover/migrate transactions of Multi Keyboard Layout Manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+mklm-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+mklm-win.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+mklm-core = { workspace = true, features = ["test-fixtures"] }
