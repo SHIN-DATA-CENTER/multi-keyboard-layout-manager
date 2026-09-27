@@ -8,11 +8,9 @@
 //! 3. Caller: [`verify_hello`]; sends [`Welcome`].
 //! 4. Helper: [`verify_welcome`].
 
-// Skeleton (M2): the bodies below are `todo!()`; remove this allow once they are implemented.
-#![allow(unused_variables)]
-
 use std::time::Duration;
 
+use crate::PROTOCOL_VERSION;
 use crate::args::Nonce;
 use crate::message::{Hello, Welcome};
 
@@ -53,7 +51,15 @@ pub fn verify_hello(
     launched_pid: u32,
     build_id: &str,
 ) -> Result<(), HandshakeError> {
-    todo!("M2")
+    check_version(hello.protocol)?;
+    check_build(&hello.build_id, build_id)?;
+    // A malformed nonce fails like a wrong one. Only its format decides how early, never how much
+    // of the secret it shares.
+    let presented = Nonce::parse_hex(&hello.nonce_hex).map_err(|_| HandshakeError::Nonce)?;
+    if !presented.matches(nonce) {
+        return Err(HandshakeError::Nonce);
+    }
+    check_pid(hello.helper_pid, launched_pid)
 }
 
 /// Helper side: version, build ID (exact) and `caller_pid` = `--caller-pid`.
@@ -62,5 +68,250 @@ pub fn verify_welcome(
     caller_pid: u32,
     build_id: &str,
 ) -> Result<(), HandshakeError> {
-    todo!("M2")
+    check_version(welcome.protocol)?;
+    check_build(&welcome.build_id, build_id)?;
+    check_pid(welcome.caller_pid, caller_pid)
+}
+
+fn check_version(found: u32) -> Result<(), HandshakeError> {
+    if found == PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err(HandshakeError::Version {
+            found,
+            expected: PROTOCOL_VERSION,
+        })
+    }
+}
+
+/// Exact match. An empty ID never matches, not even an empty one: it would mean a build without
+/// the ID (design review S11), and two such builds must not pass for a matching pair.
+fn check_build(found: &str, expected: &str) -> Result<(), HandshakeError> {
+    if !expected.is_empty() && found == expected {
+        Ok(())
+    } else {
+        Err(HandshakeError::Build {
+            expected: expected.to_string(),
+            found: found.to_string(),
+        })
+    }
+}
+
+/// Exact match; PID 0 (the idle process) is never a peer.
+fn check_pid(found: u32, expected: u32) -> Result<(), HandshakeError> {
+    if found == expected && found != 0 {
+        Ok(())
+    } else {
+        Err(HandshakeError::Pid { expected, found })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::args::NONCE_LEN;
+
+    const BUILD: &str = "0.1.0+0123456789abcdef";
+    const HELPER_PID: u32 = 5150;
+    const CALLER_PID: u32 = 4242;
+
+    fn nonce_bytes() -> [u8; NONCE_LEN] {
+        let mut bytes = [0u8; NONCE_LEN];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::try_from(index)
+                .unwrap()
+                .wrapping_mul(37)
+                .wrapping_add(11);
+        }
+        bytes
+    }
+
+    fn nonce() -> Nonce {
+        Nonce::from_bytes(nonce_bytes())
+    }
+
+    fn hello() -> Hello {
+        Hello::new(&nonce(), HELPER_PID, "0.1.0", BUILD)
+    }
+
+    fn welcome() -> Welcome {
+        Welcome::new(CALLER_PID, BUILD)
+    }
+
+    #[test]
+    fn matching_peers_pass() {
+        let hello = hello();
+        assert_eq!(hello.protocol, PROTOCOL_VERSION);
+        assert_eq!(hello.nonce_hex, nonce().to_hex());
+        assert_eq!(hello.helper_version, "0.1.0");
+        assert_eq!(verify_hello(&hello, &nonce(), HELPER_PID, BUILD), Ok(()));
+        let welcome = welcome();
+        assert_eq!(welcome.protocol, PROTOCOL_VERSION);
+        assert_eq!(verify_welcome(&welcome, CALLER_PID, BUILD), Ok(()));
+    }
+
+    #[test]
+    fn nonce_mismatch() {
+        for index in [0, NONCE_LEN / 2, NONCE_LEN - 1] {
+            let mut other = nonce_bytes();
+            other[index] ^= 0x80;
+            let hello = Hello::new(&Nonce::from_bytes(other), HELPER_PID, "0.1.0", BUILD);
+            assert_eq!(
+                verify_hello(&hello, &nonce(), HELPER_PID, BUILD),
+                Err(HandshakeError::Nonce)
+            );
+        }
+        let good = nonce().to_hex();
+        for nonce_hex in [
+            String::new(),
+            good.to_uppercase(),
+            good[..62].to_string(),
+            format!("{good}00"),
+            format!(" {}", &good[1..]),
+        ] {
+            let hello = Hello {
+                nonce_hex,
+                ..hello()
+            };
+            assert_eq!(
+                verify_hello(&hello, &nonce(), HELPER_PID, BUILD),
+                Err(HandshakeError::Nonce)
+            );
+        }
+    }
+
+    #[test]
+    fn pid_mismatch() {
+        assert_eq!(
+            verify_hello(&hello(), &nonce(), HELPER_PID + 4, BUILD),
+            Err(HandshakeError::Pid {
+                expected: HELPER_PID + 4,
+                found: HELPER_PID
+            })
+        );
+        assert_eq!(
+            verify_welcome(&welcome(), CALLER_PID + 4, BUILD),
+            Err(HandshakeError::Pid {
+                expected: CALLER_PID + 4,
+                found: CALLER_PID
+            })
+        );
+        // PID 0 is nobody, even when "expected".
+        let zero = Hello::new(&nonce(), 0, "0.1.0", BUILD);
+        assert!(matches!(
+            verify_hello(&zero, &nonce(), 0, BUILD),
+            Err(HandshakeError::Pid { .. })
+        ));
+        assert!(matches!(
+            verify_welcome(&Welcome::new(0, BUILD), 0, BUILD),
+            Err(HandshakeError::Pid { .. })
+        ));
+    }
+
+    #[test]
+    fn build_mismatch() {
+        let other = "0.1.0+fedcba9876543210";
+        assert_eq!(
+            verify_hello(&hello(), &nonce(), HELPER_PID, other),
+            Err(HandshakeError::Build {
+                expected: other.to_string(),
+                found: BUILD.to_string()
+            })
+        );
+        assert_eq!(
+            verify_welcome(&welcome(), CALLER_PID, other),
+            Err(HandshakeError::Build {
+                expected: other.to_string(),
+                found: BUILD.to_string()
+            })
+        );
+        // Exact: no case folding, no trimming, no prefix match.
+        for found in [
+            BUILD.to_uppercase(),
+            format!("{BUILD} "),
+            BUILD[..BUILD.len() - 1].to_string(),
+            String::new(),
+        ] {
+            let hello = Hello {
+                build_id: found.clone(),
+                ..hello()
+            };
+            assert!(
+                matches!(
+                    verify_hello(&hello, &nonce(), HELPER_PID, BUILD),
+                    Err(HandshakeError::Build { .. })
+                ),
+                "{found:?}"
+            );
+            let welcome = Welcome {
+                build_id: found.clone(),
+                ..welcome()
+            };
+            assert!(
+                matches!(
+                    verify_welcome(&welcome, CALLER_PID, BUILD),
+                    Err(HandshakeError::Build { .. })
+                ),
+                "{found:?}"
+            );
+        }
+        // Two builds without an ID do not match each other.
+        let hello = Hello {
+            build_id: String::new(),
+            ..hello()
+        };
+        assert!(matches!(
+            verify_hello(&hello, &nonce(), HELPER_PID, ""),
+            Err(HandshakeError::Build { .. })
+        ));
+        assert!(matches!(
+            verify_welcome(&Welcome::new(CALLER_PID, ""), CALLER_PID, ""),
+            Err(HandshakeError::Build { .. })
+        ));
+    }
+
+    #[test]
+    fn version_mismatch() {
+        for protocol in [0, PROTOCOL_VERSION + 1, u32::MAX] {
+            let hello = Hello {
+                protocol,
+                ..hello()
+            };
+            assert_eq!(
+                verify_hello(&hello, &nonce(), HELPER_PID, BUILD),
+                Err(HandshakeError::Version {
+                    found: protocol,
+                    expected: PROTOCOL_VERSION
+                })
+            );
+            let welcome = Welcome {
+                protocol,
+                ..welcome()
+            };
+            assert_eq!(
+                verify_welcome(&welcome, CALLER_PID, BUILD),
+                Err(HandshakeError::Version {
+                    found: protocol,
+                    expected: PROTOCOL_VERSION
+                })
+            );
+        }
+    }
+
+    /// The version is checked first, so a peer of another version is reported as such even when
+    /// everything else differs too.
+    #[test]
+    fn version_is_reported_first() {
+        let hello = Hello {
+            protocol: PROTOCOL_VERSION + 1,
+            nonce_hex: "zz".to_string(),
+            helper_pid: 1,
+            helper_version: String::new(),
+            build_id: "other".to_string(),
+        };
+        assert!(matches!(
+            verify_hello(&hello, &nonce(), HELPER_PID, BUILD),
+            Err(HandshakeError::Version { .. })
+        ));
+    }
 }

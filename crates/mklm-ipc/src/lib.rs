@@ -2,7 +2,8 @@
 //!
 //! Pure Rust (no Windows calls): the pipe itself lives in `mklm-win::pipe`. This crate defines
 //! - [`args`]: the helper's fixed command line (pipe name, nonce, caller PID) and its strict parser;
-//! - [`frame`]: length-prefixed JSON framing with a size cap;
+//! - [`frame`]: length-prefixed JSON framing with a size cap, the version check before the body
+//!   is parsed, and per-direction sequence numbers ([`FrameSequencer`], [`FrameReader`]);
 //! - [`message`]: the requests the pipe allows, the handshake frames, and (re-exported from
 //!   `mklm_core::report`) events, decisions and results, versioned by [`PROTOCOL_VERSION`];
 //! - [`handshake`]: the checks both sides make before the first request (version, build ID, nonce,
