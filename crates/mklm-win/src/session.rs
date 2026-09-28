@@ -61,7 +61,9 @@ struct SystemTimeOfDay {
     time_zone_bias: i64,
     time_zone_id: u32,
     reserved: u32,
-    boot_time_bias: u64,
+    // ULONGLONG in ntexapi.h, but the kernel adds every clock change since the boot to it, so a
+    // clock set back makes it negative (two's complement). Same size and layout as u64.
+    boot_time_bias: i64,
     sleep_time_bias: u64,
 }
 
@@ -136,12 +138,19 @@ pub fn boot_time_hint() -> Result<u64, Error> {
             &mut info,
         )
     }?;
-    u64::try_from(info.boot_time)
-        .ok()
-        .and_then(|boot_time| boot_time.checked_sub(info.boot_time_bias))
-        .ok_or_else(|| Error::UnexpectedData {
+    boot_time_without_bias(info.boot_time, info.boot_time_bias).ok_or_else(|| {
+        Error::UnexpectedData {
             path: "SystemTimeOfDayInformation.BootTime".to_string(),
-        })
+        }
+    })
+}
+
+/// `boot_time - boot_time_bias` with the bias signed: the boot time before any clock change since
+/// the boot (the kernel moves `BootTime` with the clock and records the move in the bias).
+fn boot_time_without_bias(boot_time: i64, boot_time_bias: i64) -> Option<u64> {
+    u64::try_from(boot_time)
+        .ok()
+        .and_then(|boot_time| boot_time.checked_sub_signed(boot_time_bias))
 }
 
 /// Fills `buf` from `BCryptGenRandom(BCRYPT_USE_SYSTEM_PREFERRED_RNG)`.
@@ -458,6 +467,23 @@ mod tests {
             matches!(hint, Ok(time) if time > 132_223_104_000_000_000),
             "{hint:?}"
         );
+    }
+
+    #[test]
+    fn boot_time_bias_is_signed() {
+        // Seen on the development machine after the clock was set back by about 1.2 s: the
+        // bias reads as 2^64 - 12_352_478, and the result is the hint recorded before the change.
+        assert_eq!(
+            boot_time_without_bias(134_349_552_392_647_522, -12_352_478),
+            Some(134_349_552_405_000_000)
+        );
+        assert_eq!(
+            boot_time_without_bias(134_349_552_405_000_000, 0),
+            Some(134_349_552_405_000_000)
+        );
+        assert_eq!(boot_time_without_bias(100, 30), Some(70));
+        assert_eq!(boot_time_without_bias(100, 101), None);
+        assert_eq!(boot_time_without_bias(-1, 0), None);
     }
 
     #[test]
