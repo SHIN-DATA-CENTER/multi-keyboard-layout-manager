@@ -10,8 +10,13 @@
 //! Every message carries the session's id, so a message from an older session is dropped
 //! (`state::update`). If the thread panics, a guard still reports the end, so that a pending
 //! quit is not stuck (review A11).
+//!
+//! An update session (design m5b E.4) runs on the same kind of worker
+//! ([`SessionWorker::start_update`]): the UAC prompt, then the installer handed to the helper;
+//! only one session of either kind at a time.
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -22,11 +27,14 @@ use mklm_client::launch::LaunchConfig;
 use mklm_client::orchestrator::{RequestEnd, RequestReport};
 use mklm_client::run_once::{PostRebootCommand, RunOnceError, run_request};
 use mklm_client::session::{Frontend, Notice, Prompt, SessionEnd, SessionView};
+use mklm_client::update::check::Offer;
+use mklm_client::update::stage::{StageEnd, StageFrontend};
 use mklm_core::{ApplyOptions, Decision, Event};
 use mklm_ipc::Request;
 
 use crate::app::post;
-use crate::state::{AppMsg, SessionId, SessionOutcome};
+use crate::state::update::{SessionProgress, UpdateSessionEnd};
+use crate::state::{AppMsg, SessionId, SessionOutcome, UpdateMsg};
 
 /// What the UI thread and the end-of-session handler share with a running worker. Atomics and a
 /// condition variable only: the shell window's `WM_QUERYENDSESSION` handler sets `cancel`
@@ -180,6 +188,55 @@ impl SessionWorker {
         })
     }
 
+    /// Starts update session `session` (design m5b E.4): the cached manifest and installer checked
+    /// again (D.2 condition 2; no prompt for a file that no longer matches), the UAC prompt
+    /// (`launch`), then `mklm_client::update::stage`. Posts `Notice::Connected` once the helper
+    /// is connected, the progress, and ends with `UpdateMsg::SessionEnded`. `Cancel` stops it
+    /// until the last byte is sent.
+    pub fn start_update(
+        session: SessionId,
+        offer: Offer,
+        installer: PathBuf,
+        launch: LaunchConfig,
+    ) -> io::Result<Self> {
+        let (decisions, _) = mpsc::channel();
+        let (recovery_answers, _) = mpsc::channel();
+        let shared = Arc::new(SessionShared {
+            launching: AtomicBool::new(true),
+            ..SessionShared::default()
+        });
+        let worker_shared = shared.clone();
+        if let Ok(mut current) = CURRENT.lock() {
+            *current = Some(shared.clone());
+        }
+        let spawned = thread::Builder::new()
+            .name("mklm-session".into())
+            .spawn(move || {
+                let mut guard = UpdateEndGuard {
+                    session,
+                    shared: worker_shared.clone(),
+                    reported: false,
+                };
+                let end = run_update_session(session, &offer, &installer, &launch, &worker_shared);
+                guard.report(end);
+            });
+        let thread = match spawned {
+            Ok(thread) => thread,
+            Err(error) => {
+                if let Ok(mut current) = CURRENT.lock() {
+                    *current = None;
+                }
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            decisions,
+            recovery_answers,
+            shared,
+            thread: Some(thread),
+        })
+    }
+
     /// Passes the user's decision (ignored by the relay unless it answers the open question).
     pub fn decide(&self, decision: Decision) {
         let _ = self.decisions.send(decision);
@@ -259,6 +316,140 @@ impl Drop for EndGuard {
         {
             *current = None;
         }
+    }
+}
+
+/// Reports an update session's end exactly once — also when the thread unwinds from a panic.
+struct UpdateEndGuard {
+    session: SessionId,
+    shared: Arc<SessionShared>,
+    reported: bool,
+}
+
+impl UpdateEndGuard {
+    fn report(&mut self, end: UpdateSessionEnd) {
+        self.reported = true;
+        self.shared.mark_done();
+        post(AppMsg::Update(UpdateMsg::SessionEnded {
+            session: self.session,
+            end: Box::new(end),
+        }));
+    }
+}
+
+impl Drop for UpdateEndGuard {
+    fn drop(&mut self) {
+        if !self.reported {
+            self.report(UpdateSessionEnd::Stage(StageEnd::Lost(
+                "the session worker panicked".into(),
+            )));
+        }
+        if let Ok(mut current) = CURRENT.lock()
+            && current
+                .as_ref()
+                .is_some_and(|shared| Arc::ptr_eq(shared, &self.shared))
+        {
+            *current = None;
+        }
+    }
+}
+
+/// The update session on its worker (design m5b D.2, D.3, E.4).
+fn run_update_session(
+    session: SessionId,
+    offer: &Offer,
+    installer: &std::path::Path,
+    launch: &LaunchConfig,
+    shared: &Arc<SessionShared>,
+) -> UpdateSessionEnd {
+    use mklm_client::update::check::{CheckError, CheckOutcome, reverify_cached};
+    use mklm_client::update::status::{RunRecordProbe, read_status};
+
+    // D.2 condition 2: the cached manifest verifies again, and the installer is still the file
+    // that was checked (the helper checks everything once more; this saves a useless prompt).
+    let env = mklm_client::update::env::environment(
+        env!("CARGO_PKG_VERSION"),
+        mklm_update::url::Endpoints::production(),
+    );
+    let cache = mklm_client::update::cache::UpdateCache::new(env.cache_dir.clone());
+    let machine = read_status(&env.install_dir, &cache).machine_trust;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let offer = match reverify_cached(&env, &cache, &machine, None, now) {
+        Ok(CheckOutcome::Available(fresh))
+            if fresh.verified.version == offer.verified.version
+                && fresh.downloaded.as_deref() == Some(installer) =>
+        {
+            fresh
+        }
+        Ok(_) => {
+            return UpdateSessionEnd::NotReady(CheckError::Cache(
+                "the downloaded update is no longer the one checked".into(),
+            ));
+        }
+        Err(error) => return UpdateSessionEnd::NotReady(error),
+    };
+    let mut link = match mklm_client::launch::start(launch) {
+        Ok(link) => link,
+        Err(error) => return UpdateSessionEnd::NotLaunched(error),
+    };
+    shared.launching.store(false, Ordering::SeqCst);
+    // Cancelled (or quitting) while the prompt was up: nothing is asked of the helper.
+    if shared.cancel.load(Ordering::SeqCst) {
+        link.close();
+        return UpdateSessionEnd::Stage(StageEnd::Cancelled);
+    }
+    post(AppMsg::SessionNotice {
+        session,
+        notice: Notice::Connected(mklm_client::session::SessionKind::Request),
+    });
+    let mut frontend = UpdateFrontend {
+        session,
+        shared: shared.clone(),
+    };
+    let end = mklm_client::update::stage::stage(
+        &mut link,
+        &offer,
+        installer,
+        &mut frontend,
+        &mut RunRecordProbe::new(),
+    );
+    if matches!(end, StageEnd::HandedOff { .. }) {
+        // No `Bye`: the helper exits by itself; the pipe closes with the link.
+        drop(link);
+    } else {
+        // `stage` said `Bye`; give the helper a moment to exit.
+        link.close();
+    }
+    UpdateSessionEnd::Stage(end)
+}
+
+/// The update session's front end: progress to the UI thread, the cancel flag from it.
+struct UpdateFrontend {
+    session: SessionId,
+    shared: Arc<SessionShared>,
+}
+
+impl StageFrontend for UpdateFrontend {
+    fn sent(&mut self, bytes: u64, total: u64) {
+        post(AppMsg::Update(UpdateMsg::SessionProgress {
+            session: self.session,
+            progress: SessionProgress::Sent { bytes, total },
+        }));
+    }
+
+    fn received(&mut self, _bytes: u64) {}
+
+    fn starting_runner(&mut self) {
+        post(AppMsg::Update(UpdateMsg::SessionProgress {
+            session: self.session,
+            progress: SessionProgress::StartingRunner,
+        }));
+    }
+
+    fn cancel_requested(&mut self) -> bool {
+        self.shared.cancel.load(Ordering::SeqCst)
     }
 }
 

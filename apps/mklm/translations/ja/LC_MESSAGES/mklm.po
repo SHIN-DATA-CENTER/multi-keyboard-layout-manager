@@ -394,3 +394,19 @@ msgstr "Windows の認識"
 
 msgid "[Yes] [No]"
 msgstr "［はい］［いいえ］"
+
+# Updates (design m5b E.2, E.3): the settings section and the tray.
+msgid "Check for updates automatically (once a day, MKLM asks GitHub)"
+msgstr "更新を自動で確認する（1 日に 1 回、GitHub に問い合わせます）"
+
+msgid "Check now"
+msgstr "今すぐ確認"
+
+msgid "Open the update page"
+msgstr "更新のページを開く"
+
+msgid "Update MKLM…"
+msgstr "MKLM を更新…"
+
+msgid "Updates"
+msgstr "更新"

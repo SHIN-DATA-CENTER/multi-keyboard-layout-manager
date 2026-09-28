@@ -6,7 +6,9 @@
 //! | (none) | Start with the window shown (or activate the running instance). |
 //! | `--tray` | Start in the notification area (the HKCU Run value). The window still opens when the first-run wizard is not done or the journal needs the user. |
 //! | `--post-reboot` | Started by the RunOnce value after a restart: open in front; the journal decides what to show (design m2 C17). Wins over `--tray`. |
-//! | `--quit` | Ask the running instance to quit (the M5 installer and updater) and exit. |
+//! | `--after-update` | Started by the update runner or the after-update RunOnce value (design m5b D.10, E.5): open in front when there is an update result to show, else as `--tray`. Ranks like `--post-reboot`. |
+//! | `--quit` | Ask the running instance to quit (the M5 installer) and exit. |
+//! | `--update-endpoint=http://127.0.0.1:<port>` | Development builds with `--cfg mklm_update_dev` only: check a local rehearsal server instead of GitHub (design m5b A.10, E.8, F.6). Release builds do not know it (logged and ignored like any unknown argument). |
 //! | `--theme=light\|dark\|system` | Override the theme for this run (development). |
 //! | `--lang=ja\|en\|system` | Override the language for this run (development). |
 //! | `--renderer=software\|femtovg` | Override the renderer (development; design m3 C.3). |
@@ -24,6 +26,8 @@ pub enum StartMode {
     Window,
     Tray,
     PostReboot,
+    /// `--after-update` (design m5b E.5).
+    AfterUpdate,
     Quit,
 }
 
@@ -54,6 +58,9 @@ pub struct Args {
     pub lang: Option<LangChoice>,
     pub renderer: Renderer,
     pub exit_after: Option<Duration>,
+    /// `--update-endpoint` (development builds only, design m5b A.10).
+    #[cfg(all(debug_assertions, mklm_update_dev))]
+    pub update_endpoint: Option<String>,
     /// Arguments that were not understood (logged, ignored).
     pub unknown: Vec<String>,
 }
@@ -65,10 +72,18 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Args {
         match arg.as_str() {
             "--tray" if parsed.start == StartMode::Window => parsed.start = StartMode::Tray,
             "--tray" => {}
-            "--post-reboot" if parsed.start != StartMode::Quit => {
-                parsed.start = StartMode::PostReboot;
+            // `--post-reboot` and `--after-update` rank alike: over `--tray`, under `--quit`; the
+            // first of the two wins.
+            "--post-reboot" | "--after-update"
+                if matches!(parsed.start, StartMode::Window | StartMode::Tray) =>
+            {
+                parsed.start = if arg == "--post-reboot" {
+                    StartMode::PostReboot
+                } else {
+                    StartMode::AfterUpdate
+                };
             }
-            "--post-reboot" => {}
+            "--post-reboot" | "--after-update" => {}
             "--quit" => parsed.start = StartMode::Quit,
             _ => {
                 if !parse_value(&mut parsed, &arg) {
@@ -98,6 +113,11 @@ fn parse_value(parsed: &mut Args, arg: &str) -> bool {
             .parse::<u64>()
             .ok()
             .map(|seconds| parsed.exit_after = Some(Duration::from_secs(seconds))),
+        #[cfg(all(debug_assertions, mklm_update_dev))]
+        "--update-endpoint" if value.starts_with("http://127.0.0.1:") => {
+            parsed.update_endpoint = Some(value.to_string());
+            Some(())
+        }
         _ => None,
     }
     .is_some()
@@ -124,6 +144,36 @@ mod tests {
             StartMode::PostReboot
         );
         assert_eq!(args(&["--quit", "--post-reboot"]).start, StartMode::Quit);
+    }
+
+    /// `--after-update` ranks like `--post-reboot` (design m5b H.5).
+    #[test]
+    fn after_update() {
+        assert_eq!(args(&["--after-update"]).start, StartMode::AfterUpdate);
+        assert_eq!(
+            args(&["--tray", "--after-update"]).start,
+            StartMode::AfterUpdate
+        );
+        assert_eq!(
+            args(&["--after-update", "--tray"]).start,
+            StartMode::AfterUpdate
+        );
+        assert_eq!(
+            args(&["--after-update", "--post-reboot"]).start,
+            StartMode::AfterUpdate
+        );
+        assert_eq!(
+            args(&["--post-reboot", "--after-update"]).start,
+            StartMode::PostReboot
+        );
+        assert_eq!(args(&["--after-update", "--quit"]).start, StartMode::Quit);
+        assert_eq!(args(&["--quit", "--after-update"]).start, StartMode::Quit);
+        // A release build does not know the development endpoint: logged and ignored.
+        #[cfg(not(all(debug_assertions, mklm_update_dev)))]
+        assert_eq!(
+            args(&["--update-endpoint=http://127.0.0.1:8080"]).unknown,
+            vec!["--update-endpoint=http://127.0.0.1:8080"]
+        );
     }
 
     #[test]

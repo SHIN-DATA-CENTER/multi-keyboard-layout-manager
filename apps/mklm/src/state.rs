@@ -77,6 +77,11 @@ pub mod settings_page;
 
 pub use settings_page::{SettingsMsg, SettingsPageState};
 
+/// Updates (M5b, design m5b E): the checks, the download, the update session, `quit-if-idle`.
+pub mod update;
+
+pub use update::{InstanceReply, UpdateMsg, UpdateState, UpdateTask, quit_if_idle};
+
 /// The page in the main area (matches `Screen` in ui/structs.slint). Twelve pages: the change
 /// page covers assignment, detection and the apply method (review U14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -96,6 +101,9 @@ pub enum Page {
     ImeHelp,
     Settings,
     About,
+    /// MKLM's updates (design m5b E.2): not in the navigation rail; opened from the banner, the
+    /// tray and the settings page.
+    Update,
 }
 
 /// The overlay (matches `Overlay` in ui/structs.slint).
@@ -112,6 +120,40 @@ pub enum OverlayKind {
     RecoveryConfirm,
     CloseNotice,
     QuitConfirm,
+    /// The update was handed to the runner: MKLM quits after "OK" or `HANDOFF_OVERLAY_MAX`
+    /// (design m5b E.4).
+    UpdateHandOff,
+    /// The result of an update, or the installed programs out of step (design m5b D.13, E.5).
+    UpdateResult,
+}
+
+/// The stage of an update session once the helper is connected (design m5b E.4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateStage {
+    Sending {
+        sent: u64,
+        total: u64,
+    },
+    /// Every byte is with the helper; it starts the runner (up to 2 minutes).
+    StartingRunner,
+    /// `HandedOff`: the overlay is up and MKLM quits.
+    HandedOff,
+}
+
+/// What the helper session under way is for (design m5b H.4; FIX-VERIFICATION-11). Not
+/// `SessionKind`, which is the client's request / recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPurpose {
+    Change,
+    Update,
+}
+
+/// Where the standalone UAC explanation goes back to (design m5b E.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UacNoticeOrigin {
+    #[default]
+    Change,
+    Update,
 }
 
 /// What the I/O worker read (design m3 A.4): everything the main screen needs.
@@ -252,13 +294,18 @@ pub enum SessionPhase {
         id: SessionId,
         view: Box<SessionView>,
     },
+    /// An update session once the helper is connected (design m5b E.4.1). Its UAC prompt is
+    /// `Launching` with `AppState::session_purpose == Some(SessionPurpose::Update)`.
+    Updating { id: SessionId, stage: UpdateStage },
 }
 
 impl SessionPhase {
     pub fn id(&self) -> Option<SessionId> {
         match self {
             SessionPhase::Idle => None,
-            SessionPhase::Launching { id } | SessionPhase::Running { id, .. } => Some(*id),
+            SessionPhase::Launching { id }
+            | SessionPhase::Running { id, .. }
+            | SessionPhase::Updating { id, .. } => Some(*id),
         }
     }
 }
@@ -377,6 +424,16 @@ pub struct AppState {
     pub wizard: Option<WizardState>,
     /// What the settings page keeps (WP-U7).
     pub settings_page: SettingsPageState,
+    /// What the helper session under way is for: set with `Launching`, `None` once it ended
+    /// (design m5b H.4; FIX-VERIFICATION-11).
+    pub session_purpose: Option<SessionPurpose>,
+    /// Where the standalone UAC explanation goes back to (design m5b E.4).
+    pub uac_origin: UacNoticeOrigin,
+    /// Updates (design m5b E).
+    pub update: UpdateState,
+    /// The time the message being handled arrived, in Unix seconds (set by `app.rs` with
+    /// [`AppState::now`]; `None` in tests counts as 0).
+    pub now_unix: Option<u64>,
 }
 
 /// Something that happened (a user action, a worker's answer, a watcher).
@@ -522,6 +579,8 @@ pub enum AppMsg {
     Wizard(WizardMsg),
     /// The settings page (WP-U7).
     Settings(SettingsMsg),
+    /// Updates (design m5b E).
+    Update(UpdateMsg),
 }
 
 /// Something `app.rs` must do.
@@ -574,6 +633,29 @@ pub enum Effect {
     Quit,
     /// Re-render every view-model (the language or the read changed).
     Render,
+    /// A job for the update worker (design m5b E.1).
+    Update(UpdateTask),
+    /// Stop the update worker's check or download (its cancel flag).
+    CancelUpdateTask,
+    /// (Re)start the timer of the next automatic check: after `after` plus a random part of at
+    /// most `jitter`, which `app.rs` draws (design m5b E.1).
+    ScheduleUpdateCheck {
+        after: Duration,
+        jitter: Duration,
+    },
+    StopUpdateCheck,
+    /// Start an update session on a session worker (design m5b E.4): the UAC prompt, then
+    /// `mklm_client::update::stage`.
+    StartUpdateSession {
+        session: SessionId,
+        offer: Box<mklm_client::update::check::Offer>,
+        installer: std::path::PathBuf,
+    },
+    /// Register (true) or remove (false) this user's after-update RunOnce value on the I/O
+    /// worker (design m5b D.10, D.13). Never sent by an elevated GUI.
+    AfterUpdateRunOnce(bool),
+    /// Close the hand-off overlay after this long (`HANDOFF_OVERLAY_MAX`, design m5b E.4).
+    HandOffTimer(Duration),
 }
 
 /// The display name of a keyboard (its instance ID when the snapshot does not know it).
@@ -669,12 +751,12 @@ pub fn apply_now_targets(state: &AppState) -> Vec<String> {
 fn is_navigation_page(page: Page) -> bool {
     matches!(
         page,
-        Page::Main | Page::Journal | Page::ImeHelp | Page::Settings | Page::About
+        Page::Main | Page::Journal | Page::ImeHelp | Page::Settings | Page::About | Page::Update
     )
 }
 
 /// Identifying ends when the main screen goes (the capture field lives there).
-fn stop_identifying(state: &mut AppState) {
+pub(crate) fn stop_identifying(state: &mut AppState) {
     state.identify = false;
     state.highlighted = None;
 }
@@ -687,6 +769,13 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
         AppMsg::Navigate(page) => {
             if page != Page::Main {
                 stop_identifying(state);
+            }
+            if page != Page::UacNotice {
+                state.uac_origin = UacNoticeOrigin::Change;
+            }
+            if page == Page::Update {
+                // The page says what the banner said (design m5b E.3).
+                state.update.notice = None;
             }
             state.page = page;
             if !matches!(page, Page::Change | Page::UacNotice) {
@@ -931,6 +1020,10 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             if state.page != Page::UacNotice || state.session != SessionPhase::Idle {
                 return Vec::new();
             }
+            // "今すぐ更新" came first (design m5b E.4).
+            if state.uac_origin == UacNoticeOrigin::Update {
+                return update::uac_go(state);
+            }
             // A request of the wizard page (design m3 B.1 step 4), or of a journal page (B.12).
             if let Some(effects) = wizard::uac_go(state) {
                 return effects;
@@ -954,6 +1047,9 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             }
             match state.page {
                 // Back to where the request was made: nothing is lost, nothing happens.
+                Page::UacNotice if state.uac_origin == UacNoticeOrigin::Update => {
+                    update::uac_cancel(state)
+                }
                 Page::UacNotice => {
                     if !wizard::uac_cancel(state) && !journal_pages::uac_cancel(state) {
                         state.page = Page::Change;
@@ -981,6 +1077,11 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
                     if kind == SessionKind::Recovery {
                         state.note = SessionNote::Recovering;
                     }
+                }
+                // An update session sends the installer next; a change relays its request
+                // (design m5b E.4.1; FIX-VERIFICATION-11).
+                Notice::Connected(_) if state.session_purpose == Some(SessionPurpose::Update) => {
+                    update::connected(state, session);
                 }
                 Notice::Connected(_) => {
                     state.session = SessionPhase::Running {
@@ -1151,7 +1252,22 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
         }
         AppMsg::Wizard(msg) => wizard::handle(state, msg),
         AppMsg::Settings(msg) => settings_page::handle(state, msg),
+        AppMsg::Update(msg) => update::handle(state, msg),
     }
+}
+
+/// A `quit` from a second MKLM waits for the session (the reply is `busy`, design m3 F.5): a
+/// connected change, and an update whose last byte was sent (design m5b E.4.1). An update still
+/// sending stops and quits (`ok`).
+pub fn quit_reply_waits(state: &AppState) -> bool {
+    matches!(
+        state.session,
+        SessionPhase::Running { .. }
+            | SessionPhase::Updating {
+                stage: UpdateStage::StartingRunner,
+                ..
+            }
+    )
 }
 
 /// Leaves the change page (or its UAC explanation) without a session: back to the wizard when it
@@ -1521,6 +1637,7 @@ fn start_request(
     let session = state.next_session;
     state.next_session += 1;
     state.session = SessionPhase::Launching { id: session };
+    state.session_purpose = Some(SessionPurpose::Change);
     // The overlay takes over: no capture field stays behind it.
     stop_identifying(state);
     state.overlay = OverlayKind::Progress;
@@ -1617,6 +1734,7 @@ fn view_targets(state: &AppState, view: &SessionView) -> Vec<SessionTarget> {
 
 fn session_ended(state: &mut AppState, outcome: SessionOutcome) -> Vec<Effect> {
     state.session = SessionPhase::Idle;
+    state.session_purpose = None;
     state.recovery_question = None;
     state.decided = None;
     state.note = SessionNote::None;
@@ -1834,6 +1952,13 @@ fn close_requested(state: &mut AppState) -> Vec<Effect> {
             _ => Vec::new(),
         },
         SessionPhase::Launching { .. } => Vec::new(),
+        // Handed off: the overlay closes and MKLM quits; before that the window stays (the page
+        // has "キャンセル", design m5b E.4.1).
+        SessionPhase::Updating {
+            stage: UpdateStage::HandedOff,
+            ..
+        } => vec![Effect::Quit],
+        SessionPhase::Updating { .. } => Vec::new(),
         SessionPhase::Idle if !state.settings.tray.close_notice_shown => {
             state.overlay = OverlayKind::CloseNotice;
             vec![Effect::Render]
@@ -1850,8 +1975,23 @@ fn close_requested(state: &mut AppState) -> Vec<Effect> {
 fn quit_requested(state: &mut AppState) -> Vec<Effect> {
     match &state.session {
         SessionPhase::Idle => vec![Effect::Quit],
-        // Nothing is connected yet: leave now (design m3 F.5 "UAC 待ち").
+        // Nothing is connected yet: leave now (design m3 F.5 "UAC 待ち"; an update's too, m5b
+        // E.4.1).
         SessionPhase::Launching { .. } => vec![Effect::CancelSession, Effect::Quit],
+        // An update (design m5b E.4.1): while sending, stop (the helper removes what it got)
+        // and quit when the session has ended; once everything is sent, quit after the hand-off
+        // (or a refusal); handed off, at once.
+        SessionPhase::Updating { stage, .. } => match stage {
+            UpdateStage::Sending { .. } => {
+                state.quit_pending = true;
+                vec![Effect::CancelSession]
+            }
+            UpdateStage::StartingRunner => {
+                state.quit_pending = true;
+                Vec::new()
+            }
+            UpdateStage::HandedOff => vec![Effect::Quit],
+        },
         SessionPhase::Running { view, .. } => {
             if matches!(view.prompt, Prompt::Reconnect { .. })
                 && state.decided.is_none()

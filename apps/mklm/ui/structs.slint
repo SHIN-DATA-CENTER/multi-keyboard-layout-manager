@@ -17,6 +17,8 @@ export enum Screen {
     ime-help,
     settings,
     about,
+    // MKLM's updates (design m5b E.2).
+    update,
 }
 
 // A modal layer over the page (design m3 B.6, B.7, B.16, B.17, A.2.3). Only one at a time.
@@ -29,6 +31,10 @@ export enum Overlay {
     recovery-confirm,
     close-notice,
     quit-confirm,
+    // The update was handed to the runner (design m5b E.4).
+    update-hand-off,
+    // An update's result, or the installed programs out of step (design m5b D.13, E.5).
+    update-result,
 }
 
 // Colour role of a badge or banner (design m3 C.2, E.3).
@@ -378,4 +384,65 @@ export struct WizardVm {
     // The primary button; empty is "Next".
     next-text: string,
     can-next: bool,
+}
+
+// A button of the update page, a banner or the update result (design m5b E.2, E.3): Rust gives
+// `action` its meaning (`vm::update::UpdateAction`).
+export struct UpdateActionVm {
+    action: int,
+    text: string,
+    // "0.2.1 をスキップ", "MKLM の更新の詳細を開く" (design m5b E.7).
+    accessible-label: string,
+    primary: bool,
+    enabled: bool,
+}
+
+// The update page (design m5b E.2).
+export struct UpdatePageVm {
+    title: string,
+    // The page's main sentence: the state, or the failure and what to do (E.6).
+    status: string,
+    tone: Tone,
+    // "新しい版があります: 0.2.1（今の版: 0.2.0）".
+    version-line: string,
+    published: string,
+    // "リリースノートを開く".
+    links: [UpdateActionVm],
+    progress-text: string,
+    progress-visible: bool,
+    progress: float,
+    // "ダウンロード: 45 %".
+    progress-label: string,
+    // The same every 25 %, read out politely (design m5b E.7).
+    progress-announcement: string,
+    // Before "今すぐ更新": the Windows prompt and what to check on it (SECURITY-14).
+    explanation: string,
+    info: [string],
+    details: string,
+    buttons: [UpdateActionVm],
+}
+
+// The main screen's update banner (design m5b E.3); empty text when none.
+export struct UpdateBannerVm {
+    text: string,
+    tone: Tone,
+    actions: [UpdateActionVm],
+}
+
+// The settings page's "更新" section (design m5b E.2).
+export struct UpdateSettingsVm {
+    last-check: string,
+    last-success: string,
+    stale: string,
+    expired: string,
+    can-check: bool,
+}
+
+// An update's result (design m5b D.13, E.5).
+export struct UpdateResultVm {
+    title: string,
+    message: string,
+    tone: Tone,
+    details: string,
+    actions: [UpdateActionVm],
 }

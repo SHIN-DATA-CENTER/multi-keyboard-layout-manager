@@ -60,6 +60,8 @@ pub fn welcome_points(lang: Lang) -> Vec<String> {
     ]
     .into_iter()
     .map(|(ja, en)| pick(lang, ja, en))
+    // The daily update check (design m5b E.2).
+    .chain(std::iter::once(super::update::wizard_daily_check(lang)))
     .collect()
 }
 

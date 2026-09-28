@@ -36,6 +36,11 @@ pub fn create_tray(icon: &Image) -> Result<TrayIcon, PlatformError> {
         dispatch(AppMsg::Activate);
         dispatch(AppMsg::Journal(crate::state::JournalMsg::OpenUndo));
     });
+    // "MKLM を更新…" (design m5b E.3): the update page, in front.
+    tray.on_update_open(|| {
+        dispatch(AppMsg::Activate);
+        dispatch(AppMsg::Update(crate::state::UpdateMsg::OpenPage));
+    });
     tray.on_quit_app(|| dispatch(AppMsg::QuitRequested));
     tray.show()?;
     Ok(tray)
@@ -48,6 +53,21 @@ pub struct TrayState {
     /// Changes wait for the user's keep or revert (`AwaitingConfirm`, `PendingReboot`,
     /// `Conflict`: what `Request::Undo` puts back, design m3 B.12).
     pub can_undo: bool,
+    /// "MKLM を更新…": an update is ready and nothing is under way (design m5b E.3).
+    pub can_update: bool,
+}
+
+/// `state` with an update's part (design m5b E.3): its tooltip when the journal names nothing
+/// (the journal's attention comes first), and the update item.
+pub fn with_update(state: TrayState, tooltip: Option<String>, can_update: bool) -> TrayState {
+    TrayState {
+        tooltip: match tooltip {
+            Some(tooltip) if state.tooltip == "MKLM" => tooltip,
+            _ => state.tooltip,
+        },
+        can_update,
+        ..state
+    }
 }
 
 /// The icon's state for the last journal summary (`None`: not read yet). `can_navigate`: no
@@ -58,6 +78,7 @@ pub fn tray_state(summary: Option<&StartupSummary>, can_navigate: bool, lang: La
         return TrayState {
             tooltip: i18n::tray_tooltip(None, false, false, lang),
             can_undo: false,
+            can_update: false,
         };
     };
     let top = crate::vm::status::PRIORITY
@@ -73,6 +94,7 @@ pub fn tray_state(summary: Option<&StartupSummary>, can_navigate: bool, lang: La
             ]
             .into_iter()
             .any(|attention| summary.with(attention).next().is_some()),
+        can_update: false,
     }
 }
 
@@ -80,6 +102,7 @@ pub fn tray_state(summary: Option<&StartupSummary>, can_navigate: bool, lang: La
 pub fn update_tray(tray: &TrayIcon, state: &TrayState) {
     tray.set_tray_tooltip(state.tooltip.as_str().into());
     tray.set_can_undo(state.can_undo);
+    tray.set_can_update(state.can_update);
 }
 
 #[cfg(test)]
@@ -116,7 +139,8 @@ mod tests {
             tray_state(None, true, Lang::Ja),
             TrayState {
                 tooltip: "MKLM".into(),
-                can_undo: false
+                can_undo: false,
+                can_update: false,
             }
         );
         assert_eq!(
@@ -167,5 +191,28 @@ mod tests {
                 .tooltip
                 .contains("journal cannot be read")
         );
+    }
+
+    /// An update names itself when the journal names nothing (design m5b E.3).
+    #[test]
+    fn a_ready_update_in_the_tray() {
+        let update = Some("MKLM — 新しい版（0.2.1）があります".to_string());
+        let quiet = with_update(tray_state(None, true, Lang::Ja), update.clone(), true);
+        assert_eq!(quiet.tooltip, "MKLM — 新しい版（0.2.1）があります");
+        assert!(quiet.can_update);
+        let waiting = with_update(
+            tray_state(
+                Some(&summary(&[Attention::WaitingForReboot])),
+                true,
+                Lang::Ja,
+            ),
+            update,
+            false,
+        );
+        assert_eq!(
+            waiting.tooltip,
+            "MKLM — PC の再起動を待っている変更があります"
+        );
+        assert!(!waiting.can_update && waiting.can_undo);
     }
 }

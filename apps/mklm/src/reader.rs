@@ -66,6 +66,9 @@ pub enum IoTask {
     /// "restore on uninstall" (`mklm_win::machine_settings::read_machine_settings`, an HKLM read
     /// that needs no elevation), answered by `SettingsMsg::MachineSettingsRead` (design m3 B.14).
     ReadMachineSettings,
+    /// Register (true) or remove (false) this user's after-update RunOnce value,
+    /// `"<this folder>\mklm.exe" --after-update` (design m5b D.10, D.13; `mklm_win::session`).
+    AfterUpdateRunOnce(bool),
 }
 
 impl IoTask {
@@ -73,7 +76,10 @@ impl IoTask {
     fn writes(&self) -> bool {
         match self {
             // The restart writes the RunOnce rule first.
-            IoTask::SaveSettings(_) | IoTask::RunOnceRule | IoTask::RestartPc => true,
+            IoTask::SaveSettings(_)
+            | IoTask::RunOnceRule
+            | IoTask::RestartPc
+            | IoTask::AfterUpdateRunOnce(_) => true,
             IoTask::Autostart(task) => *task != AutostartTask::Read,
             IoTask::Read
             | IoTask::ReadForResult
@@ -214,6 +220,7 @@ fn task_name(task: &IoTask) -> &'static str {
         IoTask::OpenRecoveryFolder => "OpenRecoveryFolder",
         IoTask::ReadNonKeyboardValues(_) => "ReadNonKeyboardValues",
         IoTask::ReadMachineSettings => "ReadMachineSettings",
+        IoTask::AfterUpdateRunOnce(_) => "AfterUpdateRunOnce",
     }
 }
 
@@ -250,7 +257,9 @@ fn panic_reply(task: &IoTask) -> Option<AppMsg> {
         IoTask::ReadMachineSettings => {
             AppMsg::Settings(SettingsMsg::MachineSettingsRead(Err(FAILED.to_string())))
         }
-        IoTask::SaveSettings(_) | IoTask::OpenSettingsPage(_) => return None,
+        IoTask::SaveSettings(_) | IoTask::OpenSettingsPage(_) | IoTask::AfterUpdateRunOnce(_) => {
+            return None;
+        }
     })
 }
 
@@ -315,7 +324,43 @@ fn run_task(task: IoTask, store: &mut Option<SettingsStore>) {
             }
             post(AppMsg::Settings(SettingsMsg::MachineSettingsRead(read)));
         }
+        IoTask::AfterUpdateRunOnce(register) => after_update_run_once(register),
     }
+}
+
+/// The after-update RunOnce value of this user (design m5b D.10, D.13): the GUI next to this
+/// executable with `--after-update`, or its removal.
+pub fn after_update_run_once(register: bool) {
+    let done = if register {
+        std::env::current_exe()
+            .map_err(|error| error.to_string())
+            .and_then(|exe| {
+                mklm_win::session::register_after_update(&after_update_command(&exe))
+                    .map_err(|error| error.to_string())
+            })
+    } else {
+        mklm_win::session::unregister_after_update().map_err(|error| error.to_string())
+    };
+    match done {
+        Ok(()) => log::info(format!(
+            "after-update RunOnce value {}",
+            if register { "registered" } else { "removed" }
+        )),
+        Err(error) => log::warn(format!("the after-update RunOnce value: {error}")),
+    }
+}
+
+/// `"<folder of exe>\mklm.exe" --after-update` (the GUI itself when it runs).
+pub fn after_update_command(exe: &std::path::Path) -> String {
+    let gui = exe.parent().map_or_else(
+        || std::path::PathBuf::from(mklm_client::run_once::GUI_EXE),
+        |dir| dir.join(mklm_client::run_once::GUI_EXE),
+    );
+    format!(
+        "\"{}\" {}",
+        gui.display(),
+        mklm_update::GUI_AFTER_UPDATE_ARG
+    )
 }
 
 /// "今すぐ再起動" (design m3 B.8): only while the journal, read again now, still has a reason to
@@ -486,6 +531,21 @@ mod tests {
         assert!(!IoTask::OpenSettingsPage(SettingsPage::Taskbar).writes());
         // The GUI never writes the machine settings itself (the helper does).
         assert!(!IoTask::ReadMachineSettings.writes());
+        // The after-update value is a write a quit waits for (design m5b E.4 step 4).
+        assert!(IoTask::AfterUpdateRunOnce(true).writes());
+        assert!(IoTask::AfterUpdateRunOnce(false).writes());
+        assert!(panic_reply(&IoTask::AfterUpdateRunOnce(true)).is_none());
+    }
+
+    /// The after-update value starts the GUI of this folder (design m5b H.5).
+    #[test]
+    fn the_after_update_command() {
+        assert_eq!(
+            after_update_command(std::path::Path::new(
+                r"C:\Program Files\SHIN DATA CENTER\MKLM\mklm.exe"
+            )),
+            r#""C:\Program Files\SHIN DATA CENTER\MKLM\mklm.exe" --after-update"#
+        );
     }
 
     /// A task that panics is answered with a failure its page shows, so that nothing keeps

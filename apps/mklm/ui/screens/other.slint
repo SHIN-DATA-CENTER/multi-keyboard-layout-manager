@@ -6,7 +6,7 @@ import { AboutSlint, Button, CheckBox, ComboBox, ScrollView } from "std-widgets.
 import { Theme } from "../theme.slint";
 import {
     ChoiceVm, ConflictKeyboardVm, JournalRowVm, RecoveryItemVm, RecoveryPageVm, Tone,
-    UninstallRestoreVm,
+    UninstallRestoreVm, UpdateSettingsVm,
 } from "../structs.slint";
 import {
     Banner, Body, Caption, DialogBody, DialogButtons, Modal, PageHeader, RadioList,
@@ -442,6 +442,9 @@ export component SettingsScreen inherits VerticalLayout {
     // "非表示と未接続のキーボードも表示する", the same setting as on the main screen.
     in-out property <bool> show-hidden;
     in property <UninstallRestoreVm> uninstall;
+    // "更新を自動で確認する" (design m5b E.1) and what the last checks found.
+    in-out property <bool> update-auto-check;
+    in property <UpdateSettingsVm> update;
     callback theme-selected(int);
     callback language-selected(int);
     callback autostart-toggled(bool);
@@ -452,6 +455,9 @@ export component SettingsScreen inherits VerticalLayout {
     callback uninstall-confirm();
     callback restore-all();
     callback run-wizard();
+    callback update-auto-check-toggled(bool);
+    callback update-check-now();
+    callback open-update-page();
     // The confirmation closed: the focus goes back to its "変更…" button.
     private property <bool> confirm-open: root.uninstall.confirm-open;
     changed confirm-open => {
@@ -647,6 +653,57 @@ export component SettingsScreen inherits VerticalLayout {
                 enabled: !Modal.open;
                 clicked => {
                     root.restore-all();
+                }
+            }
+        }
+
+        // Updates (design m5b E.2): the daily check, the last checks, and the way to the page.
+        Body {
+            text: @tr("Updates");
+            font-weight: 600;
+        }
+
+        CheckBox {
+            text: @tr("Check for updates automatically (once a day, MKLM asks GitHub)");
+            checked <=> root.update-auto-check;
+            enabled: !Modal.open;
+            toggled => {
+                root.update-auto-check-toggled(self.checked);
+            }
+        }
+
+        Caption {
+            text: root.update.last-check;
+        }
+
+        Caption {
+            text: root.update.last-success;
+        }
+
+        if root.update.stale != "": Banner {
+            text: root.update.stale;
+            tone: Tone.info;
+        }
+        if root.update.expired != "": Banner {
+            text: root.update.expired;
+            tone: Tone.info;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Button {
+                text: @tr("Check now");
+                enabled: root.update.can-check && !Modal.open;
+                clicked => {
+                    root.update-check-now();
+                }
+            }
+
+            Button {
+                text: @tr("Open the update page");
+                enabled: !Modal.open;
+                clicked => {
+                    root.open-update-page();
                 }
             }
         }

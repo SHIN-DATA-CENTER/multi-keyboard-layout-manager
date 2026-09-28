@@ -8,9 +8,10 @@ import { Modal } from "widgets.slint";
 import {
     BadgeVm, ChangeVm, ChoiceVm, CheckRowVm, ConflictKeyboardVm, CountdownVm, JournalRowVm,
     KeyboardRowVm, KeyTestVm, Overlay, PlanLineVm, ProgressVm, ReconnectVm, RecoveryItemVm,
-    RecoveryPageVm, ResultVm, Screen, StatusVm, Tone, UninstallRestoreVm, WizardKeyboardVm,
-    WizardVm,
+    RecoveryPageVm, ResultVm, Screen, StatusVm, Tone, UninstallRestoreVm, UpdateActionVm,
+    UpdateBannerVm, UpdatePageVm, UpdateResultVm, UpdateSettingsVm, WizardKeyboardVm, WizardVm,
 } from "structs.slint";
+import { UpdateHandOffDialog, UpdateResultDialog, UpdateScreen } from "screens/update.slint";
 import { MainScreen } from "screens/main.slint";
 import { WizardScreen } from "screens/wizard.slint";
 import { ChangeScreen, UacNoticeScreen } from "screens/change.slint";
@@ -267,6 +268,25 @@ export component AppWindow inherits Window {
     // One line per main third-party component: name and licence (design m3 B.15).
     in property <[string]> about-licences;
 
+    // --- Updates (design m5b E) ---
+    in property <UpdatePageVm> update-page;
+    in property <UpdateBannerVm> update-banner;
+    in-out property <bool> update-auto-check: true;
+    in property <UpdateSettingsVm> update-settings;
+    in property <string> handoff-title;
+    in property <string> handoff-message;
+    in property <UpdateResultVm> update-result;
+    // The index of "閉じる" in the result's actions (Esc).
+    in property <int> update-close-action;
+    // Before an update: how to check the prompt's program (design m5b E.4).
+    in property <string> uac-location-line;
+    // An update page, banner or result button (`vm::update::UpdateAction`).
+    callback update-action(int);
+    callback update-auto-check-toggled(bool);
+    callback update-check-now();
+    callback open-update-page();
+    callback handoff-ok();
+
     HorizontalLayout {
         // The navigation rail (design m3 B.0): 160 px when the window is narrow (large scale), up
         // to 200 px; the page takes most of any extra width.
@@ -341,6 +361,10 @@ export component AppWindow inherits Window {
                 identify-active: root.identify-active;
                 identify-announcement: root.identify-announcement;
                 show-hidden <=> root.show-hidden;
+                update-banner: root.update-banner;
+                update-action(index) => {
+                    root.update-action(index);
+                }
                 assign(id) => {
                     root.assign(id);
                 }
@@ -444,6 +468,7 @@ export component AppWindow inherits Window {
                 }
             }
             if root.screen == Screen.uac-notice: UacNoticeScreen {
+                location-line: root.uac-location-line;
                 go => {
                     root.uac-go();
                 }
@@ -582,6 +607,17 @@ export component AppWindow inherits Window {
                 long-countdown <=> root.settings-long-countdown;
                 show-hidden <=> root.show-hidden;
                 uninstall: root.settings-uninstall;
+                update-auto-check <=> root.update-auto-check;
+                update: root.update-settings;
+                update-auto-check-toggled(on) => {
+                    root.update-auto-check-toggled(on);
+                }
+                update-check-now => {
+                    root.update-check-now();
+                }
+                open-update-page => {
+                    root.open-update-page();
+                }
                 theme-selected(index) => {
                     root.theme-selected(index);
                 }
@@ -616,6 +652,12 @@ export component AppWindow inherits Window {
             if root.screen == Screen.about: AboutScreen {
                 version: root.about-version;
                 licences: root.about-licences;
+            }
+            if root.screen == Screen.update: UpdateScreen {
+                vm: root.update-page;
+                action(index) => {
+                    root.update-action(index);
+                }
             }
         }
     }
@@ -694,6 +736,20 @@ export component AppWindow inherits Window {
             root.quit-cancel();
         }
     }
+    if root.overlay == Overlay.update-hand-off: UpdateHandOffDialog {
+        title: root.handoff-title;
+        message: root.handoff-message;
+        ok => {
+            root.handoff-ok();
+        }
+    }
+    if root.overlay == Overlay.update-result: UpdateResultDialog {
+        vm: root.update-result;
+        close-action: root.update-close-action;
+        action(index) => {
+            root.update-action(index);
+        }
+    }
 }
 
 // The notification-area icon (plan 3.9). Slint's builtin `clicked` and `icon` are not exposed to
@@ -703,11 +759,14 @@ export component TrayIcon inherits SystemTrayIcon {
     in property <image> tray-image;
     in property <string> tray-tooltip: "MKLM";
     in property <bool> can-undo;
+    // An update is ready and nothing is under way (design m5b E.3).
+    in property <bool> can-update;
     icon: tray-image;
     tooltip: tray-tooltip;
     callback show-window();
     callback identify();
     callback undo-open();
+    callback update-open();
     callback quit-app();
     callback icon-clicked();
     clicked => {
@@ -734,6 +793,14 @@ export component TrayIcon inherits SystemTrayIcon {
             enabled: root.can-undo;
             activated => {
                 root.undo-open();
+            }
+        }
+
+        MenuItem {
+            title: @tr("Update MKLM…");
+            enabled: root.can-update;
+            activated => {
+                root.update-open();
             }
         }
 

@@ -5,6 +5,7 @@ item: The settings apply to every user of this PC.
 item: Each time a keyboard setting changes, Windows asks for administrator permission (MKLM is not code-signed yet, so the publisher shows as "Unknown").
 item: MKLM records the values before its first change; "Back to before MKLM" puts them back later.
 item: You can also finish without changing anything: choose "Set up later". The setup can be started again from Settings.
+item: MKLM checks GitHub for a new version once a day (you can turn this off in Settings).
 button: (Next)
 can next: true
 

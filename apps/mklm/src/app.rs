@@ -35,11 +35,12 @@ use crate::settings::{Settings, SettingsStore, load_or_default};
 use crate::single_instance::{self, Claim, InstanceService};
 use crate::state::{
     self, AppMsg, AppState, Effect, OverlayKind, Page, QuitAnswer, SessionId, SessionOutcome,
-    SessionPhase, SettingsMsg, WizardState,
+    SessionPhase, SettingsMsg, UpdateMsg, WizardState,
 };
 use crate::theme::{ResolvedTheme, ThemeMode, is_dark_rgb};
 use crate::tray;
 use crate::ui::{self, AppWindow, TrayIcon};
+use crate::update_worker::UpdateWorker;
 use crate::vm::keyboards::{KeyboardRow, MainInput, main_screen};
 use crate::vm::{self, ListOp, keytest, list_ops};
 use crate::watchers::Watchers;
@@ -108,23 +109,68 @@ fn not_launched(session: SessionId, message: String) -> AppMsg {
 
 /// A command from a second MKLM process (UI thread; design m3 F.1): `activate` shows the window
 /// without changing the page (review A8), `quit` quits as the tray's "終了" does. The reply is
-/// `busy` while the quit has to wait for a connected helper session (design m3 F.5). The update
-/// runner's `quit-if-idle` (design m5b E.4.1) is answered `busy` until WP-C implements it.
-fn instance_command(command: InstanceCommand) -> InstanceReply {
+/// `busy` while the quit has to wait for a connected helper session (design m3 F.5, m5b E.4.1).
+/// The update runner's `quit-if-idle` quits only when nothing is going on, and otherwise changes
+/// nothing (`state::quit_if_idle`, design m5b E.4.1); `received` is when the pipe thread got it.
+fn instance_command(command: InstanceCommand, received: Instant) -> InstanceReply {
     let message = match command {
         InstanceCommand::Activate => AppMsg::Activate,
         InstanceCommand::Quit => AppMsg::QuitRequested,
-        // Skeleton (M5b): WP-C implements `state::quit_if_idle` (design m5b E.4.1). Until then the
-        // update runner's command changes nothing and is answered `busy`.
-        InstanceCommand::QuitIfIdle => return InstanceReply::Busy,
+        InstanceCommand::QuitIfIdle => return quit_if_idle(received),
     };
     let quit_waits = current_app().is_some_and(|app| {
         app.state
             .try_borrow()
-            .is_ok_and(|state| matches!(state.session, SessionPhase::Running { .. }))
+            .is_ok_and(|state| state::quit_reply_waits(&state))
     });
     dispatch(message);
     single_instance::reply_for(command, quit_waits)
+}
+
+/// `quit-if-idle` on the UI thread: the decision and what it does in one place (design m5b
+/// E.4.1).
+fn quit_if_idle(received: Instant) -> InstanceReply {
+    let Some(app) = current_app() else {
+        return InstanceReply::Busy;
+    };
+    let decided = app.state.try_borrow_mut().ok().map(|mut state| {
+        state.now = Some(Instant::now());
+        state.now_unix = Some(unix_now());
+        state::quit_if_idle(&mut state, received)
+    });
+    let Some((effects, reply)) = decided else {
+        return InstanceReply::Busy;
+    };
+    log::info(format!("quit-if-idle from the update runner: {reply:?}"));
+    for effect in effects {
+        app.run(effect);
+    }
+    match reply {
+        state::InstanceReply::Ok => InstanceReply::Ok,
+        state::InstanceReply::Busy => InstanceReply::Busy,
+    }
+}
+
+/// Now in Unix seconds.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// Local time for the update texts (design m5b E.2): the machine's zone, UTC when it cannot be
+/// read.
+fn local_minute(unix: u64) -> vm::update::LocalMinute {
+    match mklm_win::time::local_time(mklm_core::Timestamp(unix.saturating_mul(1000))) {
+        Ok(local) => vm::update::LocalMinute {
+            year: i64::from(local.year),
+            month: u32::from(local.month),
+            day: u32::from(local.day),
+            hour: u32::from(local.hour),
+            minute: u32::from(local.minute),
+        },
+        Err(_) => vm::update::fixed_offset(0, unix),
+    }
 }
 
 /// Owns the window, the tray, the workers and the state (UI thread only).
@@ -161,6 +207,12 @@ struct Controller {
     /// An automated check (`--exit-after`): it only reads and never writes the user's HKCU, so
     /// the RunOnce rule is skipped also when the post-reboot check asks for it.
     automated: bool,
+    /// The update worker (design m5b E.1).
+    update_worker: Option<UpdateWorker>,
+    /// The next automatic update check (design m5b E.1).
+    check_timer: slint::Timer,
+    /// Closes the hand-off overlay (design m5b E.4).
+    handoff_timer: slint::Timer,
 }
 
 impl std::fmt::Debug for Controller {
@@ -175,6 +227,7 @@ impl Controller {
         let effects = {
             let mut state = self.state.borrow_mut();
             state.now = Some(std::time::Instant::now());
+            state.now_unix = Some(unix_now());
             state::update(&mut state, msg)
         };
         for effect in effects {
@@ -230,6 +283,16 @@ impl Controller {
                 log::info(format!("quit confirmation answered: {answer:?}"));
             }
             AppMsg::AutostartToggled(on) => log::info(format!("sign-in start switched: {on}")),
+            AppMsg::Update(UpdateMsg::UpdateNow) => log::info("update now: pressed"),
+            AppMsg::Update(UpdateMsg::AutoCheck(on)) => {
+                log::info(format!("automatic update checks switched: {on}"));
+            }
+            AppMsg::Update(UpdateMsg::SessionEnded { session, end }) if current(*session) => {
+                log::info(format!("update session {session} ended: {end:?}"));
+            }
+            AppMsg::Update(UpdateMsg::HandOffClosed) => {
+                log::info("the update was handed over; quitting");
+            }
             _ => {}
         }
     }
@@ -300,20 +363,106 @@ impl Controller {
                 self.render();
             }
             Effect::Journal(effect) => self.journal_ui.run(&self.window, &self.io, effect),
+            Effect::Update(task) => {
+                if let Some(worker) = &self.update_worker {
+                    worker.send(task);
+                }
+            }
+            Effect::CancelUpdateTask => {
+                if let Some(worker) = &self.update_worker {
+                    worker.cancel();
+                }
+            }
+            Effect::ScheduleUpdateCheck { after, jitter } => {
+                let delay = after + random_part(jitter);
+                log::info(format!("next update check in {} s", delay.as_secs()));
+                self.check_timer
+                    .start(slint::TimerMode::SingleShot, delay, || {
+                        dispatch(AppMsg::Update(UpdateMsg::CheckDue));
+                    });
+            }
+            Effect::StopUpdateCheck => self.check_timer.stop(),
+            Effect::StartUpdateSession {
+                session,
+                offer,
+                installer,
+            } => self.start_update_session(session, *offer, installer),
+            Effect::AfterUpdateRunOnce(_) if self.automated => {
+                log::info("automated check: the after-update RunOnce value is left alone");
+            }
+            Effect::AfterUpdateRunOnce(register) => {
+                self.io.send(IoTask::AfterUpdateRunOnce(register));
+            }
+            Effect::HandOffTimer(after) => {
+                self.handoff_timer
+                    .start(slint::TimerMode::SingleShot, after, || {
+                        dispatch(AppMsg::Update(UpdateMsg::HandOffClosed));
+                    });
+            }
         }
     }
 
-    /// The tray's tooltip and its "確認待ちの変更をすべて元に戻す…" item (design m3 B.16), also
-    /// while the window is hidden.
+    /// Starts an update session on a session worker (design m5b E.4), like `start_session`.
+    fn start_update_session(
+        &self,
+        session: SessionId,
+        offer: mklm_client::update::check::Offer,
+        installer: std::path::PathBuf,
+    ) {
+        use crate::state::update::UpdateSessionEnd;
+        if self
+            .session
+            .borrow()
+            .as_ref()
+            .is_some_and(|worker| !worker.finished())
+        {
+            log::warn(format!(
+                "update session {session}: not started, the previous session worker still runs"
+            ));
+            post(AppMsg::Update(UpdateMsg::SessionEnded {
+                session,
+                end: Box::new(UpdateSessionEnd::NotLaunched(LaunchError::Failed {
+                    kind: LaunchFailure::Setup,
+                    message: "the previous session worker still runs".into(),
+                })),
+            }));
+            return;
+        }
+        log::info(format!(
+            "update session {session}: starting ({})",
+            offer.verified.version
+        ));
+        let started = LaunchConfig::current(BUILD_ID, self.hwnd())
+            .map_err(|error| error.to_string())
+            .and_then(|launch| {
+                SessionWorker::start_update(session, offer, installer, launch)
+                    .map_err(|error| format!("the session worker could not start: {error}"))
+            });
+        match started {
+            Ok(worker) => *self.session.borrow_mut() = Some(worker),
+            Err(message) => post(AppMsg::Update(UpdateMsg::SessionEnded {
+                session,
+                end: Box::new(UpdateSessionEnd::NotLaunched(LaunchError::Failed {
+                    kind: LaunchFailure::Setup,
+                    message,
+                })),
+            })),
+        }
+    }
+
+    /// The tray's tooltip, its "確認待ちの変更をすべて元に戻す…" item (design m3 B.16) and its
+    /// "MKLM を更新…" item (design m5b E.3), also while the window is hidden.
     fn update_tray(&self) {
         let Ok(state) = self.state.try_borrow() else {
             return;
         };
+        let lang = state.lang.unwrap_or(Lang::Ja);
         let summary = state.read.as_ref().map(|read| &read.summary);
-        let tray_state = tray::tray_state(
-            summary,
-            state::navigation_enabled(&state),
-            state.lang.unwrap_or(Lang::Ja),
+        let (tooltip, can_update) = vm::update::tray(&state, lang);
+        let tray_state = tray::with_update(
+            tray::tray_state(summary, state::navigation_enabled(&state), lang),
+            tooltip,
+            can_update,
         );
         if let Some(tray) = self.tray.borrow().as_ref() {
             tray::update_tray(tray, &tray_state);
@@ -487,6 +636,7 @@ impl Controller {
         self.render_settings(&state, lang);
         self.render_change(&state, lang);
         self.render_session(&state, lang);
+        self.render_update(&state, lang);
         // The restart, post-reboot, conflict, history and recovery pages (also without a read:
         // they say what is missing).
         self.journal_ui.render(&self.window, &state);
@@ -754,7 +904,98 @@ impl Controller {
                 self.window
                     .set_quit_message(crate::i18n::quit_confirm(&names, lang).into());
             }
-            OverlayKind::None | OverlayKind::CloseNotice => {}
+            // The update overlays: `render_update`.
+            OverlayKind::None
+            | OverlayKind::CloseNotice
+            | OverlayKind::UpdateHandOff
+            | OverlayKind::UpdateResult => {}
+        }
+    }
+
+    /// Updates (design m5b E): the page, the banner, the settings section, the hand-off and the
+    /// result, and the UAC explanation's line before an update.
+    fn render_update(&self, state: &AppState, lang: Lang) {
+        let clock = |unix: u64| local_minute(unix);
+        let actions = |actions: Vec<vm::update::ActionView>| {
+            ModelRc::new(VecModel::from(
+                actions
+                    .into_iter()
+                    .map(|action| ui::UpdateActionVm {
+                        action: action.action.index(),
+                        text: action.text.into(),
+                        accessible_label: action.label.into(),
+                        primary: action.primary,
+                        enabled: action.enabled,
+                    })
+                    .collect::<Vec<_>>(),
+            ))
+        };
+        let strings = |lines: Vec<String>| {
+            ModelRc::new(VecModel::from(
+                lines
+                    .into_iter()
+                    .map(SharedString::from)
+                    .collect::<Vec<_>>(),
+            ))
+        };
+        let banner = vm::update::banner(state, lang).unwrap_or_default();
+        self.window.set_update_banner(ui::UpdateBannerVm {
+            text: banner.text.into(),
+            tone: tone(banner.tone),
+            actions: actions(banner.actions),
+        });
+        let section = vm::update::settings_section(state, &clock, lang);
+        self.window.set_update_auto_check(section.auto_check);
+        self.window.set_update_settings(ui::UpdateSettingsVm {
+            last_check: section.last_check.into(),
+            last_success: section.last_success.into(),
+            stale: section.stale.into(),
+            expired: section.expired.into(),
+            can_check: section.can_check,
+        });
+        self.window
+            .set_uac_location_line(vm::update::uac_location_line(state, lang).into());
+        if state.page == Page::Update {
+            let page = vm::update::update_page(state, &clock, lang);
+            let percent = page.progress.unwrap_or(0);
+            self.window.set_update_page(ui::UpdatePageVm {
+                title: page.title.into(),
+                status: page.status.into(),
+                tone: tone(page.tone),
+                version_line: page.version_line.into(),
+                published: page.published.into(),
+                links: actions(page.links),
+                progress_text: page.progress_text.into(),
+                progress_visible: page.progress.is_some(),
+                progress: percent as f32 / 100.0,
+                progress_label: page.progress_label.into(),
+                progress_announcement: page.progress_announcement.into(),
+                explanation: page.explanation.into(),
+                info: strings(page.info),
+                details: page.details.into(),
+                buttons: actions(page.buttons),
+            });
+        }
+        match state.overlay {
+            OverlayKind::UpdateHandOff => {
+                let (title, message) = vm::update::handoff(lang);
+                self.window.set_handoff_title(title.into());
+                self.window.set_handoff_message(message.into());
+            }
+            OverlayKind::UpdateResult => {
+                if let Some(result) = vm::update::result_overlay(state, lang) {
+                    self.window
+                        .set_update_close_action(vm::update::UpdateAction::Close.index());
+                    self.window.set_update_result(ui::UpdateResultVm {
+                        title: result.title.into(),
+                        message: result.message.into(),
+                        tone: tone(result.tone),
+                        details: result.details.into(),
+                        actions: actions(result.actions),
+                    });
+                }
+            }
+            _ => {}
         }
     }
 
@@ -832,7 +1073,18 @@ fn screen(page: Page) -> ui::Screen {
         Page::ImeHelp => ui::Screen::ImeHelp,
         Page::Settings => ui::Screen::Settings,
         Page::About => ui::Screen::About,
+        Page::Update => ui::Screen::Update,
     }
+}
+
+/// A random part of at most `jitter` (the schedule of the update checks, design m5b E.1:
+/// `mklm_win::session::random_bytes`; none when it fails).
+fn random_part(jitter: Duration) -> Duration {
+    let mut bytes = [0u8; 8];
+    if jitter.is_zero() || mklm_win::session::random_bytes(&mut bytes).is_err() {
+        return Duration::ZERO;
+    }
+    Duration::from_secs(u64::from_le_bytes(bytes) % (jitter.as_secs() + 1))
 }
 
 fn overlay(overlay: OverlayKind) -> ui::Overlay {
@@ -845,6 +1097,8 @@ fn overlay(overlay: OverlayKind) -> ui::Overlay {
         OverlayKind::RecoveryConfirm => ui::Overlay::RecoveryConfirm,
         OverlayKind::CloseNotice => ui::Overlay::CloseNotice,
         OverlayKind::QuitConfirm => ui::Overlay::QuitConfirm,
+        OverlayKind::UpdateHandOff => ui::Overlay::UpdateHandOff,
+        OverlayKind::UpdateResult => ui::Overlay::UpdateResult,
     }
 }
 
@@ -862,6 +1116,7 @@ fn page(screen: ui::Screen) -> Page {
         ui::Screen::ImeHelp => Page::ImeHelp,
         ui::Screen::Settings => Page::Settings,
         ui::Screen::About => Page::About,
+        ui::Screen::Update => Page::Update,
     }
 }
 
@@ -932,6 +1187,13 @@ pub fn run(args: Args) -> ExitCode {
                 early_lang,
             );
         }
+    }
+    // An update past `ready` waits for MKLM's programs to end (design m5b D.13 step 1): this start
+    // ends at once, before it becomes the instance or shows a window that would lock mklm.exe.
+    if args.start != StartMode::Quit
+        && let Some(code) = update_start_gate(&args)
+    {
+        return code;
     }
     // One GUI per session (design m3 F.1): a second start hands over and ends here, and so does
     // `--quit`. The guard holds the instance mutex until the process ends.
@@ -1038,8 +1300,26 @@ pub fn run(args: Args) -> ExitCode {
     // wizard is done; the first read of the journal shows the window when it needs the user
     // (design m3 F.2). `--post-reboot` with nothing to check is `--tray`: the first read opens
     // the check, in front, when there is one.
-    let start_hidden =
-        matches!(args.start, StartMode::Tray | StartMode::PostReboot) && settings.wizard.completed;
+    // `--after-update` too: the update worker's first answer shows the window when there is a
+    // result to show (design m5b E.5).
+    let start_hidden = matches!(
+        args.start,
+        StartMode::Tray | StartMode::PostReboot | StartMode::AfterUpdate
+    ) && settings.wizard.completed;
+    // Every helper session first reports the user's newest verified update information when the
+    // machine's record is behind (design m5b C.4); the answer is only logged (E.1).
+    let _ = mklm_client::session::set_trust_reporter(Box::new(
+        mklm_client::update::trust_report::CurrentUser {
+            on_answer: Some(log_trust_answer),
+        },
+    ));
+    let update_worker = match UpdateWorker::start(update_endpoints(&args)) {
+        Ok(worker) => Some(worker),
+        Err(error) => {
+            log::warn(format!("the update worker could not start: {error}"));
+            None
+        }
+    };
     let mut journal_pages = crate::state::JournalPages::default();
     journal_pages.post_reboot.requested = args.start == StartMode::PostReboot;
     // The first-run wizard opens until it is finished or skipped, `--tray` too (design m3 B.1).
@@ -1063,6 +1343,10 @@ pub fn run(args: Args) -> ExitCode {
             // cannot be told, the explanation is shown (harmless).
             elevated: elevation.unwrap_or(false),
             journal_pages,
+            update: crate::state::UpdateState {
+                after_update: args.start == StartMode::AfterUpdate,
+                ..crate::state::UpdateState::default()
+            },
             ..AppState::default()
         }),
         io,
@@ -1081,6 +1365,9 @@ pub fn run(args: Args) -> ExitCode {
         journal_ui: JournalUi::new(&window),
         wizard_ui: WizardUi::new(&window),
         automated: args.exit_after.is_some(),
+        update_worker,
+        check_timer: slint::Timer::default(),
+        handoff_timer: slint::Timer::default(),
     });
     APP.with(|app| *app.borrow_mut() = Some(controller.clone()));
     window.set_keyboards(ModelRc::from(controller.keyboards.clone()));
@@ -1156,6 +1443,8 @@ pub fn run(args: Args) -> ExitCode {
     }
 
     controller.run(Effect::Read);
+    // Updates: the environment, the records and what a start shows (design m5b D.13, E.1).
+    controller.run(Effect::Update(crate::state::UpdateTask::Start));
     if args.exit_after.is_none() {
         // The per-user writes of a start: the post-reboot RunOnce rule (design m2 C17, m3 A.4;
         // a restart may be pending from a change that did not register the check, from another
@@ -1179,8 +1468,11 @@ pub fn run(args: Args) -> ExitCode {
     // Tear down on the UI thread in a defined order (design m3 F.5): the tray first, so that it
     // leaves the taskbar corner; the watchers; the single-instance pipe. A running session
     // worker is left to finish by itself (its RunOnce rule runs before its end is posted). The
-    // I/O worker's queued writes get up to 1 s.
+    // I/O worker's queued writes get up to 1 s. A running check or download stops.
     controller.tray.borrow_mut().take();
+    if let Some(worker) = &controller.update_worker {
+        worker.cancel();
+    }
     *controller.watchers.borrow_mut() = Watchers::default();
     controller.instance.borrow_mut().take();
     if !reader::wait_for_writes(QUIT_IO_WAIT) {
@@ -1198,6 +1490,59 @@ pub fn run(args: Args) -> ExitCode {
             lang,
         ),
     }
+}
+
+/// The release endpoints: GitHub; in development builds with `--cfg mklm_update_dev` maybe a
+/// loopback rehearsal server (`--update-endpoint`, design m5b A.10, E.8).
+fn update_endpoints(args: &Args) -> mklm_update::url::Endpoints {
+    #[cfg(all(debug_assertions, mklm_update_dev))]
+    if let Some(base) = &args.update_endpoint {
+        match mklm_update::url::Endpoints::loopback(base) {
+            Ok(endpoints) => return endpoints,
+            Err(error) => log::warn(format!("--update-endpoint: {error}")),
+        }
+    }
+    let _ = args;
+    mklm_update::url::Endpoints::production()
+}
+
+/// The helper's answer to `RecordTrust` (design m5b C.4, E.1: logged only).
+fn log_trust_answer(reply: &mklm_ipc::UpdateMessage) {
+    log::info(format!("the helper answered the trust report: {reply:?}"));
+}
+
+/// The start while an update runs (design m5b D.13 step 1): `Some(exit code)` to end at once.
+/// Another session's update: this user's after-update value (unelevated) and `closed_by_update`
+/// first, so that the next start says why MKLM was away (FIX-VERIFICATION-9).
+fn update_start_gate(args: &Args) -> Option<ExitCode> {
+    use crate::state::update::{StartGate, start_gate};
+
+    let (record, view) = mklm_client::update::status::current_run()?;
+    let my_session = mklm_win::proc_identity::process_users()
+        .ok()
+        .and_then(|users| users.get(&std::process::id()).map(|user| user.session_id));
+    let gate = start_gate(&view, record.caller_session, my_session)?;
+    log::info(format!(
+        "an update to {} is running ({view:?}); MKLM does not start now ({gate:?})",
+        record.to_version
+    ));
+    if gate == StartGate::QuitAndRemember && args.exit_after.is_none() {
+        if matches!(mklm_win::elevation::is_elevated(), Ok(false)) {
+            crate::reader::after_update_run_once(true);
+        }
+        match mklm_win::ui::user_settings_dir() {
+            Ok(dir) => {
+                let (mut settings, loaded) = load_or_default(&dir);
+                settings.update.closed_by_update = Some(unix_now());
+                let mut store = SettingsStore::new(dir, loaded.is_err());
+                if let Err(error) = store.save(&settings) {
+                    log::warn(format!("saving the settings failed: {error}"));
+                }
+            }
+            Err(error) => log::warn(format!("no settings folder: {error}")),
+        }
+    }
+    Some(ExitCode::SUCCESS)
 }
 
 /// The shell window's broadcasts (UI thread, inside its window procedure; design m3 A.4 rule 3).
@@ -1232,7 +1577,11 @@ fn shell_event(event: mklm_win::ui::shell_window::ShellEvent) {
                 }
             });
         }
-        ShellEvent::Resumed => post(AppMsg::Refresh),
+        ShellEvent::Resumed => {
+            post(AppMsg::Refresh);
+            // A check whose time passed during sleep comes 30 s later (design m5b E.1).
+            post(AppMsg::Update(UpdateMsg::Resumed));
+        }
         // Directly: the cancel flag is an atomic outside any RefCell. A countdown is reverted at
         // the relay's next tick; a reconnect wait is left open (it stays waiting for the user).
         ShellEvent::QueryEndSession => {
@@ -1351,11 +1700,50 @@ fn wire_callbacks(window: &AppWindow) {
     window.on_uninstall_cancel(|| dispatch(AppMsg::Settings(SettingsMsg::UninstallCancel)));
     window.on_uninstall_confirm(|| dispatch(AppMsg::Settings(SettingsMsg::UninstallConfirm)));
     window.on_restore_all(|| dispatch(AppMsg::Settings(SettingsMsg::RestoreAll)));
+    wire_updates(window);
     wire_change_flow(window);
     // The restart, post-reboot, conflict, history and recovery pages.
     crate::journal_ui::wire(window);
     // The first-run wizard, and Settings' "初回セットアップをもう一度行う" (WP-U2).
     crate::wizard_ui::wire(window);
+}
+
+/// The update callbacks (design m5b E): the page's, the banner's and the result's buttons, the
+/// settings section, the hand-off's "OK".
+fn wire_updates(window: &AppWindow) {
+    use vm::update::UpdateAction;
+    window.on_update_action(|index| {
+        let Some(action) = UpdateAction::from_index(index) else {
+            return;
+        };
+        let from_result = current_app().is_some_and(|app| {
+            app.state
+                .try_borrow()
+                .is_ok_and(|state| state.overlay == OverlayKind::UpdateResult)
+        });
+        match action {
+            // Out of the result, to the page's button (which decides whether it can).
+            UpdateAction::UpdateNow if from_result => {
+                dispatch(AppMsg::Update(UpdateMsg::ResultClosed));
+                dispatch(AppMsg::Update(UpdateMsg::OpenPage));
+                dispatch(AppMsg::Update(UpdateMsg::UpdateNow));
+            }
+            // The result's other buttons act on what it shows, then close it ("詳細をコピー"
+            // keeps it open).
+            UpdateAction::Close | UpdateAction::CopyDetails => {
+                dispatch(AppMsg::Update(action.message()));
+            }
+            _ if from_result => {
+                dispatch(AppMsg::Update(action.message()));
+                dispatch(AppMsg::Update(UpdateMsg::ResultClosed));
+            }
+            _ => dispatch(AppMsg::Update(action.message())),
+        }
+    });
+    window.on_update_auto_check_toggled(|on| dispatch(AppMsg::Update(UpdateMsg::AutoCheck(on))));
+    window.on_update_check_now(|| dispatch(AppMsg::Update(UpdateMsg::CheckNow)));
+    window.on_open_update_page(|| dispatch(AppMsg::Update(UpdateMsg::OpenPage)));
+    window.on_handoff_ok(|| dispatch(AppMsg::Update(UpdateMsg::HandOffClosed)));
 }
 
 /// The change flow's callbacks (design m3 B.3 to B.7, B.17; WP-U3).

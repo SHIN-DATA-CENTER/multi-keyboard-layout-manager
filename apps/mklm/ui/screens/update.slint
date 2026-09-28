@@ -1,0 +1,176 @@
+// MKLM's updates (design m5b E.2 to E.7): the update page, the hand-off overlay and the result
+// overlay. Every text comes from Rust (src/vm/update.rs, src/i18n/update.rs); the buttons are a
+// model whose `action` index Rust gives back its meaning (`vm::update::UpdateAction`). The button
+// row stays outside the scrolling body (design m3 B.0, E.4).
+
+import { Button, CheckBox, ProgressIndicator } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { Tone, UpdateActionVm, UpdatePageVm, UpdateResultVm } from "../structs.slint";
+import {
+    Banner, Body, Caption, DialogBody, DialogButtons, DialogFrame, Modal, PageHeader,
+} from "../widgets.slint";
+
+// A row of update buttons; each raises `action(index)` (off under a dialog, design m3 E.1).
+export component UpdateActions inherits HorizontalLayout {
+    in property <[UpdateActionVm]> actions;
+    in property <bool> enabled: !Modal.open;
+    callback action(int);
+    spacing: 8px;
+    alignment: end;
+    for item in root.actions: Button {
+        text: item.text;
+        primary: item.primary;
+        enabled: item.enabled && root.enabled;
+        accessible-label: item.accessible-label;
+        clicked => {
+            root.action(item.action);
+        }
+    }
+}
+
+// The update page (design m5b E.2): not in the navigation rail; opened from the banner, the tray
+// and the settings page.
+export component UpdateScreen inherits VerticalLayout {
+    in property <UpdatePageVm> vm;
+    in-out property <bool> show-details: false;
+    callback action(int);
+    padding: 16px;
+    spacing: 12px;
+
+    PageHeader {
+        title: root.vm.title;
+    }
+
+    DialogBody {
+        if root.vm.status != "": Banner {
+            text: root.vm.status;
+            tone: root.vm.tone;
+            accessible-live-region: assertive;
+        }
+        if root.vm.version-line != "": Body {
+            text: root.vm.version-line;
+            font-weight: 600;
+        }
+        if root.vm.published != "" || root.vm.links.length > 0: HorizontalLayout {
+            spacing: 12px;
+            alignment: start;
+            if root.vm.published != "": Caption {
+                text: root.vm.published;
+                vertical-alignment: center;
+            }
+            for item in root.vm.links: Button {
+                text: item.text;
+                enabled: !Modal.open;
+                accessible-label: item.accessible-label;
+                clicked => {
+                    root.action(item.action);
+                }
+            }
+        }
+        if root.vm.progress-text != "": Body {
+            text: root.vm.progress-text;
+        }
+        if root.vm.progress-visible: ProgressIndicator {
+            progress: root.vm.progress;
+            accessible-label: root.vm.progress-label;
+        }
+        // Read out politely every 25 % (design m5b E.7); nothing to see.
+        if root.vm.progress-visible: Text {
+            text: root.vm.progress-announcement;
+            height: 0px;
+            opacity: 0;
+            accessible-live-region: polite;
+        }
+        if root.vm.explanation != "": Body {
+            text: root.vm.explanation;
+        }
+        for line in root.vm.info: Caption {
+            text: line;
+        }
+        if root.vm.details != "": CheckBox {
+            text: @tr("Show the technical details");
+            enabled: !Modal.open;
+            checked <=> root.show-details;
+        }
+        if root.show-details && root.vm.details != "": Caption {
+            text: root.vm.details;
+        }
+    }
+
+    UpdateActions {
+        actions: root.vm.buttons;
+        action(index) => {
+            root.action(index);
+        }
+    }
+}
+
+// The update was handed to the runner (design m5b E.4 step 3): "OK" at any time, or it closes by
+// itself after 15 s; MKLM quits either way. Read out assertively.
+export component UpdateHandOffDialog inherits DialogFrame {
+    in property <string> message;
+    callback ok();
+    description: message;
+    escape => {
+        root.ok();
+    }
+
+    DialogBody {
+        Body {
+            text: root.message;
+            accessible-live-region: assertive;
+        }
+    }
+
+    DialogButtons {
+        Button {
+            text: @tr("OK");
+            primary: true;
+            clicked => {
+                root.ok();
+            }
+        }
+    }
+}
+
+// An update's result, or the installed programs out of step (design m5b D.13, E.5, E.6).
+export component UpdateResultDialog inherits DialogFrame {
+    in property <UpdateResultVm> vm;
+    in-out property <bool> show-details: false;
+    // The index of "閉じる" (Esc).
+    in property <int> close-action;
+    callback action(int);
+    title: vm.title;
+    description: vm.message;
+    escape => {
+        root.action(root.close-action);
+    }
+
+    DialogBody {
+        Banner {
+            text: root.vm.message;
+            tone: root.vm.tone;
+            accessible-live-region: assertive;
+        }
+
+        if root.vm.details != "": CheckBox {
+            text: @tr("Show the technical details");
+            checked <=> root.show-details;
+        }
+        if root.show-details: Caption {
+            text: root.vm.details;
+        }
+    }
+
+    DialogButtons {
+        for item in root.vm.actions: Button {
+            text: item.text;
+            primary: item.primary;
+            enabled: item.enabled;
+            accessible-label: item.accessible-label;
+            clicked => {
+                root.action(item.action);
+            }
+        }
+    }
+}

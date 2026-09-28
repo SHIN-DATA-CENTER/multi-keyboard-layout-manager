@@ -10,7 +10,11 @@
 //! 3. The instance serves the pipe ([`InstanceService`]) on a thread named `mklm-instance` (a
 //!    squatted pipe name is logged; MKLM runs without the pipe): `Activate` → `AppMsg::Activate`
 //!    (show, focus, `Read`; the page is never changed here), reply `Ok`; `Quit` →
-//!    `AppMsg::QuitRequested`, reply `Busy` while the quit waits for a running session, else `Ok`.
+//!    `AppMsg::QuitRequested`, reply `Busy` while the quit waits for a running session, else `Ok`;
+//!    `QuitIfIdle` (the update runner's only command, design m5b E.4.1) →
+//!    `state::quit_if_idle`, which quits only when nothing is going on and otherwise changes
+//!    nothing (`Busy`). The handler gets the time the command arrived: one that reaches the UI
+//!    thread after [`UI_REPLY_WAIT`] is ignored, since nobody waits for its reply any more.
 //!
 //! `--post-reboot` needs nothing of its own here: the running instance reads the journal and
 //! shows the post-reboot check (or the recovery) when the next `SystemRead` says it is due
@@ -22,7 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mklm_win::instance::{
     InstanceCommand, InstanceGuard, InstanceReply, InstanceRole, InstanceServer, acquire_instance,
@@ -44,7 +48,7 @@ const POLL: Duration = Duration::from_millis(500);
 /// before the window, the tray and the watchers are built: a command that arrives then waits in
 /// Slint's queue until the event loop runs, so this covers the rest of the start-up too, and
 /// stays below the client's wait so that the reply still reaches it.
-const UI_REPLY_WAIT: Duration = Duration::from_secs(4);
+pub const UI_REPLY_WAIT: Duration = Duration::from_secs(4);
 
 /// Consecutive pipe failures after which the instance stops serving the pipe (logged).
 const MAX_PIPE_FAILURES: u32 = 10;
@@ -172,9 +176,9 @@ pub struct InstanceService {
 
 impl InstanceService {
     /// Creates the pipe and serves it on its own thread; `handle` runs on the UI thread for each
-    /// command and returns the reply. `None` (logged) when the pipe or the thread cannot be
-    /// created: MKLM then runs without it.
-    pub fn start(handle: fn(InstanceCommand) -> InstanceReply) -> Option<Self> {
+    /// command, with the time the pipe thread received it, and returns the reply. `None` (logged)
+    /// when the pipe or the thread cannot be created: MKLM then runs without it.
+    pub fn start(handle: fn(InstanceCommand, Instant) -> InstanceReply) -> Option<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let spawned = thread::Builder::new()
@@ -211,7 +215,7 @@ impl Drop for InstanceService {
 fn serve(
     mut server: InstanceServer,
     stop: &AtomicBool,
-    handle: fn(InstanceCommand) -> InstanceReply,
+    handle: fn(InstanceCommand, Instant) -> InstanceReply,
 ) {
     let mut failures = 0u32;
     while !stop.load(Ordering::SeqCst) {
@@ -231,9 +235,10 @@ fn serve(
         };
         failures = 0;
         log::info(format!("received {command:?} from a second MKLM"));
+        let received = Instant::now();
         let (sender, receiver) = mpsc::channel();
         let posted = slint::invoke_from_event_loop(move || {
-            let _ = sender.send(handle(command));
+            let _ = sender.send(handle(command, received));
         });
         // No answer when the UI is gone (MKLM is quitting) or stuck: the client then runs by
         // itself instead of trusting a reply for a window that will not come.
@@ -258,7 +263,14 @@ mod tests {
     #[test]
     fn commands_and_replies() {
         assert_eq!(command_for(StartMode::Quit), InstanceCommand::Quit);
-        for start in [StartMode::Window, StartMode::Tray, StartMode::PostReboot] {
+        // The UI thread ignores a `quit-if-idle` older than this (design m5b E.4.1).
+        assert_eq!(UI_REPLY_WAIT, crate::state::update::QUIT_IF_IDLE_WAIT);
+        for start in [
+            StartMode::Window,
+            StartMode::Tray,
+            StartMode::PostReboot,
+            StartMode::AfterUpdate,
+        ] {
             assert_eq!(command_for(start), InstanceCommand::Activate);
         }
         assert_eq!(
