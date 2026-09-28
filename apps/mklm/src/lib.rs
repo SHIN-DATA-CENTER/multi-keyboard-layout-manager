@@ -24,6 +24,7 @@ pub mod i18n;
 pub mod icon;
 pub mod icon_image;
 pub mod log;
+pub mod models;
 pub mod settings;
 pub mod state;
 pub mod theme;

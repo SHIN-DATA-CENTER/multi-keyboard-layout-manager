@@ -40,8 +40,11 @@ pub const CONNECT_RETRY: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(500);
 
 /// How long the pipe thread waits for the UI thread to handle a command (the client waits
-/// [`CONNECT_RETRY`] for the reply).
-const UI_REPLY_WAIT: Duration = Duration::from_secs(3);
+/// [`CONNECT_RETRY`] for the reply). The pipe is served from the moment the Slint backend exists,
+/// before the window, the tray and the watchers are built: a command that arrives then waits in
+/// Slint's queue until the event loop runs, so this covers the rest of the start-up too, and
+/// stays below the client's wait so that the reply still reaches it.
+const UI_REPLY_WAIT: Duration = Duration::from_secs(4);
 
 /// Consecutive pipe failures after which the instance stops serving the pipe (logged).
 const MAX_PIPE_FAILURES: u32 = 10;

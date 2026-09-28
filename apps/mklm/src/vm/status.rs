@@ -431,7 +431,7 @@ mod tests {
         );
         assert_eq!(
             line.mode_note,
-            "すべてのキーボードが JIS として動きます。ほかの配列のキーボードは、その行の［変更…］で変えられます"
+            "すべてのキーボードが JIS として動きます。ほかの配列のキーボードは、その行の［変更…］で変えられます。"
         );
         for text in [&line.sign_in, &line.mode_note, &line.input_method] {
             assert!(crate::vm::unexpected_latin(text, &[]).is_empty(), "{text}");

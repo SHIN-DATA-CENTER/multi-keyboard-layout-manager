@@ -931,8 +931,11 @@ fn migration_parts(ctx: &SummaryContext<'_>, page: &mut WizardPage) {
             page.can_next = false;
         }
         MigrationStatus::Failed(failure) => {
-            page.note =
-                i18n::prepare_failed(matches!(failure, PrepareFailure::Incomplete(_)), lang);
+            page.note = i18n::prepare_failed(
+                matches!(failure, PrepareFailure::Incomplete(_)),
+                i18n::PreparePlace::Wizard,
+                lang,
+            );
             page.note_tone = Tone::Warning;
             page.details.push(failure.diagnostic().to_string());
             page.can_next = false;

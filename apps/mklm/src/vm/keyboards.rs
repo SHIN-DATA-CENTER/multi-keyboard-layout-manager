@@ -59,6 +59,9 @@ pub struct KeyboardRow {
     pub blocked_note: String,
     /// The accessible label of the row's "変更…" button ("Keychron Receiver の配列を変更").
     pub assign_label: String,
+    /// The accessible label of the row's "今すぐ反映…" button ("Keychron Receiver の配列を今すぐ
+    /// 反映"; design m3 E.2): several rows may offer it.
+    pub apply_now_label: String,
     pub accessible_summary: String,
 }
 
@@ -269,6 +272,7 @@ pub fn keyboard_rows(
             can_assign,
             blocked_note,
             assign_label: i18n::assign_label(&group.display_name, lang),
+            apply_now_label: i18n::apply_now_label(&group.display_name, lang),
             accessible_summary: i18n::summary_join(&summary, lang),
         });
     }
@@ -505,6 +509,9 @@ impl SnapshotText for MainScreen {
                 "  reader: {}\n  button: {}\n",
                 row.accessible_summary, row.assign_label
             ));
+            if row.apply_now {
+                text.push_str(&format!("  apply-now button: {}\n", row.apply_now_label));
+            }
         }
         text
     }

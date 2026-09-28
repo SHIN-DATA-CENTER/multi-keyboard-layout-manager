@@ -339,7 +339,7 @@ mod tests {
              3f2a9c1e 2026/09/27 13:30 | Keychron Receiver を US に | このままにしました (Success) \
              [2026/09/27 13:30 の変更を元に戻す]\n\
              1ef48b2f 2026/09/27 13:20 | Keychron Receiver を JIS に | 元に戻しました (Warning) \
-             — 確定する前に MKLM が終了したため、元に戻しました\n"
+             — ［このままにする］が選ばれる前に MKLM が終了したため、元に戻しました\n"
         );
         for row in &ja.rows {
             for text in [&row.what, &row.state, &row.reason, &row.revert_label] {

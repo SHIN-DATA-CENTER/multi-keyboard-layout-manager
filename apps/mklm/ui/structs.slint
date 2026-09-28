@@ -92,6 +92,8 @@ export struct KeyboardRowVm {
     blocked-note: string,
     // The accessible label of "変更…" ("Keychron Receiver の配列を変更").
     assign-label: string,
+    // The accessible label of "今すぐ反映…" ("Keychron Receiver の配列を今すぐ反映").
+    apply-now-label: string,
     // One sentence with everything above, for screen readers (design m3 E.3).
     accessible-summary: string,
 }
@@ -116,12 +118,9 @@ export struct ChangeVm {
     title: string,
     // `PrepareChange` runs: "確認しています…".
     preparing: bool,
-    // The two apply methods (review U1): shown when the plan can reset in place.
+    // The two apply methods (review U1): shown when the plan can reset in place (their texts are
+    // the window's `change-method-choices`, a kept model).
     method-visible: bool,
-    live-text: string,
-    live-detail: string,
-    restart-text: string,
-    restart-detail: string,
     takes-effect: string,
     all-users-note: string,
     migration-note: string,
@@ -271,6 +270,9 @@ export struct RecoveryItemVm {
     // Waits for keep or revert: "このままにする" and "元に戻す…".
     can-keep: bool,
     can-revert: bool,
+    // Their accessible labels, naming the operation (design m3 E.2).
+    keep-label: string,
+    revert-label: string,
 }
 
 // The recovery page and its undo and revert previews (design m3 B.12): all but the items.
@@ -288,12 +290,9 @@ export struct RecoveryPageVm {
     // The line about the Windows prompt that follows (design m3 B.5).
     uac-line: string,
     empty-note: string,
-    // The two ways a HID keyboard takes the values back (design m3 B.5).
+    // The two ways a HID keyboard takes the values back (design m3 B.5); their texts are the
+    // window's `recovery-method-choices`, a kept model.
     method-visible: bool,
-    live-text: string,
-    live-detail: string,
-    later-text: string,
-    later-detail: string,
 }
 
 // "アンインストール時にキーボードの設定を元に戻す" on the settings page (plan 3.13, design m3

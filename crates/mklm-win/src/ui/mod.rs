@@ -162,42 +162,36 @@ pub fn open_settings_page(page: SettingsPage) -> Result<(), Error> {
     }
 }
 
-/// The levels below `%ProgramData%` of the folder with the offline recovery files (design m2
-/// G.1: Users may read it).
-const RECOVERY_FOLDER: [&str; 3] = ["SHIN DATA CENTER", "MKLM", "Recovery"];
-
 /// Opens `%ProgramData%\SHIN DATA CENTER\MKLM\Recovery` in Explorer (the history's
-/// "復旧用ファイルのフォルダーを開く", design m3 B.11). Only that folder: the path is built from the
-/// known-folder API and constants, and every level must be a plain directory, not a reparse point,
-/// so nothing but that folder is ever handed to `ShellExecuteW` (a folder opens in Explorer; no
-/// program runs). Fails when the folder does not exist yet (the helper creates it with its first
-/// change). Blocking for a moment: call it off the UI thread.
+/// "復旧用ファイルのフォルダーを開く", design m3 B.11). Only that folder, and only as MKLM's: the
+/// path comes from the known-folder API and constants, and every level must pass the protected
+/// directory checks, read only (`protected_dir::verify_protected_dir`: not a reparse point, owner
+/// Administrators or SYSTEM, protected DACL, no write-type right for anyone else). A folder that
+/// another user created before MKLM's first elevated run, with files of their own in it
+/// (squatting), is therefore never shown as MKLM's recovery files ([`Error::Insecure`]). The
+/// levels stay pinned until `ShellExecuteExW` returns, and the path is opened with the `Folder`
+/// class, so it can only ever open as a folder in Explorer; no program runs. Fails when the folder
+/// does not exist yet (the helper creates it with its first change). Blocking for a moment: call
+/// it off the UI thread.
 pub fn open_recovery_folder() -> Result<(), Error> {
-    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::UI::Shell::{SEE_MASK_CLASSNAME, SHELLEXECUTEINFOW, ShellExecuteExW};
 
-    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-
-    let mut path = crate::protected_dir::program_data_dir()?;
-    for level in RECOVERY_FOLDER {
-        path.push(level);
-        let metadata = std::fs::symlink_metadata(&path).map_err(|error| Error::Win32 {
-            function: "GetFileAttributesExW",
-            code: error.raw_os_error().map_or(0, |code| code as u32),
-        })?;
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 || !metadata.is_dir() {
-            return Err(Error::Insecure {
-                path: path.display().to_string(),
-                reason: "not a plain directory".to_string(),
-            });
-        }
-    }
+    let (path, _pins) =
+        crate::protected_dir::verify_protected_dir(crate::protected_dir::DataDir::Recovery)?;
     let _com = ComApartment::enter();
     let folder = wide_os(path.as_os_str());
-    if shell_open(PCWSTR(folder.as_ptr()), PCWSTR::null(), PCWSTR::null()) {
-        Ok(())
-    } else {
-        Err(last_error("ShellExecuteW"))
-    }
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_CLASSNAME,
+        lpVerb: w!("open"),
+        lpFile: PCWSTR(folder.as_ptr()),
+        lpClass: w!("Folder"),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: `info` is fully initialised with its size; its strings are static literals or
+    // `folder`, which outlives the call.
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|error| win32("ShellExecuteExW", &error))
 }
 
 /// `ShellExecuteW(open)`; true on success.

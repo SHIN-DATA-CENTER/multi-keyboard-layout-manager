@@ -170,14 +170,35 @@ pub fn input_methods() -> InputMethods {
 /// `(value name, JSON)` pairs of one journal sub-key, as `Journal::parse` takes them.
 pub type StoredDocuments = Vec<(String, String)>;
 
-/// Two operations and the two baselines as the development machine stores them after the M2
-/// real-machine tests (`HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Journal`, schema 1, copied from
-/// `mklm-cli journal --json`): the Keychron set to JIS, kept, reverted into a conflict and
-/// resolved by keeping the outside values (R6, `Failed`), then set to US and kept (`Confirmed`,
-/// the latest record of both values). `(value name, JSON)` of `Ops` and of `Baselines`, exactly
-/// as the store holds them (design m3 WP-E1: journal schema 2 must read them).
+/// The nine operations and the two baselines as the development machine stores them after the
+/// M2 real-machine tests (`HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Journal`, schema 1, copied value
+/// by value from the store), in `seq` order, all changes of the Keychron:
+/// 1. set to JIS, the countdown ran out (`Reverted`, `CountdownExpired`);
+/// 2. and 3. set to JIS, kept, then reverted by the user (`Reverted`);
+/// 4. set to JIS, kept, reverted into a conflict and resolved by keeping the outside values
+///    (R6, `Failed`, `ConflictKeptCurrent`);
+/// 5. set to US and kept (`Confirmed`, the latest record of both values);
+/// 6. set to JIS, kept, reverted (`Reverted`);
+/// 7. the writer stopped before the keyboard reset; recovery put the values back (`Reverted`,
+///    `LiveResetUnconfirmed`, history reasons `recover:roll-back`);
+/// 8. and 9. the caller left during the countdown (`Reverted`, `CallerDisconnected`).
+///
+/// `(value name, JSON)` of `Ops` and of `Baselines`, exactly as the store holds them (design m3
+/// WP-E1: journal schema 2 must read them).
 pub fn schema_1_journal() -> (StoredDocuments, StoredDocuments) {
     let ops = [
+        (
+            "bfaca7cd-fdef-4dd0-8d75-6f311d32bc37",
+            include_str!("../testdata/journal/schema-1/bfaca7cd-fdef-4dd0-8d75-6f311d32bc37.json"),
+        ),
+        (
+            "1c2cc975-6a72-483e-8d18-f63485bc0739",
+            include_str!("../testdata/journal/schema-1/1c2cc975-6a72-483e-8d18-f63485bc0739.json"),
+        ),
+        (
+            "75c67e35-e637-4428-9fcc-dec2f44ce8bd",
+            include_str!("../testdata/journal/schema-1/75c67e35-e637-4428-9fcc-dec2f44ce8bd.json"),
+        ),
         (
             "371b1633-53a1-4819-8cd1-6f94f9e0cf25",
             include_str!("../testdata/journal/schema-1/371b1633-53a1-4819-8cd1-6f94f9e0cf25.json"),
@@ -185,6 +206,22 @@ pub fn schema_1_journal() -> (StoredDocuments, StoredDocuments) {
         (
             "31f7f7bc-3939-403d-9290-ef1c17065d08",
             include_str!("../testdata/journal/schema-1/31f7f7bc-3939-403d-9290-ef1c17065d08.json"),
+        ),
+        (
+            "bc7cc73f-7fbd-48a6-9ac2-37a2df583783",
+            include_str!("../testdata/journal/schema-1/bc7cc73f-7fbd-48a6-9ac2-37a2df583783.json"),
+        ),
+        (
+            "8e9a9970-f7bf-46c7-b779-f914f17bd40d",
+            include_str!("../testdata/journal/schema-1/8e9a9970-f7bf-46c7-b779-f914f17bd40d.json"),
+        ),
+        (
+            "1ef48b2f-8fca-4c9b-80f5-dfc0965c17a6",
+            include_str!("../testdata/journal/schema-1/1ef48b2f-8fca-4c9b-80f5-dfc0965c17a6.json"),
+        ),
+        (
+            "3fd933ac-d84e-423b-8820-832f8ce537ad",
+            include_str!("../testdata/journal/schema-1/3fd933ac-d84e-423b-8820-832f8ce537ad.json"),
         ),
     ]
     .into_iter()

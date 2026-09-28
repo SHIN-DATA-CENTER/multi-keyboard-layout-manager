@@ -140,6 +140,17 @@ impl IoWorker {
     }
 }
 
+/// A queued write, counted until it is done ([`wait_for_writes`]) — also when its task panics.
+struct PendingWrite(bool);
+
+impl Drop for PendingWrite {
+    fn drop(&mut self) {
+        if self.0 {
+            add_pending_write(-1);
+        }
+    }
+}
+
 fn run(tasks: Receiver<IoTask>, mut store: Option<SettingsStore>) {
     while let Ok(first) = tasks.recv() {
         // Merge reads that queued up behind each other. The batch is taken after every task in
@@ -153,77 +164,155 @@ fn run(tasks: Receiver<IoTask>, mut store: Option<SettingsStore>) {
         let mut result_read = false;
         for (index, task) in batch.into_iter().enumerate() {
             result_read |= matches!(task, IoTask::ReadForResult);
-            let writes = task.writes();
+            let _pending = PendingWrite(task.writes());
             match task {
-                IoTask::Read | IoTask::ReadForResult => {
-                    if !read_done {
-                        read_done = true;
-                        post(AppMsg::SystemRead(Box::new(read_system())));
-                    }
-                }
+                IoTask::Read | IoTask::ReadForResult if read_done => continue,
+                IoTask::Read | IoTask::ReadForResult => read_done = true,
                 // An older preparation: the page has moved on to a newer one.
-                IoTask::PrepareChange { .. } if Some(index) != last_prepare => {}
-                IoTask::PrepareChange { token, gate } => {
-                    let prepared = prepare_change(gate);
-                    post(AppMsg::ChangePrepared {
-                        token,
-                        at: Instant::now(),
-                        prepared: Box::new(prepared),
-                    });
-                }
-                IoTask::SaveSettings(settings) => {
-                    if let Some(store) = &mut store
-                        && let Err(error) = store.save(&settings)
-                    {
-                        // Kept in memory; the next change saves again.
-                        log::warn(format!(
-                            "saving the settings in {} failed: {error}",
-                            store.dir().display()
-                        ));
-                    }
-                }
-                IoTask::RunOnceRule => {
-                    // The pages warn when the check after the restart could not be registered.
-                    let outcome = mklm_client::run_once::apply_run_once_rule(
-                        mklm_client::run_once::PostRebootCommand::Gui,
-                    );
-                    log_run_once(&outcome);
-                    post(AppMsg::Journal(JournalMsg::RunOnceDone(outcome)));
-                }
-                IoTask::Autostart(task) => {
-                    post(AppMsg::AutostartRead(Box::new(autostart::run(task))));
-                }
-                IoTask::OpenSettingsPage(page) => {
-                    if let Err(error) = mklm_win::ui::open_settings_page(page) {
-                        log::warn(format!("opening {page:?} failed: {error}"));
-                    }
-                }
-                IoTask::RestartPc => restart_pc(),
-                IoTask::OpenRecoveryFolder => {
-                    if mklm_win::ui::open_recovery_folder().is_err() {
-                        post(AppMsg::Journal(JournalMsg::RecoveryFolderFailed));
-                    }
-                }
-                IoTask::ReadNonKeyboardValues(keyboards) => {
-                    let found = read_non_keyboard_values(&keyboards);
-                    post(AppMsg::Wizard(WizardMsg::ForeignRead(found)));
-                }
-                IoTask::ReadMachineSettings => {
-                    let read = mklm_win::machine_settings::read_machine_settings()
-                        .map(|settings| settings.restore_on_uninstall)
-                        .map_err(|error| error.to_string());
-                    if let Err(error) = &read {
-                        log::warn(format!("reading the machine settings failed: {error}"));
-                    }
-                    post(AppMsg::Settings(SettingsMsg::MachineSettingsRead(read)));
-                }
+                IoTask::PrepareChange { .. } if Some(index) != last_prepare => continue,
+                _ => {}
             }
-            if writes {
-                add_pending_write(-1);
-            }
+            run_guarded(task, &mut store);
         }
         if result_read {
             post(AppMsg::ResultReadArrived);
+        }
+    }
+}
+
+/// Runs one task; a panic ends the task, not the worker (review of WP-U6, like the session
+/// worker's `EndGuard`): it is logged, and whoever waits for the task's answer gets a failure it
+/// already knows how to show ([`panic_reply`]), so that no page keeps waiting.
+fn run_guarded(task: IoTask, store: &mut Option<SettingsStore>) {
+    let reply = panic_reply(&task);
+    let name = task_name(&task);
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_task(task, store)));
+    if let Err(payload) = ran {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_string());
+        log::warn(format!("the I/O worker panicked in {name}: {message}"));
+        if let Some(reply) = reply {
+            post(reply);
+        }
+    }
+}
+
+/// The task's name for the log.
+fn task_name(task: &IoTask) -> &'static str {
+    match task {
+        IoTask::Read => "Read",
+        IoTask::ReadForResult => "ReadForResult",
+        IoTask::PrepareChange { .. } => "PrepareChange",
+        IoTask::SaveSettings(_) => "SaveSettings",
+        IoTask::RunOnceRule => "RunOnceRule",
+        IoTask::Autostart(_) => "Autostart",
+        IoTask::OpenSettingsPage(_) => "OpenSettingsPage",
+        IoTask::RestartPc => "RestartPc",
+        IoTask::OpenRecoveryFolder => "OpenRecoveryFolder",
+        IoTask::ReadNonKeyboardValues(_) => "ReadNonKeyboardValues",
+        IoTask::ReadMachineSettings => "ReadMachineSettings",
+    }
+}
+
+/// The answer to a task that panicked: the failure its requester shows for a failed read or
+/// write. `None` for tasks nobody waits for (saving settings, opening a settings page).
+fn panic_reply(task: &IoTask) -> Option<AppMsg> {
+    const FAILED: &str = "the I/O worker failed on this task";
+    Some(match task {
+        IoTask::Read | IoTask::ReadForResult => AppMsg::SystemRead(Box::new(SystemRead {
+            snapshot: None,
+            warnings: vec![FAILED.to_string()],
+            journal: None,
+            boot: None,
+            summary: Default::default(),
+        })),
+        IoTask::PrepareChange { token, .. } => AppMsg::ChangePrepared {
+            token: *token,
+            at: Instant::now(),
+            prepared: Box::new(Err(PrepareFailure::Read(FAILED.to_string()))),
+        },
+        IoTask::RunOnceRule => AppMsg::Journal(JournalMsg::RunOnceDone(Err(
+            mklm_client::run_once::RunOnceError::Check(FAILED.to_string()),
+        ))),
+        IoTask::Autostart(_) => AppMsg::AutostartRead(Box::new(autostart::AutostartReport {
+            state: Err(FAILED.to_string()),
+            write_error: None,
+        })),
+        IoTask::RestartPc => AppMsg::Journal(JournalMsg::RestartFailed(FAILED.to_string())),
+        IoTask::OpenRecoveryFolder => AppMsg::Journal(JournalMsg::RecoveryFolderFailed),
+        IoTask::ReadNonKeyboardValues(_) => {
+            AppMsg::Wizard(WizardMsg::ForeignRead(Err(FAILED.to_string())))
+        }
+        IoTask::ReadMachineSettings => {
+            AppMsg::Settings(SettingsMsg::MachineSettingsRead(Err(FAILED.to_string())))
+        }
+        IoTask::SaveSettings(_) | IoTask::OpenSettingsPage(_) => return None,
+    })
+}
+
+/// One task, as [`run`] hands it over (reads already merged, older preparations dropped).
+fn run_task(task: IoTask, store: &mut Option<SettingsStore>) {
+    match task {
+        IoTask::Read | IoTask::ReadForResult => {
+            post(AppMsg::SystemRead(Box::new(read_system())));
+        }
+        IoTask::PrepareChange { token, gate } => {
+            let prepared = prepare_change(gate);
+            post(AppMsg::ChangePrepared {
+                token,
+                at: Instant::now(),
+                prepared: Box::new(prepared),
+            });
+        }
+        IoTask::SaveSettings(settings) => {
+            if let Some(store) = store
+                && let Err(error) = store.save(&settings)
+            {
+                // Kept in memory; the next change saves again.
+                log::warn(format!(
+                    "saving the settings in {} failed: {error}",
+                    store.dir().display()
+                ));
+            }
+        }
+        IoTask::RunOnceRule => {
+            // The pages warn when the check after the restart could not be registered.
+            let outcome = mklm_client::run_once::apply_run_once_rule(
+                mklm_client::run_once::PostRebootCommand::Gui,
+            );
+            log_run_once(&outcome);
+            post(AppMsg::Journal(JournalMsg::RunOnceDone(outcome)));
+        }
+        IoTask::Autostart(task) => {
+            post(AppMsg::AutostartRead(Box::new(autostart::run(task))));
+        }
+        IoTask::OpenSettingsPage(page) => {
+            if let Err(error) = mklm_win::ui::open_settings_page(page) {
+                log::warn(format!("opening {page:?} failed: {error}"));
+            }
+        }
+        IoTask::RestartPc => restart_pc(),
+        IoTask::OpenRecoveryFolder => {
+            if let Err(error) = mklm_win::ui::open_recovery_folder() {
+                log::warn(format!("opening the recovery files folder failed: {error}"));
+                post(AppMsg::Journal(JournalMsg::RecoveryFolderFailed));
+            }
+        }
+        IoTask::ReadNonKeyboardValues(keyboards) => {
+            let found = read_non_keyboard_values(&keyboards);
+            post(AppMsg::Wizard(WizardMsg::ForeignRead(found)));
+        }
+        IoTask::ReadMachineSettings => {
+            let read = mklm_win::machine_settings::read_machine_settings()
+                .map(|settings| settings.restore_on_uninstall)
+                .map_err(|error| error.to_string());
+            if let Err(error) = &read {
+                log::warn(format!("reading the machine settings failed: {error}"));
+            }
+            post(AppMsg::Settings(SettingsMsg::MachineSettingsRead(read)));
         }
     }
 }
@@ -396,6 +485,50 @@ mod tests {
         assert!(!IoTask::OpenSettingsPage(SettingsPage::Taskbar).writes());
         // The GUI never writes the machine settings itself (the helper does).
         assert!(!IoTask::ReadMachineSettings.writes());
+    }
+
+    /// A task that panics is answered with a failure its page shows, so that nothing keeps
+    /// waiting (review of WP-U6); tasks nobody waits for get no answer.
+    #[test]
+    fn a_task_that_panics_is_answered_with_a_failure() {
+        assert!(matches!(
+            panic_reply(&IoTask::PrepareChange {
+                token: 7,
+                gate: Gate::Restore
+            }),
+            Some(AppMsg::ChangePrepared { token: 7, prepared, .. })
+                if matches!(*prepared, Err(PrepareFailure::Read(_)))
+        ));
+        assert!(matches!(
+            panic_reply(&IoTask::RestartPc),
+            Some(AppMsg::Journal(JournalMsg::RestartFailed(_)))
+        ));
+        assert!(matches!(
+            panic_reply(&IoTask::Read),
+            Some(AppMsg::SystemRead(read)) if read.snapshot.is_none() && !read.warnings.is_empty()
+        ));
+        assert!(matches!(
+            panic_reply(&IoTask::RunOnceRule),
+            Some(AppMsg::Journal(JournalMsg::RunOnceDone(Err(_))))
+        ));
+        assert!(matches!(
+            panic_reply(&IoTask::Autostart(AutostartTask::Read)),
+            Some(AppMsg::AutostartRead(report)) if report.state.is_err()
+        ));
+        assert!(matches!(
+            panic_reply(&IoTask::OpenRecoveryFolder),
+            Some(AppMsg::Journal(JournalMsg::RecoveryFolderFailed))
+        ));
+        assert!(matches!(
+            panic_reply(&IoTask::ReadMachineSettings),
+            Some(AppMsg::Settings(SettingsMsg::MachineSettingsRead(Err(_))))
+        ));
+        assert!(matches!(
+            panic_reply(&IoTask::ReadNonKeyboardValues(Vec::new())),
+            Some(AppMsg::Wizard(WizardMsg::ForeignRead(Err(_))))
+        ));
+        assert!(panic_reply(&IoTask::SaveSettings(Box::default())).is_none());
+        assert!(panic_reply(&IoTask::OpenSettingsPage(SettingsPage::Taskbar)).is_none());
     }
 
     #[test]

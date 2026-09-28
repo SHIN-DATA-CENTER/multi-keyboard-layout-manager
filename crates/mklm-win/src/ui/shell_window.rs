@@ -13,9 +13,10 @@ use std::sync::OnceLock;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, PBT_APMRESUMEAUTOMATIC, RegisterClassW,
-    RegisterWindowMessageW, WINDOW_STYLE, WM_CLOSE, WM_ENDSESSION, WM_POWERBROADCAST,
-    WM_QUERYENDSESSION, WM_SETTINGCHANGE, WNDCLASSW, WS_EX_TOOLWINDOW,
+    ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow, MSGFLT_ALLOW,
+    PBT_APMRESUMEAUTOMATIC, RegisterClassW, RegisterWindowMessageW, WINDOW_STYLE, WM_CLOSE,
+    WM_ENDSESSION, WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_SETTINGCHANGE, WNDCLASSW,
+    WS_EX_TOOLWINDOW,
 };
 use windows::core::{PCWSTR, w};
 
@@ -105,6 +106,14 @@ impl ShellWatcher {
             SINK.with(|s| s.borrow_mut().take());
             win32("CreateWindowExW", &error)
         })?;
+        // A GUI run as administrator (design m3 F.2) sits above Explorer's integrity level, and
+        // UIPI drops Explorer's registered `TaskbarCreated` broadcast to it unless the window lets
+        // that message through; the tray icon would then never come back after an Explorer
+        // restart. A no-op for an unelevated process; a failure costs only that re-creation.
+        // SAFETY: `hwnd` was just created by this thread; no filter-status structure is passed.
+        let _ = unsafe {
+            ChangeWindowMessageFilterEx(hwnd, taskbar_created_message(), MSGFLT_ALLOW, None)
+        };
         Ok(Self { hwnd })
     }
 }

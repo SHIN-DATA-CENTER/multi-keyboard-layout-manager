@@ -13,6 +13,10 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 
+# A list item (the wizard's lines, the restart reasons): the bullet is part of the text.
+msgid "• {}"
+msgstr "・{}"
+
 msgid "A US keyboard has no 半角/全角 key: turn the IME on and off with Alt+`. To use Ctrl+Space instead: Microsoft IME settings → Keys and touch customization → turn on \"Assign your preferred function to each key/key combination\" → Ctrl + Space: IME on/off."
 msgstr "US 配列のキーボードには「半角/全角」キーがありません。日本語入力のオン/オフは Alt+` です。Ctrl+Space を使うには: Microsoft IME の設定 → キーとタッチのカスタマイズ → 「各キー/キーの組み合わせに好みの機能を割り当てます」をオン → Ctrl + Space: IME-オン/オフ"
 
@@ -23,7 +27,7 @@ msgid "About"
 msgstr "このアプリについて"
 
 msgid "After a keyboard switches, MKLM puts it back unless you keep the new layout within 20 seconds; with this setting, within 60 seconds."
-msgstr "キーボードを切り替えた後、20 秒以内に「このままにする」を選ばないと、MKLM は元に戻します。この設定では 60 秒になります。"
+msgstr "キーボードを切り替えた後、20 秒以内に［このままにする］を選ばないと、MKLM は元に戻します。この設定では 60 秒になります。"
 
 msgid "Advanced keyboard settings"
 msgstr "キーボードの詳細設定"
@@ -119,7 +123,7 @@ msgid "If you cannot type at the sign-in screen: use the on-screen keyboard (the
 msgstr "サインイン画面で入力できないときは、スクリーン キーボード（右下のアクセシビリティ ボタン）を使うか、PIN や指紋でサインインするか、別のキーボードをつないでください。"
 
 msgid "If you choose Later, MKLM offers the recovery again; until then no keyboard's layout can be changed."
-msgstr "「後で」を選ぶと、MKLM が後でもう一度回復を案内します。それまで、キーボードの配列は変更できません。"
+msgstr "［後で］を選ぶと、MKLM が後でもう一度回復を案内します。それまで、キーボードの配列は変更できません。"
 
 msgid "If your password contains symbols: when the layout changes, the same keys type other symbols. Sign in with a PIN (digits), or set up a PIN before the restart."
 msgstr "パスワードに記号がある場合、配列が変わると同じキーで別の記号が入力されます。PIN（数字）でサインインするか、再起動の前に PIN を設定してください。"
@@ -278,7 +282,7 @@ msgid "Run the setup again…"
 msgstr "初回セットアップをもう一度行う…"
 
 msgid "Save your open files before you choose Restart now."
-msgstr "「今すぐ再起動」を押す前に、開いているファイルを保存してください。"
+msgstr "［今すぐ再起動］を押す前に、開いているファイルを保存してください。"
 
 msgid "Seconds left: {}"
 msgstr "残り {} 秒"

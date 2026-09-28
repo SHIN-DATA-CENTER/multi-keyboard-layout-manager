@@ -267,6 +267,39 @@ pub fn ensure_protected_dir(which: DataDir) -> Result<ProtectedDir, Error> {
     })
 }
 
+/// A protected directory as it stands, checked without creating, moving or writing anything: for
+/// the unelevated GUI, which shows the `Recovery` folder to the user (design m3 B.11). Every level
+/// from `SHIN DATA CENTER` down must exist and pass the validation of [`ensure_protected_dir`]
+/// (not a reparse point, owner Administrators or SYSTEM, protected DACL, no write-type right for
+/// anyone else), so that a folder another user created and filled before MKLM's first elevated run
+/// (squatting, module docs) is never presented as MKLM's. Users may open the levels with the
+/// pinning access (`BASE_DIR_SDDL` and `RECOVERY_DIR_SDDL` grant them `0x1200a9`).
+///
+/// Returns the path and the handles that pin `%ProgramData%` and every level (no
+/// `FILE_SHARE_DELETE`: while they are open, no level can be renamed or replaced); keep them until
+/// the path has been used. [`Error::Insecure`] names a level that fails; a missing level fails
+/// with the error of `CreateFileW`.
+pub fn verify_protected_dir(which: DataDir) -> Result<(PathBuf, Vec<OwnedHandle>), Error> {
+    let mut path = program_data_dir()?;
+    let mut handles = vec![open_program_data(&path)?];
+    for (name, _) in which.levels() {
+        path.push(name);
+        handles.push(verify_level(&path)?);
+    }
+    Ok((path, handles))
+}
+
+/// One level of [`verify_protected_dir`]: opened pinned and validated, never created or moved.
+fn verify_level(path: &Path) -> Result<OwnedHandle, Error> {
+    let handle = open(path, PIN_ACCESS, PIN_SHARE, None, OPEN_EXISTING, NO_FOLLOW)
+        .map_err(|error| win32("CreateFileW", &error))?;
+    validate(&handle, Kind::Directory, DIRECTORY_POLICY).map_err(|reason| Error::Insecure {
+        path: path.display().to_string(),
+        reason,
+    })?;
+    Ok(handle)
+}
+
 /// Opens `%ProgramData%` (following nothing) and checks that it is a plain directory.
 fn open_program_data(path: &Path) -> Result<OwnedHandle, Error> {
     let share = FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0);
@@ -764,6 +797,34 @@ mod tests {
         assert!(path.is_absolute(), "{}", path.display());
         assert!(path.is_dir(), "{}", path.display());
         assert!(open_program_data(&path).is_ok());
+    }
+
+    /// The `Recovery` folder the helper made on this machine verifies unelevated, read only (the
+    /// GUI's "復旧用ファイルのフォルダーを開く"). Needs a machine where MKLM already wrote a change.
+    #[test]
+    #[ignore = "needs %ProgramData%\\SHIN DATA CENTER\\MKLM\\Recovery made by the helper"]
+    fn the_recovery_folder_on_the_machine_verifies_unelevated() {
+        let (path, pins) = verify_protected_dir(DataDir::Recovery).expect("verified");
+        assert!(
+            path.ends_with(r"SHIN DATA CENTER\MKLM\Recovery"),
+            "{}",
+            path.display()
+        );
+        assert_eq!(pins.len(), 4, "%ProgramData% and three levels");
+    }
+
+    /// A folder any user could have created (owned by the user who runs the test, with the DACL
+    /// the temp folder hands down) is refused, and so is a missing one; nothing is created.
+    #[test]
+    fn a_folder_another_user_could_own_is_not_verified() {
+        let scratch = Scratch::new();
+        match verify_level(&scratch.0) {
+            Err(Error::Insecure { path, .. }) => assert_eq!(path, scratch.0.display().to_string()),
+            other => panic!("a user-owned folder was accepted: {other:?}"),
+        }
+        let missing = scratch.0.join("Recovery");
+        assert!(verify_level(&missing).is_err());
+        assert!(!missing.exists(), "the check creates nothing");
     }
 
     #[test]

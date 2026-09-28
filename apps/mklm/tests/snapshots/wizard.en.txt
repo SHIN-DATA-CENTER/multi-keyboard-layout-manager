@@ -133,7 +133,7 @@ note: ⓘ This setting applies to every user of this PC.
 standard: ◉ JIS (recommended: the current JIS)
 standard: ○ US
 migration: sign-in help
-note (Warning): Windows did not report every keyboard completely, so no change is possible now. Refresh and try again.
+note (Warning): Windows did not report every keyboard completely, so no change is possible now. Choose "Back", then "Next" again.
 details: devnode X: no driver
 button: Change (Windows asks next)
 can next: false

@@ -54,6 +54,15 @@ export component PageHeader inherits VerticalLayout {
     }
     spacing: 4px;
 
+    // Moves the focus to the title again: a page whose content changes in place (the wizard's
+    // steps) calls it, so that the new step is read from its title like a new page (design m3
+    // B.0, E.1; review U16).
+    public function focus-heading() {
+        if (!Modal.open) {
+            heading.focus();
+        }
+    }
+
     heading := FocusScope {
         enabled: !Modal.open;
         min-height: heading-layout.preferred-height;
@@ -139,7 +148,9 @@ export component StubNotice inherits Text {
 
 // Radio choices (design m3 E.1, E.2; review U16): one tab stop; the arrow keys move the
 // selection; ◉ / ○ and a filled background show the selection, a separate outer ring the focus.
-// Used for the layout choices and for the apply method (review U1).
+// Used for the layout choices and for the apply method (review U1). `label` is the group's
+// accessible name and, above the choices, its visible heading ("切り替え方", design m3 B.4), so
+// that sighted users see what the choices are for too.
 export component RadioList inherits Rectangle {
     in property <[ChoiceVm]> choices;
     in-out property <int> selected: -1;
@@ -147,7 +158,7 @@ export component RadioList inherits Rectangle {
     // Off under a dialog (design m3 E.1).
     in property <bool> enabled: !Modal.open;
     callback chosen(int);
-    min-height: list.preferred-height + 8px;
+    min-height: outer.preferred-height;
 
     function pick(index: int) {
         if (root.enabled && index >= 0 && index < root.choices.length && root.choices[index].enabled) {
@@ -171,84 +182,98 @@ export component RadioList inherits Rectangle {
         group.focus();
     }
 
-    group := FocusScope {
-        enabled: root.enabled;
-        accessible-role: AccessibleRole.radio-group;
-        accessible-label: root.label;
-        key-pressed(event) => {
-            if (event.text == Key.DownArrow || event.text == Key.RightArrow) {
-                root.step(1);
-                return accept;
-            }
-            if (event.text == Key.UpArrow || event.text == Key.LeftArrow) {
-                root.step(-1);
-                return accept;
-            }
-            if (event.text == " " && root.selected < 0) {
-                root.pick(0);
-                return accept;
-            }
-            reject
+    outer := VerticalLayout {
+        spacing: 2px;
+
+        // The group's name is read with the group; the heading is for the eyes.
+        if root.label != "": Text {
+            text: root.label;
+            font-size: Theme.font-body;
+            font-weight: 600;
+            color: Theme.text;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.none;
         }
 
-        list := VerticalLayout {
-            padding: 4px;
-            spacing: 6px;
-            for choice[index] in root.choices: Rectangle {
-                min-height: item.preferred-height;
-                border-radius: 6px;
-                background: index == root.selected ? Theme.selected-fill : transparent;
-                border-width: 1px;
-                border-color: Theme.border;
-                accessible-role: AccessibleRole.radio-button;
-                accessible-label: choice.text;
-                accessible-description: choice.detail;
-                accessible-checked: index == root.selected;
-                accessible-enabled: choice.enabled && root.enabled;
-
-                // The focus ring, outside the fill: on the selected choice (or the first).
-                Rectangle {
-                    x: -3px;
-                    y: -3px;
-                    width: parent.width + 6px;
-                    height: parent.height + 6px;
-                    border-radius: 8px;
-                    border-width: group.has-focus && (index == root.selected || (root.selected < 0 && index == 0)) ? Theme.focus-width : 0px;
-                    border-color: Theme.focus-ring;
+        group := FocusScope {
+            enabled: root.enabled;
+            accessible-role: AccessibleRole.radio-group;
+            accessible-label: root.label;
+            key-pressed(event) => {
+                if (event.text == Key.DownArrow || event.text == Key.RightArrow) {
+                    root.step(1);
+                    return accept;
                 }
-
-                TouchArea {
-                    enabled: choice.enabled && root.enabled;
-                    clicked => {
-                        root.pick(index);
-                        group.focus();
-                    }
+                if (event.text == Key.UpArrow || event.text == Key.LeftArrow) {
+                    root.step(-1);
+                    return accept;
                 }
+                if (event.text == " " && root.selected < 0) {
+                    root.pick(0);
+                    return accept;
+                }
+                reject
+            }
 
-                item := HorizontalLayout {
-                    padding: 8px;
-                    spacing: 8px;
-                    Text {
-                        text: index == root.selected ? "◉" : "○";
-                        font-size: Theme.font-body;
-                        color: index == root.selected ? Theme.selected-text : Theme.text;
-                        vertical-alignment: top;
-                        accessible-role: AccessibleRole.none;
+            list := VerticalLayout {
+                padding: 4px;
+                spacing: 6px;
+                for choice[index] in root.choices: Rectangle {
+                    min-height: item.preferred-height;
+                    border-radius: 6px;
+                    background: index == root.selected ? Theme.selected-fill : transparent;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    accessible-role: AccessibleRole.radio-button;
+                    accessible-label: choice.text;
+                    accessible-description: choice.detail;
+                    accessible-checked: index == root.selected;
+                    accessible-enabled: choice.enabled && root.enabled;
+
+                    // The focus ring, outside the fill: on the selected choice (or the first).
+                    Rectangle {
+                        x: -3px;
+                        y: -3px;
+                        width: parent.width + 6px;
+                        height: parent.height + 6px;
+                        border-radius: 8px;
+                        border-width: group.has-focus && (index == root.selected || (root.selected < 0 && index == 0)) ? Theme.focus-width : 0px;
+                        border-color: Theme.focus-ring;
                     }
 
-                    VerticalLayout {
-                        horizontal-stretch: 1;
+                    TouchArea {
+                        enabled: choice.enabled && root.enabled;
+                        clicked => {
+                            root.pick(index);
+                            group.focus();
+                        }
+                    }
+
+                    item := HorizontalLayout {
+                        padding: 8px;
+                        spacing: 8px;
                         Text {
-                            text: choice.text;
+                            text: index == root.selected ? "◉" : "○";
                             font-size: Theme.font-body;
-                            color: !choice.enabled ? Theme.text-disabled : (index == root.selected ? Theme.selected-text : Theme.text);
-                            wrap: word-wrap;
+                            color: index == root.selected ? Theme.selected-text : Theme.text;
+                            vertical-alignment: top;
                             accessible-role: AccessibleRole.none;
                         }
 
-                        if choice.detail != "": Caption {
-                            text: choice.detail;
-                            accessible-role: AccessibleRole.none;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Text {
+                                text: choice.text;
+                                font-size: Theme.font-body;
+                                color: !choice.enabled ? Theme.text-disabled : (index == root.selected ? Theme.selected-text : Theme.text);
+                                wrap: word-wrap;
+                                accessible-role: AccessibleRole.none;
+                            }
+
+                            if choice.detail != "": Caption {
+                                text: choice.detail;
+                                accessible-role: AccessibleRole.none;
+                            }
                         }
                     }
                 }
@@ -507,7 +532,9 @@ export component UacExplanation inherits VerticalLayout {
 }
 
 // The scrolling middle of a dialog or page: shrinks (down to a few lines) before anything else
-// does.
+// does. Its parts keep their own heights and stack at the top: the scroll area's viewport is at
+// least as tall as what is visible, and a stretching layout would hand the rest of that height
+// to the texts, banners and buttons of a short page.
 export component DialogBody inherits Rectangle {
     vertical-stretch: 1;
     preferred-height: content.preferred-height;
@@ -518,6 +545,7 @@ export component DialogBody inherits Rectangle {
         height: 100%;
         content := VerticalLayout {
             spacing: 8px;
+            alignment: start;
             @children
         }
     }

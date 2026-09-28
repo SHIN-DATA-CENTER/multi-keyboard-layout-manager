@@ -20,6 +20,79 @@ use crate::vm::test_journal::{BOOT, BUILT_IN, KEYCHRON, LATER_BOOT, entry, went_
 
 const JAPANESE: u32 = 0x0411_0411;
 
+/// A user who has read the standalone explanation of the Windows prompt before: the pages' own
+/// flows (the first prompt is `the_first_prompt_of_a_user_is_explained_first`).
+fn app() -> AppState {
+    let mut state = AppState::default();
+    state.settings.change.uac_notice_seen = true;
+    state
+}
+
+/// A countdown whose owner is gone, on the development machine with the Keychron at JIS: the
+/// recovery page opens by itself.
+fn recovery_page_with_a_lost_countdown(state: &mut AppState) {
+    let mut counting = entry(
+        "14141414-0000-4000-8000-000000000023",
+        33,
+        OpState::AwaitingConfirm,
+    );
+    went_through(&mut counting, OpState::Restarting);
+    went_through(&mut counting, OpState::AwaitingConfirm);
+    counting.countdown = Some(mklm_core::Countdown {
+        seconds: 20,
+        deadline: mklm_core::Timestamp(0),
+    });
+    update(state, read(journal(vec![counting]), BOOT, keychron_jis()));
+    assert_eq!(state.page, Page::Recovery);
+}
+
+/// Settings are per user, the journal per PC: another user's first prompt may come from the
+/// recovery page. It is explained on its own page first, as before a change (design m3 B.5,
+/// B.12; M2 R12); "キャンセル" goes back without a prompt, "確認画面へ進む" sends the request.
+#[test]
+fn the_first_prompt_of_a_user_is_explained_first() {
+    let mut state = AppState::default();
+    recovery_page_with_a_lost_countdown(&mut state);
+    let effects = journal_msg(&mut state, JournalMsg::RecoveryPrimary);
+    assert_eq!(effects, vec![Effect::Render]);
+    assert_eq!(state.page, Page::UacNotice);
+    assert_eq!(state.session, crate::state::SessionPhase::Idle);
+    // Cancel: back to the recovery page, nothing sent, the explanation still unread.
+    assert_eq!(
+        update(&mut state, AppMsg::CancelChange),
+        vec![Effect::Render]
+    );
+    assert_eq!(state.page, Page::Recovery);
+    assert!(!state.settings.change.uac_notice_seen);
+    assert!(state.journal_pages.waiting.is_none());
+    // Again, and on to the prompt: the request of the page starts from its page.
+    journal_msg(&mut state, JournalMsg::RecoveryPrimary);
+    assert_eq!(state.page, Page::UacNotice);
+    let effects = update(&mut state, AppMsg::UacGo);
+    assert!(
+        matches!(&effects[0], Effect::SaveSettings(saved) if saved.change.uac_notice_seen),
+        "{effects:?}"
+    );
+    assert!(matches!(
+        started(&effects),
+        Some((Request::Recover { .. }, _))
+    ));
+    assert_eq!(state.page, Page::Recovery);
+    // From now on, one line next to the button is enough.
+    let mut state = app();
+    recovery_page_with_a_lost_countdown(&mut state);
+    let effects = journal_msg(&mut state, JournalMsg::RecoveryPrimary);
+    assert!(started(&effects).is_some());
+    // An elevated GUI shows no prompt, so none is explained.
+    let mut elevated = AppState {
+        elevated: true,
+        ..AppState::default()
+    };
+    recovery_page_with_a_lost_countdown(&mut elevated);
+    let effects = journal_msg(&mut elevated, JournalMsg::RecoveryPrimary);
+    assert!(started(&effects).is_some());
+}
+
 fn read(journal: Journal, boot: BootId, snapshot: SystemSnapshot) -> AppMsg {
     let summary = summarize(&journal, boot, &|_: &ProcessIdentity| Liveness::Dead);
     AppMsg::SystemRead(Box::new(SystemRead {
@@ -90,7 +163,7 @@ fn key(state: &mut AppState, instance_id: &str, text: &str) -> Vec<Effect> {
 fn the_post_reboot_check_opens_in_front_once_and_waits_for_the_user() {
     let mut state = AppState {
         active_hkl: JAPANESE,
-        ..AppState::default()
+        ..app()
     };
     let pending = journal(vec![restart_change(OpState::PendingReboot)]);
     let effects = update(
@@ -128,7 +201,7 @@ fn the_post_reboot_check_opens_in_front_once_and_waits_for_the_user() {
 
 #[test]
 fn keep_and_revert_on_the_post_reboot_check() {
-    let mut state = AppState::default();
+    let mut state = app();
     let change = restart_change(OpState::PendingReboot);
     let op_id = change.op_id.clone();
     update(
@@ -162,7 +235,7 @@ fn keep_and_revert_on_the_post_reboot_check() {
 fn started_for_the_check_after_a_shutdown() {
     // `--post-reboot`, but the boot did not change (Fast Startup): the page says so, keep is
     // off, and the check is registered again (design m2 D.7 step 2, T-POST-3).
-    let mut state = AppState::default();
+    let mut state = app();
     state.journal_pages.post_reboot.requested = true;
     let effects = update(
         &mut state,
@@ -178,7 +251,7 @@ fn started_for_the_check_after_a_shutdown() {
     assert!(view.not_restarted && !view.can_keep);
     assert!(started(&journal_msg(&mut state, JournalMsg::PostRebootKeep)).is_none());
     // Without `--post-reboot` the same journal only needs the restart: no page of its own.
-    let mut plain = AppState::default();
+    let mut plain = app();
     update(
         &mut plain,
         read(
@@ -192,7 +265,7 @@ fn started_for_the_check_after_a_shutdown() {
 
 #[test]
 fn the_recovery_page_opens_once_per_entry_and_boot() {
-    let mut state = AppState::default();
+    let mut state = app();
     let written = entry("13131313-0000-4000-8000-000000000022", 32, OpState::Written);
     let interrupted = journal(vec![written]);
     // Every value at `intended` (R5: the writer stopped before the reset).
@@ -238,7 +311,7 @@ fn recovering_a_switched_keyboard_offers_the_method() {
     let now = Instant::now();
     let mut state = AppState {
         now: Some(now),
-        ..AppState::default()
+        ..app()
     };
     update(&mut state, AppMsg::PointerUsed(now));
     let mut counting = entry(
@@ -274,7 +347,7 @@ fn recovering_a_switched_keyboard_offers_the_method() {
     // Without recent input (or without a time) the safe way is preset: no reset in place.
     let mut quiet = AppState {
         page: Page::Journal,
-        ..AppState::default()
+        ..app()
     };
     update(&mut quiet, AppMsg::Navigate(Page::Recovery));
     assert_eq!(
@@ -285,7 +358,7 @@ fn recovering_a_switched_keyboard_offers_the_method() {
 
 #[test]
 fn restart_now_needs_the_acknowledgement_and_a_reason() {
-    let mut state = AppState::default();
+    let mut state = app();
     update(
         &mut state,
         read(
@@ -319,7 +392,7 @@ fn restart_now_needs_the_acknowledgement_and_a_reason() {
     assert!(!state.journal_pages.restart.restarting);
     assert!(state.journal_pages.restart.error.is_some());
     // No reason in the journal: never.
-    let mut idle = AppState::default();
+    let mut idle = app();
     update(
         &mut idle,
         read(Journal::default(), BOOT, fixtures::dev_machine()),
@@ -357,7 +430,7 @@ fn snapshot_8_2() -> SystemSnapshot {
 
 #[test]
 fn a_conflict_is_resolved_per_keyboard() {
-    let mut state = AppState::default();
+    let mut state = app();
     let conflict = conflict_entry_8_2();
     let op_id = conflict.op_id.clone();
     update(
@@ -436,7 +509,7 @@ fn a_conflict_is_resolved_per_keyboard() {
 
 #[test]
 fn the_history_reverts_through_its_preview() {
-    let mut state = AppState::default();
+    let mut state = app();
     let history = crate::vm::test_journal::history();
     update(&mut state, read(history, BOOT, fixtures::dev_machine()));
     update(&mut state, AppMsg::Navigate(Page::Journal));
@@ -494,7 +567,7 @@ fn the_history_reverts_through_its_preview() {
 fn keeping_a_change_that_needs_the_restart_goes_through_the_check() {
     // An AwaitingConfirm that took effect at the restart (after `RebootObserved`): kept only
     // after the check (design m2 D.6, review C2); a reconnect change is kept at once.
-    let mut state = AppState::default();
+    let mut state = app();
     let mut after_restart = restart_change(OpState::AwaitingConfirm);
     after_restart.boot_id = BOOT;
     let reconnect = {
@@ -551,7 +624,7 @@ fn keeping_a_change_that_needs_the_restart_goes_through_the_check() {
 
 #[test]
 fn a_hidden_start_shows_the_window_for_a_conflict() {
-    let mut state = AppState::default();
+    let mut state = app();
     update(
         &mut state,
         read(journal(vec![conflict_entry_8_2()]), BOOT, snapshot_8_2()),
@@ -568,7 +641,7 @@ fn a_hidden_start_shows_the_window_for_a_conflict() {
 
 #[test]
 fn the_run_once_rule_outcome_is_kept_for_the_pages() {
-    let mut state = AppState::default();
+    let mut state = app();
     journal_msg(
         &mut state,
         JournalMsg::RunOnceDone(Ok(mklm_client::run_once::RunOnceOutcome::TellUser)),
@@ -622,7 +695,7 @@ fn a_stopped_restore_is_sent_again_as_chosen() {
     // B.10, `ConflictPolicy::Report` then `Skip` / `Overwrite`).
     let mut state = AppState {
         lang: Some(Lang::Ja),
-        ..AppState::default()
+        ..app()
     };
     update(&mut state, read(Journal::default(), BOOT, snapshot_8_2()));
     let scope = RestoreScope::Device {
@@ -718,7 +791,7 @@ fn a_stopped_restore_is_sent_again_as_chosen() {
 #[test]
 fn undo_from_the_tray_waits_for_a_running_session() {
     // Review A2: while a UAC prompt is up, the tray's undo only brings the window back.
-    let mut state = AppState::default();
+    let mut state = app();
     update(
         &mut state,
         AppMsg::StartRequest {
@@ -742,7 +815,7 @@ fn undo_from_the_tray_waits_for_a_running_session() {
 
 #[test]
 fn a_restart_no_longer_needed_is_not_done() {
-    let mut state = AppState::default();
+    let mut state = app();
     update(
         &mut state,
         read(
@@ -770,7 +843,7 @@ fn a_hidden_start_shows_the_window_for_a_recovery_already_asked_about() {
     // `--tray` in a boot whose recovery prompt was shown before (design m3 F.2): the page does
     // not open again, but the window comes up with the banner.
     let written = entry("18181818-0000-4000-8000-000000000027", 36, OpState::Written);
-    let mut state = AppState::default();
+    let mut state = app();
     state.settings.recovery.prompted.push(PromptedEntry {
         op: written.op_id.to_string(),
         boot: BOOT.to_text(),

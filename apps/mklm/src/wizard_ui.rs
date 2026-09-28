@@ -10,15 +10,17 @@ use mklm_core::Layout;
 use slint::{Model, ModelRc, SharedString, VecModel};
 
 use crate::app::dispatch;
+use crate::models::KeptModel;
 use crate::state::{AppMsg, AppState, Page, WizardMsg};
 use crate::ui::{self, AppWindow};
 use crate::vm::wizard::{ProblemChoice, WizardKeyboard};
 use crate::vm::{self, ListOp, list_ops};
 
-/// The kept rows of step 3 (UI thread only).
+/// The kept rows of step 3 and the kept options of the standard layout (UI thread only).
 pub struct WizardUi {
     rows: Rc<VecModel<ui::WizardKeyboardVm>>,
     shown: RefCell<Vec<WizardKeyboard>>,
+    standard_choices: KeptModel<ui::ChoiceVm>,
 }
 
 impl std::fmt::Debug for WizardUi {
@@ -78,6 +80,7 @@ impl WizardUi {
         Self {
             rows,
             shown: RefCell::new(Vec::new()),
+            standard_choices: KeptModel::default(),
         }
     }
 
@@ -103,16 +106,18 @@ impl WizardUi {
             detect_verdict: page.detect.verdict.into(),
             detect_choose_text: page.detect.choose_text.into(),
             standard_visible: page.standard_visible,
-            standard_choices: ModelRc::new(VecModel::from(
-                page.standard_choices
-                    .into_iter()
-                    .map(|choice| ui::ChoiceVm {
-                        text: choice.text.into(),
-                        detail: choice.detail.into(),
-                        enabled: choice.enabled,
-                    })
-                    .collect::<Vec<_>>(),
-            )),
+            // Kept and updated in place: a render does not rebuild the radio buttons.
+            standard_choices: self
+                .standard_choices
+                .show(
+                    page.standard_choices
+                        .into_iter()
+                        .map(|choice| ui::ChoiceVm {
+                            text: choice.text.into(),
+                            detail: choice.detail.into(),
+                            enabled: choice.enabled,
+                        }),
+                ),
             migration: page.migration,
             autostart_visible: page.autostart_visible,
             busy: page.busy,

@@ -45,7 +45,7 @@ button: オンにする（次に Windows の確認が出ます）
 == sign-in start turned off in Task Manager, setting unreadable ==
 autostart: ☐
 autostart available: false
-autostart note: Windows のスタートアップ設定で無効になっています。タスク マネージャーの「スタートアップ アプリ」で有効にできます
+autostart note: Windows のスタートアップ設定で無効になっています。タスク マネージャーの「スタートアップ アプリ」で有効にできます。
 long countdown: ☐
 show hidden: ☐
 uninstall: アンインストール時にキーボードの設定を元に戻す: 不明
@@ -55,7 +55,7 @@ can change: false
 == an elevated MKLM: no prompt to explain ==
 autostart: ☐
 autostart available: true
-autostart note: 自動起動の設定を変更できませんでした
+autostart note: サインイン時の起動を変更できませんでした。もう一度切り替えるか、MKLM を開き直してから試してください。
 long countdown: ☐
 show hidden: ☐
 uninstall: アンインストール時にキーボードの設定を元に戻す: オン

@@ -299,10 +299,10 @@ pub fn check_migration_note(lang: Lang) -> String {
 pub fn check_keep_warning(name: &str, lang: Lang) -> String {
     match lang {
         Lang::Ja => {
-            format!("⚠ {name} が期待と違う配列で動いています。『元に戻す』をおすすめします")
+            format!("⚠ {name} が期待と違う配列で動いています。［元に戻す］をおすすめします。")
         }
         Lang::En => {
-            format!("⚠ {name} types a different layout than expected. Revert is recommended")
+            format!("⚠ {name} types a different layout than expected. Revert is recommended.")
         }
     }
 }
@@ -488,7 +488,7 @@ pub fn conflict_value_line(value: &ValueNumbers<'_>, lang: Lang) -> String {
 pub fn conflict_inv_ps2(names: &str, lang: Lang) -> String {
     match lang {
         Lang::Ja => format!(
-            "この選択では、配列が決まらない PS/2 キーボードが残ります（{names}）。PC 全体の設定を『変更前』に戻す（固定モードに戻す）か、［確認待ちの変更をすべて元に戻す…］を選んでください。"
+            "この選択では、配列が決まらない PS/2 キーボードが残ります（{names}）。PC 全体の設定を「変更前」に戻す（固定モードに戻す）か、［確認待ちの変更をすべて元に戻す…］を選んでください。"
         ),
         Lang::En => format!(
             "With these choices a PS/2 keyboard would be left without a fixed layout ({names}). Put the PC-wide settings back as before the change (fixed mode), or choose \"Undo every change waiting for you…\"."
@@ -584,6 +584,7 @@ pub fn history_unreadable(count: usize, lang: Lang) -> String {
         Lang::Ja => format!(
             "この MKLM では読めない記録が {count} 件あります。MKLM を更新してください。それまで、キーボードの配列は変更できません。"
         ),
+        Lang::En if count == 1 => "1 journal entry cannot be read by this MKLM. Update MKLM; until then no keyboard's layout can be changed.".to_string(),
         Lang::En => format!(
             "{count} journal entries cannot be read by this MKLM. Update MKLM; until then no keyboard's layout can be changed."
         ),
@@ -737,6 +738,23 @@ pub fn recovery_operation(what: &str, phase: &str, lang: Lang) -> String {
     match lang {
         Lang::Ja => format!("{what}（{phase}）"),
         Lang::En => format!("{what} ({phase})"),
+    }
+}
+
+/// The accessible label of an entry's "このままにする" on the recovery page (design m3 E.2):
+/// `operation` is [`recovery_operation`].
+pub fn recovery_keep_label(operation: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{operation}をこのままにする"),
+        Lang::En => format!("Keep: {operation}"),
+    }
+}
+
+/// The accessible label of an entry's "元に戻す…" on the recovery page (design m3 E.2).
+pub fn recovery_revert_label(operation: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{operation}を元に戻す…"),
+        Lang::En => format!("Revert…: {operation}"),
     }
 }
 

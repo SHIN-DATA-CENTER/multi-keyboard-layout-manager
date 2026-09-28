@@ -1731,14 +1731,69 @@ mod tests {
     #[test]
     fn the_schema_1_journal_of_the_development_machine_reads() {
         let (ops, baselines) = crate::fixtures::schema_1_journal();
-        assert_eq!((ops.len(), baselines.len()), (2, 2));
+        assert_eq!((ops.len(), baselines.len()), (9, 2));
         let journal = Journal::parse(&ops, &baselines);
         assert!(journal.unreadable.is_empty(), "{:?}", journal.unreadable);
-        assert_eq!(journal.entries.len(), 2);
+        assert_eq!(journal.entries.len(), 9);
         assert_eq!(journal.baselines.len(), 2);
-        let [failed, kept] = [&journal.entries[0], &journal.entries[1]];
+        let states: Vec<(u64, OpState, Option<FailureReason>)> = journal
+            .entries
+            .iter()
+            .map(|e| (e.seq, e.state, e.failure.clone()))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                (1, OpState::Reverted, Some(FailureReason::CountdownExpired)),
+                (2, OpState::Reverted, None),
+                (3, OpState::Reverted, None),
+                (4, OpState::Failed, Some(FailureReason::ConflictKeptCurrent)),
+                (5, OpState::Confirmed, None),
+                (6, OpState::Reverted, None),
+                (
+                    7,
+                    OpState::Reverted,
+                    Some(FailureReason::LiveResetUnconfirmed)
+                ),
+                (
+                    8,
+                    OpState::Reverted,
+                    Some(FailureReason::CallerDisconnected)
+                ),
+                (
+                    9,
+                    OpState::Reverted,
+                    Some(FailureReason::CallerDisconnected)
+                ),
+            ]
+        );
+        // The entry recovery closed: its last lines carry the recovery reason.
+        let recovered = &journal.entries[6];
+        assert_eq!(
+            recovered
+                .history
+                .iter()
+                .map(|h| (h.to, h.reason.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (OpState::Planned, "set-layout"),
+                (OpState::RevertPending, "recover:roll-back"),
+                (OpState::Reverted, "recover:roll-back"),
+            ]
+        );
+        assert!(
+            recovered
+                .history
+                .last()
+                .is_some_and(|h| h.reason.starts_with(crate::RECOVERY_REASON_PREFIX))
+        );
+        let left = &journal.entries[8];
+        assert_eq!(
+            left.history.last().map(|h| h.reason.as_str()),
+            Some("caller-disconnected")
+        );
+        let [failed, kept] = [&journal.entries[3], &journal.entries[4]];
         assert_eq!((failed.seq, failed.state), (4, OpState::Failed));
-        assert_eq!(failed.failure, Some(FailureReason::ConflictKeptCurrent));
         assert_eq!((kept.seq, kept.state), (5, OpState::Confirmed));
         assert!(journal.entries.iter().all(|e| e.schema_version == 1));
         assert!(journal.baselines.iter().all(|b| b.schema_version == 1));
@@ -1747,14 +1802,17 @@ mod tests {
             name: HID_TYPE.into(),
         };
         assert_eq!(journal.baseline(&key).unwrap().value, dword(4));
+        // The latest record is the last change, which the caller left (#9): put back to US.
         let (latest, latest_record) = journal.latest_record(&key).unwrap();
-        assert_eq!(latest.op_id, kept.op_id);
+        assert_eq!(latest.op_id, left.op_id);
         assert_eq!(latest_record.last_written, Some(dword(4)));
-        // Written back: still schema 1, the same document.
-        for (entry, (_, stored)) in journal.entries.iter().zip(&ops) {
+        // Written back: still schema 1, the same document, byte for byte, for every entry.
+        assert_eq!(journal.entries.len(), ops.len());
+        for (entry, (name, stored)) in journal.entries.iter().zip(&ops) {
+            assert_eq!(entry.op_id.as_str(), name);
             let json = entry.to_json().unwrap();
             assert!(json.starts_with("{\"schema_version\":1,"), "{json}");
-            assert_eq!(json, *stored);
+            assert_eq!(json, *stored, "{name}");
         }
         for (baseline, (name, stored)) in journal.baselines.iter().zip(&baselines) {
             assert_eq!(baseline.key.canonical(), *name);
@@ -1765,7 +1823,7 @@ mod tests {
         }
         // A cleanup added next to them is schema 2; the old entries are untouched.
         let mut cleanup = entry(
-            6,
+            10,
             cleanup_kind(PS2),
             OpState::AwaitingConfirm,
             vec![record(device(PS2), HID_TYPE, dword(7), RegValue::Absent)],
@@ -1775,7 +1833,17 @@ mod tests {
         ops.push((cleanup.op_id.to_string(), cleanup.to_json().unwrap()));
         let journal = Journal::parse(&ops, &baselines);
         assert!(journal.unreadable.is_empty());
-        assert_eq!(journal.entries[2].schema_version, JOURNAL_SCHEMA_VERSION);
+        assert_eq!(
+            journal.entry(&cleanup.op_id).map(|e| e.schema_version),
+            Some(JOURNAL_SCHEMA_VERSION)
+        );
+        assert!(
+            journal
+                .entries
+                .iter()
+                .filter(|e| e.op_id != cleanup.op_id)
+                .all(|e| e.schema_version == 1)
+        );
     }
 
     /// A cleanup entry is written as schema 2, which a build of M2 (schema 1) reports as newer

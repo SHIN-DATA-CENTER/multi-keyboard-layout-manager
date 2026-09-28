@@ -195,7 +195,7 @@ impl Engine {
 - パイプに書くのは**書き込み専用のスレッド**だけ。エンジンのイベントはチャネル経由で渡し、要求の実行中は 10 秒ごとに `Event::Heartbeat` を送る。エンジンが `restart()` やロック待ちで止まっていても、呼び出し元は helper が生きていると分かる（S7）。
 - `dispatch` で、パイプの `Request` を 1 つずつエンジンの呼び出しに写す（S5）。
 - 終了する前に `WinDevices::join_pending` で、期限を過ぎたリセットのスレッドが終わるのを待つ（C18）。
-- **M3 から（m3 WP-E3）: セッション終了への備え。** 起動直後に `SetProcessShutdownParameters(0x100, SHUTDOWN_NORETRY)`（`mklm_win::session_end::shut_down_after_callers`）で、呼び出し元（既定の 0x280）より後に終了させられるようにする。ハンドシェイクの後、表示しないトップレベル ウィンドウを持つスレッド（`SessionEndWindow`）を作る。`WM_QUERYENDSESSION` では `mklm_engine::SessionEnd::query_end_session` を呼び、動いているカウントダウンを `RevertNow` と同じ扱いで戻す（各要求のシンクを `SessionEndSink` で包み、カウントダウン中の判断待ちを 100 ms ごとに区切って確かめる。呼び出し元が先に答えていれば何もしない）。戻した値が書かれてフラッシュされるまで最大 3 秒待って `TRUE` を返す。`WM_ENDSESSION(TRUE)` では戻しが終わるまで最大 3 秒待つ。終了に向かう間は `check_cancelled` が true になり、新しい書き込みもリセットも始めない。再接続待ちの変更は `AwaitingConfirm` のまま（D.2 b）。`WM_ENDSESSION(FALSE)`（終了が取り消された）で元に戻る。どちらの準備も失敗は無視する（パイプの切断と次回起動時の回復が残る）。
+- **M3 から（m3 WP-E3）: セッション終了への備え。** 起動直後に `SetProcessShutdownParameters(0x100, SHUTDOWN_NORETRY)`（`mklm_win::session_end::shut_down_after_callers`）で、呼び出し元（既定の 0x280）より後に終了させられるようにする。ハンドシェイクの後、表示しないトップレベル ウィンドウを持つスレッド（`SessionEndWindow`）を作る。`WM_QUERYENDSESSION` では `mklm_engine::SessionEnd::query_end_session` を呼び、動いているカウントダウンを `RevertNow` と同じ扱いで戻す（各要求のシンクを `SessionEndSink` で包み、カウントダウン中の判断待ちを 100 ms ごとに区切って確かめる。呼び出し元が先に答えていれば何もしない。届いている答えは、戻す前に 1 ms だけ読んで先に使う）。カウントダウンより前で書き込み中かリセット中の操作（`Planned` から `CountdownStarted` まで）も待つ。エンジンの取り消しの確認点でロールバックするか、始まったカウントダウンをすぐに戻す。戻した値が書かれてフラッシュされるか、操作が閉じるまで最大 3 秒待って `TRUE` を返す。`WM_ENDSESSION(TRUE)` では戻しが終わるまで最大 3 秒待つ。終了に向かう間は `check_cancelled` が true になり、新しい操作の書き込みも、変更を反映するためのリセットも始めない（カウントダウンを戻すときに元の配列を反映し直すリセットは行う）。再接続待ちの変更は `AwaitingConfirm` のまま（D.2 b）。`WM_ENDSESSION(FALSE)`（終了が取り消された）で元に戻る。どちらの準備も失敗は無視する（パイプの切断と次回起動時の回復が残る）。
 - 終了コードは E.8。
 
 ### A.7 mklm-cli
@@ -955,7 +955,7 @@ m3 A.5（WP-E1）の「削除する」。入力（`CleanupParams`）: `instance_
 4. `Written` → `AwaitingConfirm`（カウントダウンなし、`apply_pending` なし）→ 結果 `AwaitingConfirm`。利用者が `Confirm`（確定）か `Revert` / `undo` で決める。自動では確定しない。
 
 - 回復は `SetLayout` と同じ判定（`Planned` の途中ならロールバック、書き終えていれば `AwaitingConfirm` へロールフォワード）。取り消しは `Reverted`（再起動は要らない）。`apply_pending_on_close` は常に `None`、リセットの対象にもならない。
-- 読まれない値は起動時の値でもない: HID コレクション（`HID\…`）の `OverrideKeyboard*` は `ValueRecord::is_boot_time` が false。i8042prt の devnode の HID の名前は元から起動時の値ではない。したがって復旧用ファイルは必須にならない（書けなければ警告）。`plan_restore` は、キーボードのドライバーが読まない側の組も戻してよい名前に含め（`check_restore_record`）、INV-PS2 に関わる値としては数えない。「導入前に戻す」で読まれない値だけを戻す場合も `apply = None` で、確認待ちになる。
+- 読まれない値は起動時の値でもない: HID コレクション（`HID\…`）の `OverrideKeyboard*` は `ValueRecord::is_boot_time` が false。i8042prt の devnode の HID の名前は元から起動時の値ではない。したがって復旧用ファイルは必須にならない（書けなければ警告）。`plan_restore` は、キーボードのドライバーが読まない側の組も戻してよい名前に含め（`check_restore_record`）、INV-PS2 に関わる値としては数えない。「導入前に戻す」で読まれない値だけを戻す場合も `apply = None` で、確認待ちになる。どの種類の操作でも、読まれない値の記録のためにキーボードが反映待ち（`apply_pending`）になることはない（エンジンの `close_pending` が、`apply_pending_on_close` に渡す前にその記録を除く。回復で閉じる場合も同じ）。
 - ジャーナルの版は 2（C.10）。I1〜I7 のクラッシュの網羅テストに 4 つのシナリオ（削除、削除して確定、削除の取り消し、確定した削除の後の導入前に戻す）と I7 を足した。
 
 ### D.12 マシン全体の設定（`SetMachineSettings`。M3 で追加）

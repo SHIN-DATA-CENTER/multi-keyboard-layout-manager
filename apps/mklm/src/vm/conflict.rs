@@ -51,6 +51,9 @@ pub struct ConflictValue {
 /// One keyboard (or the PC-wide values) of the operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictKeyboard {
+    /// What the row stands for: the keyboard's instance ID, or empty for the PC-wide values. The
+    /// row's key in the displayed list (design m3 A.6): names can repeat, targets do not.
+    pub target: String,
     /// "Keychron Receiver", or "PC 全体の設定".
     pub name: String,
     /// "今の値: 不明な種類（8/2）— MKLM 以外が変更".
@@ -366,6 +369,7 @@ fn keyboard(
     let values = value_lines(records, indices, now, lang);
     let now_text = known.then(|| text::pair_name(now_pair, lang));
     ConflictKeyboard {
+        target: target_key(target),
         name: match target {
             WriteTarget::Device { instance_id } => name(instance_id),
             WriteTarget::Global => text::conflict_global_name(lang),
@@ -522,6 +526,7 @@ pub fn restore_conflict_page(
             put_back |= recommend(pair_type(now_pair.clone())) == ResolutionChoice::UseBefore;
             let numbers: Vec<usize> = indices.iter().map(|i| conflicts[*i].record).collect();
             ConflictKeyboard {
+                target: target_key(target),
                 name: match target {
                     WriteTarget::Device { instance_id } => name_of(instance_id),
                     WriteTarget::Global => text::conflict_global_name(lang),
@@ -568,6 +573,14 @@ pub fn restore_conflict_page(
             .iter()
             .position(|policy| *policy == selected)
             .unwrap_or(0),
+    }
+}
+
+/// [`ConflictKeyboard::target`] of `target`.
+fn target_key(target: &WriteTarget) -> String {
+    match target {
+        WriteTarget::Device { instance_id } => instance_id.clone(),
+        WriteTarget::Global => String::new(),
     }
 }
 
@@ -776,6 +789,7 @@ mod tests {
             ResolutionChoice::KeepCurrent
         );
         let keychron = ConflictKeyboard {
+            target: String::new(),
             name: "Keychron Receiver".into(),
             now: String::new(),
             options: vec![
@@ -981,7 +995,7 @@ mod tests {
                 &|_| "内蔵キーボード".into(),
                 Lang::Ja
             ),
-            "この選択では、配列が決まらない PS/2 キーボードが残ります（内蔵キーボード）。PC 全体の設定を『変更前』に戻す（固定モードに戻す）か、［確認待ちの変更をすべて元に戻す…］を選んでください。"
+            "この選択では、配列が決まらない PS/2 キーボードが残ります（内蔵キーボード）。PC 全体の設定を「変更前」に戻す（固定モードに戻す）か、［確認待ちの変更をすべて元に戻す…］を選んでください。"
         );
         assert_eq!(
             conflict_page(None, Vec::new(), None, &name_of, Lang::Ja).snapshot_text(),

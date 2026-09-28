@@ -45,7 +45,7 @@ button: Turn on (Windows asks next)
 == sign-in start turned off in Task Manager, setting unreadable ==
 autostart: ☐
 autostart available: false
-autostart note: Turned off in Windows' startup settings. You can turn it on under Startup apps in Task Manager
+autostart note: Turned off in Windows' startup settings. You can turn it on under Startup apps in Task Manager.
 long countdown: ☐
 show hidden: ☐
 uninstall: Put the keyboards back when MKLM is uninstalled: unknown
@@ -55,7 +55,7 @@ can change: false
 == an elevated MKLM: no prompt to explain ==
 autostart: ☐
 autostart available: true
-autostart note: The sign-in start setting could not be changed
+autostart note: The sign-in start could not be changed. Switch it again, or open MKLM again and retry.
 long countdown: ☐
 show hidden: ☐
 uninstall: Put the keyboards back when MKLM is uninstalled: on

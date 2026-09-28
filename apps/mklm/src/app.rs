@@ -29,6 +29,7 @@ use crate::i18n::{self, Lang, LangChoice, StartupError};
 use crate::input_capture::InputCapture;
 use crate::journal_ui::JournalUi;
 use crate::log;
+use crate::models::KeptModel;
 use crate::reader::{self, IoTask, IoWorker};
 use crate::settings::{Settings, SettingsStore, load_or_default};
 use crate::single_instance::{self, Claim, InstanceService};
@@ -46,8 +47,17 @@ use crate::wizard_ui::WizardUi;
 use crate::worker::{self, SessionWorker};
 use crate::{BUILD_ID, MIN_BUILD};
 
-/// How long the end of the Windows session waits for a running helper session (design m3 F.5).
+/// How long the end of the Windows session waits in all: for a running helper session, then —
+/// with what is left — for the I/O worker's queued writes (design m3 A.4 rule 1, F.5: at most
+/// 3 s, well inside the 5 s after which Windows calls an application hung).
 const END_SESSION_WAIT: Duration = Duration::from_secs(3);
+
+/// Whether this process may register the post-reboot RunOnce value at the end of the Windows
+/// session: only when it is not elevated (design m3 F.2; `mklm_client::run_once`): an elevated
+/// process may run as another administrator than the signed-in user, so its `HKCU` would be the
+/// wrong account's. Set once at start-up, outside any `RefCell` (the shell window reads it inside
+/// its window procedure); false until then and when elevation cannot be told.
+static MAY_REGISTER_POST_REBOOT: AtomicBool = AtomicBool::new(false);
 
 /// How long quitting waits for the I/O worker's queued writes: settings, the RunOnce rule, the
 /// autostart value (design m3 F.5).
@@ -74,6 +84,26 @@ pub fn post(msg: AppMsg) {
 /// run while the thread-local is being set or cleared.
 fn current_app() -> Option<Rc<Controller>> {
     APP.with(|app| app.try_borrow().ok().and_then(|app| app.clone()))
+}
+
+/// The end of `session` when no helper was started for it: a setup failure with `message`
+/// (English), which takes the state from `Launching` back to `Idle` (review A2).
+fn not_launched(session: SessionId, message: String) -> AppMsg {
+    AppMsg::SessionEnded {
+        session,
+        outcome: Box::new(SessionOutcome {
+            report: RequestReport {
+                first: RequestEnd::NotLaunched(LaunchError::Failed {
+                    kind: LaunchFailure::Setup,
+                    message,
+                }),
+                lost_needs_recovery: None,
+                recovery: None,
+                recovery_skipped: None,
+            },
+            run_once: Err(RunOnceError::Check("no session ran".into())),
+        }),
+    }
 }
 
 /// A command from a second MKLM process (UI thread; design m3 F.1): `activate` shows the window
@@ -110,6 +140,11 @@ struct Controller {
     keyboards: Rc<VecModel<ui::KeyboardRowVm>>,
     /// The rows the model shows now (to diff against).
     shown_rows: RefCell<Vec<KeyboardRow>>,
+    /// The change page's radio groups (layouts, standard layout, apply method), kept like the
+    /// list.
+    change_choices: KeptModel<ui::ChoiceVm>,
+    change_standard_choices: KeptModel<ui::ChoiceVm>,
+    change_method_choices: KeptModel<ui::ChoiceVm>,
     /// Polls the input language while the window is visible (design m3 A.4 rule 5).
     layout_timer: slint::Timer,
     /// Gathers keyboard arrivals and removals before the list is read again (design m3 B.2).
@@ -295,9 +330,11 @@ impl Controller {
             .as_ref()
             .is_some_and(|worker| !worker.finished())
         {
-            log::warn(format!(
-                "session {session}: not started, the previous session worker still runs"
-            ));
+            // Refused (review A2), and reported like a launch failure: the state set `Launching`
+            // with the start, and only `SessionEnded` takes it back to `Idle`.
+            let message = "the previous session worker still runs".to_string();
+            log::warn(format!("session {session}: not started, {message}"));
+            post(not_launched(session, message));
             return;
         }
         log::info(format!(
@@ -312,21 +349,7 @@ impl Controller {
             });
         match started {
             Ok(worker) => *self.session.borrow_mut() = Some(worker),
-            Err(message) => post(AppMsg::SessionEnded {
-                session,
-                outcome: Box::new(SessionOutcome {
-                    report: RequestReport {
-                        first: RequestEnd::NotLaunched(LaunchError::Failed {
-                            kind: LaunchFailure::Setup,
-                            message,
-                        }),
-                        lost_needs_recovery: None,
-                        recovery: None,
-                        recovery_skipped: None,
-                    },
-                    run_once: Err(RunOnceError::Check("no session ran".into())),
-                }),
-            }),
+            Err(message) => post(not_launched(session, message)),
         }
     }
 
@@ -584,20 +607,32 @@ impl Controller {
             })
         };
         let index = |index: Option<usize>| index.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1);
-        let choices = |rows: &[vm::change::ChoiceRow]| {
-            ModelRc::new(VecModel::from(
-                rows.iter()
-                    .map(|row| ui::ChoiceVm {
-                        text: row.text.as_str().into(),
-                        detail: row.detail.as_str().into(),
-                        enabled: row.enabled,
-                    })
-                    .collect::<Vec<_>>(),
-            ))
+        // The radio groups' models are kept (updated in place), so that a render — a detection
+        // key press, an input-language change, a read — does not rebuild the radio buttons.
+        let choices = |kept: &KeptModel<ui::ChoiceVm>, rows: &[vm::change::ChoiceRow]| {
+            kept.show(rows.iter().map(|row| ui::ChoiceVm {
+                text: row.text.as_str().into(),
+                detail: row.detail.as_str().into(),
+                enabled: row.enabled,
+            }))
         };
         self.window
             .set_change_keyboard_name(draft.name.as_str().into());
-        self.window.set_change_choices(choices(&page.choices));
+        self.window
+            .set_change_choices(choices(&self.change_choices, &page.choices));
+        self.window.set_change_method_choices(
+            self.change_method_choices.show(
+                [
+                    (&page.live_text, &page.live_detail),
+                    (&page.restart_text, &page.restart_detail),
+                ]
+                .map(|(text, detail)| ui::ChoiceVm {
+                    text: text.as_str().into(),
+                    detail: detail.as_str().into(),
+                    enabled: true,
+                }),
+            ),
+        );
         self.window.set_change_selected(index(page.selected));
         self.window
             .set_change_method(index(page.method.map(vm::change::ApplyMethod::index)));
@@ -607,10 +642,6 @@ impl Controller {
             title: page.title.into(),
             preparing: page.preparing,
             method_visible: page.method_visible,
-            live_text: page.live_text.into(),
-            live_detail: page.live_detail.into(),
-            restart_text: page.restart_text.into(),
-            restart_detail: page.restart_detail.into(),
             takes_effect: page.takes_effect.into(),
             all_users_note: page.all_users_note.into(),
             migration_note: page.migration_note.into(),
@@ -645,7 +676,7 @@ impl Controller {
             restore_mode: page.restore || draft.apply_now,
             summary: page.summary.into(),
             standard_visible: page.standard_visible,
-            standard_choices: choices(&page.standard_choices),
+            standard_choices: choices(&self.change_standard_choices, &page.standard_choices),
             note: page.note.into(),
             note_tone: tone(page.note_tone),
             details: page.details.into(),
@@ -767,6 +798,7 @@ fn keyboard_row_vm(row: KeyboardRow) -> ui::KeyboardRowVm {
         can_assign: row.can_assign,
         blocked_note: row.blocked_note.into(),
         assign_label: row.assign_label.into(),
+        apply_now_label: row.apply_now_label.into(),
         accessible_summary: row.accessible_summary.into(),
     }
 }
@@ -958,6 +990,11 @@ pub fn run(args: Args) -> ExitCode {
             lang,
         );
     }
+    // The single-instance pipe as early as commands can be handed to the UI thread (once the
+    // backend is selected): a second start at sign-in (Run and RunOnce together) retries for
+    // only 5 s (design m3 F.1). Its commands wait in Slint's queue until the event loop runs;
+    // the pipe thread waits long enough for the window to be built (`UI_REPLY_WAIT`).
+    let instance = InstanceService::start(instance_command);
     let window = match AppWindow::new() {
         Ok(window) => window,
         Err(error) => {
@@ -979,6 +1016,9 @@ pub fn run(args: Args) -> ExitCode {
     window.set_settings_theme_index(theme_mode.index());
     window.set_settings_language_index(args.lang.unwrap_or(settings.language).index());
 
+    // An elevated GUI runs (design m3 F.2) but never registers the post-reboot check itself.
+    let elevation = mklm_win::elevation::is_elevated();
+    MAY_REGISTER_POST_REBOOT.store(matches!(elevation, Ok(false)), Ordering::SeqCst);
     let io = match IoWorker::start(store) {
         Ok(io) => io,
         Err(error) => {
@@ -1016,18 +1056,21 @@ pub fn run(args: Args) -> ExitCode {
             reveal_on_attention: start_hidden,
             // An elevated GUI shows no UAC prompt, so none is explained (design m3 B.5); when it
             // cannot be told, the explanation is shown (harmless).
-            elevated: mklm_win::elevation::is_elevated().unwrap_or(false),
+            elevated: elevation.unwrap_or(false),
             journal_pages,
             ..AppState::default()
         }),
         io,
         session: RefCell::new(None),
         watchers: RefCell::new(Watchers::default()),
-        instance: RefCell::new(None),
+        instance: RefCell::new(instance),
         theme_mode: Cell::new(theme_mode),
         os_dark: Cell::new(os_dark),
         keyboards: Rc::new(VecModel::default()),
         shown_rows: RefCell::new(Vec::new()),
+        change_choices: KeptModel::default(),
+        change_standard_choices: KeptModel::default(),
+        change_method_choices: KeptModel::default(),
         layout_timer: slint::Timer::default(),
         settle_timer: slint::Timer::default(),
         journal_ui: JournalUi::new(&window),
@@ -1087,8 +1130,6 @@ pub fn run(args: Args) -> ExitCode {
         log::warn(format!("watcher: {warning}"));
     }
     *controller.watchers.borrow_mut() = watchers;
-    // Second starts reach this instance from now on (they retry for 5 s).
-    *controller.instance.borrow_mut() = InstanceService::start(instance_command);
 
     // The title bar once the winit window exists (it is created by the event loop).
     let weak = window.as_weak();
@@ -1192,6 +1233,15 @@ fn shell_event(event: mklm_win::ui::shell_window::ShellEvent) {
         ShellEvent::QueryEndSession => {
             log::info("the Windows session may end");
             if worker::cancel_current_session() {
+                // An elevated GUI does not register (design m3 F.2, `RunOnceOutcome::TellUser`):
+                // its HKCU may be another administrator's. The journal still asks for the check
+                // at the next start of MKLM.
+                if !MAY_REGISTER_POST_REBOOT.load(Ordering::SeqCst) {
+                    log::info(
+                        "an open change, but elevated: the post-reboot check is not registered",
+                    );
+                    return;
+                }
                 // A journaled change is open: make sure the next sign-in shows it, whatever the
                 // journal says at this instant (one short HKCU write).
                 let registered = mklm_client::run_once::PostRebootCommand::Gui
@@ -1209,14 +1259,18 @@ fn shell_event(event: mklm_win::ui::shell_window::ShellEvent) {
                 }
             }
         }
-        // The process may be ended as soon as this returns: bounded waits (the session worker
-        // 3 s, the queued writes 1 s), then quit.
+        // The process may be ended as soon as this returns: one bounded wait of 3 s in all (the
+        // session worker, then the queued writes with what is left), then quit.
         ShellEvent::EndSession => {
             log::info("the Windows session ends");
+            let started = Instant::now();
             if !worker::wait_for_current_session(END_SESSION_WAIT) {
                 log::warn("the Windows session ends while a helper session is still open");
             }
-            if !reader::wait_for_writes(QUIT_IO_WAIT) {
+            let left = END_SESSION_WAIT
+                .saturating_sub(started.elapsed())
+                .min(QUIT_IO_WAIT);
+            if !reader::wait_for_writes(left) {
                 log::warn("the Windows session ends before every queued write was done");
             }
             let _ = slint::quit_event_loop();

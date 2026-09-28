@@ -18,7 +18,7 @@
   </compatibility>
   <dependency>
     <dependentAssembly>
-      <!-- Common Controls 6 for the start-up error dialog (TaskDialogIndirect, design m3 F.6). -->
+      <!-- Common Controls 6: the modern visual style for the start-up error message box (MessageBoxW, design m3 F.6). -->
       <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"
         processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
     </dependentAssembly>

@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(wrong.rows[0].typed, "⚠");
         assert_eq!(
             wrong.keep_warning,
-            "⚠ Keychron Receiver が期待と違う配列で動いています。『元に戻す』をおすすめします"
+            "⚠ Keychron Receiver が期待と違う配列で動いています。［元に戻す］をおすすめします。"
         );
         assert!(wrong.can_keep);
         let en = post_reboot(

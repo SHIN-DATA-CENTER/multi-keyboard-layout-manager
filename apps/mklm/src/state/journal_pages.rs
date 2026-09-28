@@ -61,6 +61,10 @@ pub struct JournalPages {
     /// The first `SystemRead` of this process that got the journal was looked at (design m3 F.2:
     /// `--tray` still shows the window when the journal needs the user).
     pub startup_checked: bool,
+    /// A request of these pages held back while this user reads the standalone explanation of
+    /// the Windows prompt before their first one (design m3 B.5, B.12; M2 R12), with the page it
+    /// came from.
+    pub waiting: Option<(super::wizard::WaitingRequest, Page)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -212,7 +216,47 @@ fn start(
     entries: &[OpId],
 ) -> Vec<Effect> {
     let targets = entry_targets(state, entries);
+    if !state.elevated && !state.settings.change.uac_notice_seen && idle(state) {
+        // This user's first prompt: the standalone explanation first, as before a change (the
+        // settings are per user, the journal per PC: the first prompt of a user may come from
+        // here). "確認画面へ進む" sends the request, "キャンセル" comes back ([`uac_go`]).
+        state.journal_pages.waiting = Some((
+            super::wizard::WaitingRequest {
+                request,
+                apply,
+                targets,
+            },
+            state.page,
+        ));
+        state.page = Page::UacNotice;
+        return vec![Effect::Render];
+    }
     super::start_request(state, request, apply, targets)
+}
+
+/// "確認画面へ進む" for a request of these pages: back to its page, and the request starts;
+/// `None` when the explanation is not one of theirs.
+pub(super) fn uac_go(state: &mut AppState) -> Option<Vec<Effect>> {
+    let (waiting, page) = state.journal_pages.waiting.take()?;
+    state.settings.change.uac_notice_seen = true;
+    state.page = page;
+    let mut effects = vec![Effect::SaveSettings(Box::new(state.settings.clone()))];
+    effects.extend(super::start_request(
+        state,
+        waiting.request,
+        waiting.apply,
+        waiting.targets,
+    ));
+    Some(effects)
+}
+
+/// "キャンセル" on the explanation of a request of these pages: back to its page, nothing sent.
+pub(super) fn uac_cancel(state: &mut AppState) -> bool {
+    let Some((_, page)) = state.journal_pages.waiting.take() else {
+        return false;
+    };
+    state.page = page;
+    true
 }
 
 /// The keyboards the operations `entries` wrote, one per name, with how they type now.

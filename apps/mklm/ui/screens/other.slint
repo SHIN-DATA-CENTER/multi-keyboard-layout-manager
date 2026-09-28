@@ -252,6 +252,9 @@ export component JournalScreen inherits VerticalLayout {
 export component RecoveryScreen inherits VerticalLayout {
     in property <RecoveryPageVm> page;
     in property <[RecoveryItemVm]> items;
+    // Switch back now / when replugged: kept by Rust (a literal array here would be a new model,
+    // and new radio buttons, at every change of `page`).
+    in property <[ChoiceVm]> method-choices;
     // 0 = switch back now, 1 = when replugged or at the restart (the state's choice).
     in-out property <int> method: 1;
     callback choose-method(int);
@@ -291,6 +294,7 @@ export component RecoveryScreen inherits VerticalLayout {
                 if item.can-keep: Button {
                     text: @tr("Keep");
                     enabled: !Modal.open;
+                    accessible-label: item.keep-label;
                     clicked => {
                         root.keep(item.op-id);
                     }
@@ -298,6 +302,7 @@ export component RecoveryScreen inherits VerticalLayout {
                 if item.can-revert: Button {
                     text: @tr("Revert…");
                     enabled: !Modal.open;
+                    accessible-label: item.revert-label;
                     clicked => {
                         root.revert(item.op-id);
                     }
@@ -306,10 +311,7 @@ export component RecoveryScreen inherits VerticalLayout {
         }
         if root.page.method-visible: RadioList {
             label: @tr("How the keyboard switches back");
-            choices: [
-                { text: root.page.live-text, detail: root.page.live-detail, enabled: true },
-                { text: root.page.later-text, detail: root.page.later-detail, enabled: true },
-            ];
+            choices: root.method-choices;
             selected <=> root.method;
             chosen(index) => {
                 root.choose-method(index);

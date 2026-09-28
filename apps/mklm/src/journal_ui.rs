@@ -14,6 +14,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::app::dispatch;
 use crate::i18n::{Lang, journal_pages as text};
+use crate::models::{KeptModel, same_or_new};
 use crate::reader::{IoTask, IoWorker};
 use crate::state::journal_pages::{self as pages, JournalEffect, JournalMsg, ON_TOP_FOR};
 use crate::state::{AppMsg, AppState, Page};
@@ -34,6 +35,10 @@ pub struct JournalUi {
     shown_history: RefCell<Vec<JournalRow>>,
     items: Rc<VecModel<ui::RecoveryItemVm>>,
     shown_items: RefCell<Vec<RecoveryItem>>,
+    /// The options of a stopped restore to before MKLM, and the recovery page's two ways back,
+    /// kept like the lists.
+    restore_choices: KeptModel<ui::ChoiceVm>,
+    method_choices: KeptModel<ui::ChoiceVm>,
     /// Ends the post-reboot check's on-top period (design m3 B.9).
     on_top_timer: slint::Timer,
 }
@@ -63,13 +68,14 @@ fn strings(values: Vec<String>) -> ModelRc<SharedString> {
     ))
 }
 
-/// Applies the difference between the shown rows and `rows` to a kept model.
+/// Applies the difference between the shown rows and `rows` to a kept model. `convert` gets the
+/// row it replaces, if any (to keep the model of an unchanged sub-list).
 fn update_list<T: Clone + PartialEq, V: Clone + 'static>(
     model: &VecModel<V>,
     shown: &RefCell<Vec<T>>,
     rows: Vec<T>,
     key: fn(&T) -> &str,
-    convert: fn(T) -> V,
+    convert: fn(T, Option<V>) -> V,
 ) {
     let ops = list_ops(&shown.borrow(), &rows, key);
     for op in ops {
@@ -77,8 +83,11 @@ fn update_list<T: Clone + PartialEq, V: Clone + 'static>(
             ListOp::Remove(index) => {
                 model.remove(index);
             }
-            ListOp::Insert(index, row) => model.insert(index, convert(row)),
-            ListOp::Set(index, row) => model.set_row_data(index, convert(row)),
+            ListOp::Insert(index, row) => model.insert(index, convert(row, None)),
+            ListOp::Set(index, row) => {
+                let old = model.row_data(index);
+                model.set_row_data(index, convert(row, old));
+            }
         }
     }
     *shown.borrow_mut() = rows;
@@ -88,7 +97,7 @@ fn check_key(row: &CheckLine) -> &str {
     &row.instance_id
 }
 
-fn check_vm(row: CheckLine) -> ui::CheckRowVm {
+fn check_vm(row: CheckLine, _: Option<ui::CheckRowVm>) -> ui::CheckRowVm {
     ui::CheckRowVm {
         name: row.name.into(),
         setting: row.setting.into(),
@@ -101,10 +110,23 @@ fn check_vm(row: CheckLine) -> ui::CheckRowVm {
 }
 
 fn conflict_key(keyboard: &ConflictKeyboard) -> &str {
-    &keyboard.name
+    &keyboard.target
 }
 
-fn conflict_vm(keyboard: ConflictKeyboard) -> ui::ConflictKeyboardVm {
+/// A conflict row; a row that replaces `old` keeps `old`'s options model while the labels are
+/// the same (a changed selection does not rebuild the row's radio buttons).
+fn conflict_vm(
+    keyboard: ConflictKeyboard,
+    old: Option<ui::ConflictKeyboardVm>,
+) -> ui::ConflictKeyboardVm {
+    let mut row = conflict_row_vm(keyboard);
+    if let Some(old) = old {
+        row.options = same_or_new(&old.options, row.options);
+    }
+    row
+}
+
+fn conflict_row_vm(keyboard: ConflictKeyboard) -> ui::ConflictKeyboardVm {
     ui::ConflictKeyboardVm {
         name: keyboard.name.into(),
         now: keyboard.now.into(),
@@ -136,7 +158,7 @@ fn history_key(row: &JournalRow) -> &str {
     &row.op_id
 }
 
-fn history_vm(row: JournalRow) -> ui::JournalRowVm {
+fn history_vm(row: JournalRow, _: Option<ui::JournalRowVm>) -> ui::JournalRowVm {
     ui::JournalRowVm {
         op: row.op.into(),
         op_id: row.op_id.into(),
@@ -154,7 +176,7 @@ fn item_key(item: &RecoveryItem) -> &str {
     &item.op_id
 }
 
-fn item_vm(item: RecoveryItem) -> ui::RecoveryItemVm {
+fn item_vm(item: RecoveryItem, _: Option<ui::RecoveryItemVm>) -> ui::RecoveryItemVm {
     ui::RecoveryItemVm {
         op_id: item.op_id.into(),
         operation: item.operation.into(),
@@ -162,6 +184,8 @@ fn item_vm(item: RecoveryItem) -> ui::RecoveryItemVm {
         tone: tone(item.tone),
         can_keep: item.can_keep,
         can_revert: item.can_revert,
+        keep_label: item.keep_label.into(),
+        revert_label: item.revert_label.into(),
     }
 }
 
@@ -190,6 +214,8 @@ impl JournalUi {
             shown_history: RefCell::new(Vec::new()),
             items: Rc::new(VecModel::default()),
             shown_items: RefCell::new(Vec::new()),
+            restore_choices: KeptModel::default(),
+            method_choices: KeptModel::default(),
             on_top_timer: slint::Timer::default(),
         };
         window.set_post_reboot_rows(ModelRc::from(ui.checks.clone()));
@@ -265,16 +291,13 @@ impl JournalUi {
                 } else {
                     -1
                 });
-                window.set_conflict_restore_choices(ModelRc::new(VecModel::from(
-                    view.restore_choices
-                        .into_iter()
-                        .map(|text| ui::ChoiceVm {
-                            text: text.into(),
-                            detail: SharedString::new(),
-                            enabled: true,
-                        })
-                        .collect::<Vec<_>>(),
-                )));
+                window.set_conflict_restore_choices(self.restore_choices.show(
+                    view.restore_choices.into_iter().map(|text| ui::ChoiceVm {
+                        text: text.into(),
+                        detail: SharedString::new(),
+                        enabled: true,
+                    }),
+                ));
                 // A stopped restore has one choice for everything: no per-value override.
                 window.set_conflict_value_options(strings(if restore {
                     Vec::new()
@@ -323,11 +346,21 @@ impl JournalUi {
                     uac_line: view.uac_line.into(),
                     empty_note: view.empty_note.into(),
                     method_visible: view.method.visible,
-                    live_text: view.method.live_text.into(),
-                    live_detail: view.method.live_detail.into(),
-                    later_text: view.method.later_text.into(),
-                    later_detail: view.method.later_detail.into(),
                 });
+                // Kept and updated in place: a render does not rebuild the radio buttons.
+                window.set_recovery_method_choices(
+                    self.method_choices.show(
+                        [
+                            (view.method.live_text, view.method.live_detail),
+                            (view.method.later_text, view.method.later_detail),
+                        ]
+                        .map(|(text, detail)| ui::ChoiceVm {
+                            text: text.into(),
+                            detail: detail.into(),
+                            enabled: true,
+                        }),
+                    ),
+                );
                 update_list(
                     &self.items,
                     &self.shown_items,

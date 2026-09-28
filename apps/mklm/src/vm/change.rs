@@ -757,7 +757,11 @@ pub fn change_page(ctx: &ChangeContext<'_>) -> ChangePage {
         page.ime_note = i18n::ime_note_us(lang);
     }
     if let Some(failure) = &draft.failure {
-        page.note = i18n::prepare_failed(matches!(failure, PrepareFailure::Incomplete(_)), lang);
+        page.note = i18n::prepare_failed(
+            matches!(failure, PrepareFailure::Incomplete(_)),
+            i18n::PreparePlace::ChangePage,
+            lang,
+        );
         page.note_tone = Tone::Warning;
         details.push(failure.diagnostic().to_string());
     } else if let (Some(plan), false) = (&draft.plan, page.preparing) {
@@ -1088,7 +1092,7 @@ mod tests {
              detect: わからないときは、このキーボードで Backspace の左のキーを押してください（打鍵テスト）\n\
              method: ◉ すぐに切り替えて 20 秒間試す — このキーボードは数秒間使えません。その間は、ほかのキーボードかマウスで操作します。\n\
              method: ○ PC の再起動で切り替える — 再起動するまで、ほかのキーボードの配列も変更できません。\n\
-             takes effect: キーボードをその場でリセットします（Windows がキーボードを接続し直します。キーボード本体の設定は変わりません）。数秒間このキーボードで入力できません。その後 20 秒以内に「このままにする」を選ばないと元に戻ります。\n\
+             takes effect: キーボードをその場でリセットします（Windows がキーボードを接続し直します。キーボード本体の設定は変わりません）。数秒間このキーボードで入力できません。その後 20 秒以内に［このままにする］を選ばないと元に戻ります。\n\
              all users: ⓘ この設定は、この PC のすべてのユーザーに適用されます。\n\
              line: HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000 KeyboardTypeOverride: 4 → 7\n\
              line: HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000 KeyboardSubtypeOverride: 0 → 2\n\

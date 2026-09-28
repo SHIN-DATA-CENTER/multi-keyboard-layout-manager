@@ -46,7 +46,8 @@ export component RestartScreen inherits VerticalLayout {
             text: root.empty-note;
         }
         for reason in root.reasons: Body {
-            text: "・" + reason;
+            // The bullet is translated: "・" in Japanese, "•" in English.
+            text: @tr("• {}", reason);
         }
 
         if root.ready: Banner {

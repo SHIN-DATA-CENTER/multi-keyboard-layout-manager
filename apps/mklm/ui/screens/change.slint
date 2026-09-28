@@ -27,6 +27,9 @@ export component ChangeScreen inherits VerticalLayout {
     in property <string> keyboard-name;
     in property <[ChoiceVm]> choices;
     in-out property <int> selected: -1;
+    // Switch now / at the restart (review U1): kept by Rust, so that a render does not rebuild
+    // the radio buttons (a literal array here would be a new model at every change of `vm`).
+    in property <[ChoiceVm]> method-choices;
     // 0 = switch now, 1 = at the restart (review U1).
     in-out property <int> method: -1;
     // The PC's standard layout of a migration from fixed mode: 0 = JIS, 1 = US.
@@ -46,7 +49,14 @@ export component ChangeScreen inherits VerticalLayout {
     padding: 16px;
     spacing: 12px;
 
-    PageHeader {
+    // "MKLM 導入前に戻す…" turns this page into the restore preview in place: the focus goes to
+    // the new title, which is read as a new page's would be (design m3 B.0, E.1).
+    private property <bool> restore: root.vm.restore-mode;
+    changed restore => {
+        header.focus-heading();
+    }
+
+    header := PageHeader {
         title: root.vm.title != "" ? root.vm.title : @tr("Layout of {}", root.keyboard-name);
     }
 
@@ -122,10 +132,7 @@ export component ChangeScreen inherits VerticalLayout {
         }
         if root.vm.method-visible: RadioList {
             label: @tr("How the change takes effect");
-            choices: [
-                { text: root.vm.live-text, detail: root.vm.live-detail, enabled: true },
-                { text: root.vm.restart-text, detail: root.vm.restart-detail, enabled: true },
-            ];
+            choices: root.method-choices;
             selected <=> root.method;
             chosen(index) => {
                 root.choose-method(index);

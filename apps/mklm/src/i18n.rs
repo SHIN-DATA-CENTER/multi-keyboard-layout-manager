@@ -218,8 +218,8 @@ pub fn pending_hint_without_apply_now(action: PendingAction, lang: Lang) -> Stri
 pub fn needs_reconnect(lang: Lang) -> String {
     pick(
         lang,
-        "まだ反映されていない変更があります。キーボードを抜き差しするか、接続し直してください（Bluetooth は電源をオフにしてからオンにします）",
-        "A change is not in effect yet. Unplug and replug the keyboard, or reconnect it (Bluetooth: turn it off and on)",
+        "まだ反映されていない変更があります。キーボードを抜き差しするか、接続し直してください（Bluetooth は電源をオフにしてからオンにします）。",
+        "A change is not in effect yet. Unplug and replug the keyboard, or reconnect it (Bluetooth: turn it off and on).",
     )
 }
 
@@ -246,7 +246,7 @@ pub fn takes_effect(action: PendingAction, seconds: u32, lang: Lang) -> String {
     match action {
         PendingAction::ResetKeyboard => match lang {
             Lang::Ja => format!(
-                "キーボードをその場でリセットします（Windows がキーボードを接続し直します。キーボード本体の設定は変わりません）。数秒間このキーボードで入力できません。その後 {seconds} 秒以内に「このままにする」を選ばないと元に戻ります。"
+                "キーボードをその場でリセットします（Windows がキーボードを接続し直します。キーボード本体の設定は変わりません）。数秒間このキーボードで入力できません。その後 {seconds} 秒以内に［このままにする］を選ばないと元に戻ります。"
             ),
             Lang::En => format!(
                 "The keyboard is reset in place (Windows reconnects it; the keyboard's own settings do not change); it cannot type for a few seconds. Then choose \"Keep\" within {seconds} seconds, or it reverts."
@@ -350,10 +350,10 @@ pub fn sign_in_status(klid: Option<&str>, lang: Lang) -> (String, bool) {
 pub fn fixed_mode_note(standard: &str, lang: Lang) -> String {
     match lang {
         Lang::Ja => format!(
-            "すべてのキーボードが {standard} として動きます。ほかの配列のキーボードは、その行の［変更…］で変えられます"
+            "すべてのキーボードが {standard} として動きます。ほかの配列のキーボードは、その行の［変更…］で変えられます。"
         ),
         Lang::En => format!(
-            "Every keyboard types {standard}. Change another keyboard with \"Change…\" on its row"
+            "Every keyboard types {standard}. Change another keyboard with \"Change…\" on its row."
         ),
     }
 }
@@ -417,6 +417,15 @@ pub fn assign_label(name: &str, lang: Lang) -> String {
     match lang {
         Lang::Ja => format!("{name} の配列を変更"),
         Lang::En => format!("Change the layout of {name}"),
+    }
+}
+
+/// The accessible label of a row's "今すぐ反映…" button (design m3 E.2): "Keychron Receiver の配列を
+/// 今すぐ反映".
+pub fn apply_now_label(name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{name} の配列を今すぐ反映"),
+        Lang::En => format!("Apply the layout of {name} now"),
     }
 }
 
@@ -619,9 +628,9 @@ pub fn badge(kind: BadgeKind, lang: Lang) -> (String, String) {
     let (ja, ja_long, en, en_long) = match kind {
         BadgeKind::NoKeyPress => (
             "キー入力なし",
-            "キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます",
+            "キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。［キーを押して特定］で確かめられます",
             "No key press yet",
-            "No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; \"Identify by key press\" tells",
+            "No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; use \"Identify by key press\" to find out",
         ),
         BadgeKind::Receiver => (
             "レシーバー",
@@ -737,7 +746,8 @@ pub fn state(state: OpState, lang: Lang) -> String {
         OpState::Restarting => ("キーボードをリセット中", "Resetting the keyboard"),
         OpState::AwaitingConfirm => ("確認待ち", "Waiting for keep or revert"),
         OpState::PendingReboot => ("PC の再起動待ち", "Waiting for a PC restart"),
-        OpState::Confirmed => ("確定", "Kept"),
+        // Never "確定" on the screen (design m3 D.5): what the user did.
+        OpState::Confirmed => ("このままにしました", "Kept"),
         OpState::RevertPending => ("元に戻しています", "Being reverted"),
         OpState::Reverted => ("元に戻しました", "Reverted"),
         OpState::RevertedPendingReboot => (
@@ -770,7 +780,7 @@ pub fn failure(reason: &FailureReason, phase: ResetPhase, lang: Lang) -> String 
         ),
         FailureReason::CallerDisconnected => pick(
             lang,
-            "確定する前に MKLM が終了したため、元に戻しました",
+            "［このままにする］が選ばれる前に MKLM が終了したため、元に戻しました",
             "MKLM ended before the change was kept; it was put back",
         ),
         FailureReason::Interrupted => pick(
@@ -786,13 +796,13 @@ pub fn failure(reason: &FailureReason, phase: ResetPhase, lang: Lang) -> String 
             ),
             ResetPhase::Reached => pick(
                 lang,
-                "キーボードのリセット後に確定されなかったため、回復で元に戻しました",
+                "キーボードのリセット後に［このままにする］が選ばれなかったため、回復で元に戻しました",
                 "The change was never kept after the keyboard reset; recovery put it back",
             ),
         },
         FailureReason::CountdownExpired => pick(
             lang,
-            "時間内に「このままにする」が選ばれなかったため、元に戻しました",
+            "時間内に［このままにする］が選ばれなかったため、元に戻しました",
             "No answer before the countdown ran out; it was put back",
         ),
         FailureReason::KeyboardDidNotReturn => pick(
@@ -863,7 +873,7 @@ pub fn error_code(code: ErrorCode, lang: Lang) -> String {
             false,
         ),
         ErrorCode::OpInProgress => (
-            "確認待ちの変更があります。先にそれを「このままにする」か元に戻してください。",
+            "確認待ちの変更があります。先にそれを［このままにする］か、元に戻してください。",
             "A change is still waiting; keep or undo it first.",
             false,
         ),
@@ -1211,8 +1221,8 @@ pub fn detect_verdict(verdict: Verdict, name: &str, lang: Lang) -> String {
         (Verdict::Us, Lang::En) => format!("✓ {name} is a US keyboard"),
         (Verdict::Mixed, _) => pick(
             lang,
-            "判定できませんでした。『やり直す』を押して、もう一度試してください",
-            "Could not tell. Choose \"Start again\" and try once more",
+            "判定できませんでした。［やり直す］を押して、もう一度試してください。",
+            "Could not tell. Choose \"Start again\" and try once more.",
         ),
     }
 }
@@ -1280,20 +1290,46 @@ pub fn nothing_to_change(lang: Lang) -> String {
     )
 }
 
-/// Why the preparation could not read what a change is planned with (design m3 B.5).
-pub fn prepare_failed(incomplete: bool, lang: Lang) -> String {
-    if incomplete {
+/// The page a preparation failed on: its next step names buttons that page has (design m3
+/// B.17). The change page (also "今すぐ反映…" and the restore previews) has no "最新の情報に更新";
+/// the wizard reads and prepares again when its last step opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparePlace {
+    ChangePage,
+    Wizard,
+}
+
+/// Why the preparation could not read what a change is planned with (design m3 B.5), and what
+/// to do on `place`.
+pub fn prepare_failed(incomplete: bool, place: PreparePlace, lang: Lang) -> String {
+    let reason = if incomplete {
         pick(
             lang,
-            "Windows がキーボードの情報をすべて返さなかったため、今は変更できません。［最新の情報に更新］してからもう一度試してください。",
-            "Windows did not report every keyboard completely, so no change is possible now. Refresh and try again.",
+            "Windows がキーボードの情報をすべて返さなかったため、今は変更できません。",
+            "Windows did not report every keyboard completely, so no change is possible now.",
         )
     } else {
         pick(
             lang,
-            "キーボードか記録（ジャーナル）を読めなかったため、今は変更できません。もう一度試してください。",
-            "The keyboards or the journal could not be read, so no change is possible now. Try again.",
+            "キーボードか記録（ジャーナル）を読めなかったため、今は変更できません。",
+            "The keyboards or the journal could not be read, so no change is possible now.",
         )
+    };
+    let next = match place {
+        PreparePlace::ChangePage => pick(
+            lang,
+            "［キャンセル］でメイン画面に戻り、［最新の情報に更新］を押してから、もう一度やり直してください。",
+            "Choose \"Cancel\", then \"Refresh\" on the main screen, and try again.",
+        ),
+        PreparePlace::Wizard => pick(
+            lang,
+            "［戻る］を押してから、もう一度［次へ］を押してください。",
+            "Choose \"Back\", then \"Next\" again.",
+        ),
+    };
+    match lang {
+        Lang::Ja => format!("{reason}{next}"),
+        Lang::En => format!("{reason} {next}"),
     }
 }
 
@@ -1378,20 +1414,22 @@ pub fn restore_summary(writes: usize, lang: Lang) -> String {
             "Everything is as it was before MKLM; there is nothing to put back.",
         )
     } else {
-        match lang {
-            Lang::Ja => format!("{writes} 件の値を MKLM 導入前の値に戻します。"),
-            Lang::En => format!("{writes} values go back to what they were before MKLM."),
+        match (lang, writes) {
+            (Lang::Ja, _) => format!("{writes} 件の値を MKLM 導入前の値に戻します。"),
+            (Lang::En, 1) => "1 value goes back to what it was before MKLM.".to_string(),
+            (Lang::En, _) => format!("{writes} values go back to what they were before MKLM."),
         }
     }
 }
 
 /// Values changed outside MKLM: the restore stops and asks first (`ConflictPolicy::Report`).
 pub fn restore_conflicts(count: usize, lang: Lang) -> String {
-    match lang {
-        Lang::Ja => format!(
+    match (lang, count) {
+        (Lang::Ja, _) => format!(
             "MKLM 以外が変更した値が {count} 件あります。戻す前に、その値をどうするかを選びます。"
         ),
-        Lang::En => format!(
+        (Lang::En, 1) => "1 value was changed outside MKLM; you choose what to do with it before anything is put back.".to_string(),
+        (Lang::En, _) => format!(
             "{count} values were changed outside MKLM; you choose what to do with them before anything is put back."
         ),
     }
@@ -1401,6 +1439,7 @@ pub fn restore_conflicts(count: usize, lang: Lang) -> String {
 pub fn restore_removed(count: usize, lang: Lang) -> String {
     match lang {
         Lang::Ja => format!("接続されていないキーボードの値 {count} 件は、そのままにします。"),
+        Lang::En if count == 1 => "1 value of a keyboard that is gone is left alone.".to_string(),
         Lang::En => format!("{count} values of keyboards that are gone are left alone."),
     }
 }
@@ -1409,6 +1448,9 @@ pub fn restore_removed(count: usize, lang: Lang) -> String {
 pub fn restore_supersedes(count: usize, lang: Lang) -> String {
     match lang {
         Lang::Ja => format!("確認待ちの変更 {count} 件は、この操作に置き換えられます。"),
+        Lang::En if count == 1 => {
+            "1 change waiting for you is replaced by this restore.".to_string()
+        }
         Lang::En => format!("{count} changes waiting for you are replaced by this restore."),
     }
 }
@@ -1538,7 +1580,7 @@ pub fn countdown_switched(name: &str, layout: &str, lang: Lang) -> String {
 pub fn countdown_how(seconds: u32, lang: Lang) -> String {
     match lang {
         Lang::Ja => format!(
-            "あと {seconds} 秒で自動的に元に戻ります。そのキーボードで Shift+2 を押して確かめてから（\" なら JIS、@ なら US）、Tab で『このままにする』へ移って押してください。"
+            "あと {seconds} 秒で自動的に元に戻ります。そのキーボードで Shift+2 を押して確かめてから（\" なら JIS、@ なら US）、Tab で［このままにする］へ移って押してください。"
         ),
         Lang::En => format!(
             "It reverts automatically in {seconds} seconds. Press Shift+2 on that keyboard to check (\" means JIS, @ means US), then Tab to \"Keep this layout\" and press it."
@@ -1550,7 +1592,7 @@ pub fn countdown_how(seconds: u32, lang: Lang) -> String {
 pub fn arrival(name: &str, kind: &str, lang: Lang) -> String {
     match lang {
         Lang::Ja => format!("{name} は {kind}です"),
-        Lang::En => format!("{name} reports {kind}"),
+        Lang::En => format!("{name}: {kind}"),
     }
 }
 
@@ -1561,8 +1603,8 @@ pub fn recognition(verified: bool, arrivals: &[String], lang: Lang) -> String {
         (true, Lang::En) => format!("Windows reports: {} ✓", arrivals.join(", ")),
         (false, _) => pick(
             lang,
-            "Windows の認識をまだ確かめられません。打鍵テストで確かめてください",
-            "Windows has not confirmed it yet; check with the key test",
+            "Windows の認識をまだ確かめられません。打鍵テストで確かめてください。",
+            "Windows has not confirmed it yet; check with the key test.",
         ),
     }
 }
@@ -1571,7 +1613,7 @@ pub fn recognition(verified: bool, arrivals: &[String], lang: Lang) -> String {
 pub fn countdown_reminder(remaining: u32, lang: Lang) -> String {
     match lang {
         Lang::Ja => format!("あと {remaining} 秒で元に戻ります"),
-        Lang::En => format!("{remaining} seconds left"),
+        Lang::En => format!("Reverting in {remaining} seconds"),
     }
 }
 
@@ -1639,8 +1681,8 @@ pub fn key_test_prompt(lang: Lang) -> String {
 pub fn key_test_not_japanese(lang: Lang) -> String {
     pick(
         lang,
-        "入力方式が日本語ではないため判定できません。Win+Space で日本語に切り替えてください",
-        "Cannot tell: the input method is not Japanese. Switch to Japanese with Win+Space",
+        "入力方式が日本語ではないため判定できません。Win+Space で日本語に切り替えてください。",
+        "Cannot tell: the input method is not Japanese. Switch to Japanese with Win+Space.",
     )
 }
 
@@ -1669,10 +1711,10 @@ pub fn key_test_as_expected(text: &str, got: &str, lang: Lang) -> String {
 pub fn key_test_wrong(text: &str, want: &str, got: &str, lang: Lang) -> String {
     match lang {
         Lang::Ja => format!(
-            "Shift+2 → {text} : ⚠ {want} になるはずが {got} です。『元に戻す』をおすすめします"
+            "Shift+2 → {text} : ⚠ {want} になるはずが {got} です。［元に戻す］をおすすめします。"
         ),
         Lang::En => format!(
-            "Shift+2 → {text} : ⚠ it should type {want} but types {got}. Revert is recommended"
+            "Shift+2 → {text} : ⚠ it should type {want} but types {got}. Revert is recommended."
         ),
     }
 }
@@ -1728,6 +1770,12 @@ pub fn current_state_line(
 }
 
 /// What a finished request did, when the reason does not say it (design m3 B.17).
+/// The result of "今すぐ反映…" (design m3 B.12) when nothing had to be recovered: the saved
+/// layout is in effect now.
+pub fn result_applied_now(lang: Lang) -> String {
+    pick(lang, "反映しました。", "Put into effect.")
+}
+
 pub fn result_outcome(outcome: mklm_core::Outcome, lang: Lang) -> String {
     use mklm_core::Outcome;
     match outcome {
@@ -1825,7 +1873,7 @@ pub fn result_lost_unknown(lang: Lang) -> String {
 pub fn result_still_waiting(lang: Lang) -> String {
     pick(
         lang,
-        "確認待ちの変更があります。『確認待ちの変更をすべて元に戻す』で戻せます。",
+        "確認待ちの変更があります。［確認待ちの変更をすべて元に戻す…］で戻せます。",
         "A change still waits for you; \"Undo every change waiting for you\" puts it back.",
     )
 }
@@ -1965,18 +2013,18 @@ pub fn autostart_note(note: AutostartNote, lang: Lang) -> String {
     match note {
         AutostartNote::DisabledByUser => pick(
             lang,
-            "Windows のスタートアップ設定で無効になっています。タスク マネージャーの「スタートアップ アプリ」で有効にできます",
-            "Turned off in Windows' startup settings. You can turn it on under Startup apps in Task Manager",
+            "Windows のスタートアップ設定で無効になっています。タスク マネージャーの「スタートアップ アプリ」で有効にできます。",
+            "Turned off in Windows' startup settings. You can turn it on under Startup apps in Task Manager.",
         ),
         AutostartNote::Unreadable => pick(
             lang,
-            "自動起動の設定を読み取れませんでした",
-            "The sign-in start setting could not be read",
+            "サインイン時の起動の設定を読み取れませんでした。MKLM を開き直すと、もう一度読み取ります。",
+            "The sign-in start setting could not be read. MKLM reads it again when you open it again.",
         ),
         AutostartNote::WriteFailed => pick(
             lang,
-            "自動起動の設定を変更できませんでした",
-            "The sign-in start setting could not be changed",
+            "サインイン時の起動を変更できませんでした。もう一度切り替えるか、MKLM を開き直してから試してください。",
+            "The sign-in start could not be changed. Switch it again, or open MKLM again and retry.",
         ),
     }
 }
@@ -2288,6 +2336,90 @@ mod tests {
                 .next(),
             Some("Windows のスタートアップ設定で無効になっています")
         );
+    }
+
+    /// The notation of the Japanese screens (design m3 D.5): MKLM's buttons in ［］, other
+    /// quotes in 「」, never 『』; and never "確定" (say what the user did: "このままにする").
+    /// Checked over every text source of the screens — the Rust texts and the catalogue of the
+    /// static labels — outside comments.
+    #[test]
+    fn japanese_notation() {
+        let sources = [
+            ("src/i18n.rs", include_str!("i18n.rs")),
+            (
+                "src/i18n/journal_pages.rs",
+                include_str!("i18n/journal_pages.rs"),
+            ),
+            ("src/i18n/wizard.rs", include_str!("i18n/wizard.rs")),
+            (
+                "translations/ja/LC_MESSAGES/mklm.po",
+                include_str!("../translations/ja/LC_MESSAGES/mklm.po"),
+            ),
+        ];
+        // Spelled with escapes, so that this test's own source passes.
+        let forbidden = ["\u{300e}", "\u{300f}", "\u{78ba}\u{5b9a}"];
+        for (name, source) in sources {
+            for (number, line) in source.lines().enumerate() {
+                let text = line.trim_start();
+                if text.starts_with("//") || text.starts_with('#') {
+                    continue;
+                }
+                for word in forbidden {
+                    assert!(
+                        !text.contains(word),
+                        "{name}:{}: {word:?} in {text}",
+                        number + 1
+                    );
+                }
+            }
+        }
+        // The texts that used them before.
+        assert_eq!(state(OpState::Confirmed, Lang::Ja), "このままにしました");
+        assert_eq!(
+            failure(
+                &FailureReason::CallerDisconnected,
+                ResetPhase::Reached,
+                Lang::Ja
+            ),
+            "［このままにする］が選ばれる前に MKLM が終了したため、元に戻しました"
+        );
+        assert!(countdown_how(20, Lang::Ja).contains("Tab で［このままにする］へ"));
+    }
+
+    /// English counts of one are singular (review of WP-U5).
+    #[test]
+    fn english_counts() {
+        assert_eq!(
+            restore_summary(1, Lang::En),
+            "1 value goes back to what it was before MKLM."
+        );
+        assert_eq!(
+            restore_summary(2, Lang::En),
+            "2 values go back to what they were before MKLM."
+        );
+        assert!(restore_conflicts(1, Lang::En).starts_with("1 value was changed"));
+        assert!(restore_removed(1, Lang::En).starts_with("1 value of a keyboard"));
+        assert!(restore_supersedes(1, Lang::En).starts_with("1 change waiting for you is"));
+        assert!(journal_pages::history_unreadable(1, Lang::En).starts_with("1 journal entry "));
+        assert_eq!(
+            recognition(
+                true,
+                &[arrival("Keychron Receiver", "JIS", Lang::En)],
+                Lang::En
+            ),
+            "Windows reports: Keychron Receiver: JIS ✓"
+        );
+        assert_eq!(countdown_reminder(10, Lang::En), "Reverting in 10 seconds");
+    }
+
+    /// A preparation that failed names buttons of the page it is shown on (review of WP-U3).
+    #[test]
+    fn preparation_failures_name_the_pages_buttons() {
+        let change = prepare_failed(true, PreparePlace::ChangePage, Lang::Ja);
+        assert!(change.contains("［キャンセル］") && change.contains("［最新の情報に更新］"));
+        let wizard = prepare_failed(false, PreparePlace::Wizard, Lang::Ja);
+        assert!(wizard.contains("［戻る］") && wizard.contains("［次へ］"));
+        assert!(!wizard.contains("最新の情報に更新"));
     }
 
     #[test]

@@ -334,6 +334,9 @@ pub struct AppState {
     pub next_session: SessionId,
     /// The request of the running or last session.
     pub request: Option<Request>,
+    /// That request is "今すぐ反映…" (a `Recover` sent from the change page, design m3 B.12):
+    /// its result says the layout was put into effect, not that something was recovered.
+    pub applying_now: bool,
     /// The keyboards of the running or last request, for "今の状態".
     pub targets: Vec<SessionTarget>,
     /// The last session view that had journaled the operation (the result's reset phase and
@@ -928,8 +931,11 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             if state.page != Page::UacNotice || state.session != SessionPhase::Idle {
                 return Vec::new();
             }
-            // A request of the wizard page (design m3 B.1 step 4).
+            // A request of the wizard page (design m3 B.1 step 4), or of a journal page (B.12).
             if let Some(effects) = wizard::uac_go(state) {
+                return effects;
+            }
+            if let Some(effects) = journal_pages::uac_go(state) {
                 return effects;
             }
             let Some((request, apply)) = ready_request(state) else {
@@ -949,7 +955,7 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             match state.page {
                 // Back to where the request was made: nothing is lost, nothing happens.
                 Page::UacNotice => {
-                    if !wizard::uac_cancel(state) {
+                    if !wizard::uac_cancel(state) && !journal_pages::uac_cancel(state) {
                         state.page = Page::Change;
                     }
                     vec![Effect::Render]
@@ -1486,7 +1492,12 @@ fn draft_targets(state: &AppState) -> Vec<SessionTarget> {
 
 fn start_change(state: &mut AppState, request: Request, apply: ApplyOptions) -> Vec<Effect> {
     let targets = draft_targets(state);
-    start_request(state, request, apply, targets)
+    let apply_now = state.draft.as_ref().is_some_and(|draft| draft.apply_now);
+    let effects = start_request(state, request, apply, targets);
+    if !effects.is_empty() {
+        state.applying_now = apply_now;
+    }
+    effects
 }
 
 /// Starts a helper session (one at a time, design m3 A.4).
@@ -1521,6 +1532,7 @@ fn start_request(
     state.result_read_pending = false;
     state.targets = targets;
     state.request = Some(request.clone());
+    state.applying_now = false;
     state.key_test = KeyTest::default();
     vec![
         Effect::StartSession {
@@ -3204,6 +3216,15 @@ mod tests {
             (Page::Main, OverlayKind::Result)
         );
         assert!(state.draft.is_none());
+        // Nothing was broken: the result says the layout is in effect, not "recovered".
+        let shown = crate::vm::result::shown_result(&state, Lang::Ja).unwrap();
+        assert_eq!(shown.message, "反映しました。");
+        let shown = crate::vm::result::shown_result(&state, Lang::En).unwrap();
+        assert_eq!(shown.message, "Put into effect.");
+        // A recovery started from the recovery page is still "recovered".
+        state.applying_now = false;
+        let shown = crate::vm::result::shown_result(&state, Lang::Ja).unwrap();
+        assert_eq!(shown.message, "回復しました。");
     }
 
     #[test]

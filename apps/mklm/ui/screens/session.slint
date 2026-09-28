@@ -97,19 +97,24 @@ export component CountdownDialog inherits DialogFrame {
         }
     }
 
+    // "このままにする" comes first in the focus order, so that one Tab from the key test reaches
+    // it, as the announced instruction says (design m3 B.6, review U10); `layout-order` keeps
+    // the look of [元に戻す] [このままにする].
     DialogButtons {
         Button {
-            text: @tr("Revert");
+            text: @tr("Keep this layout");
+            primary: true;
+            layout-order: 2;
             clicked => {
-                root.revert();
+                root.keep();
             }
         }
 
         Button {
-            text: @tr("Keep this layout");
-            primary: true;
+            text: @tr("Revert");
+            layout-order: 1;
             clicked => {
-                root.keep();
+                root.revert();
             }
         }
     }

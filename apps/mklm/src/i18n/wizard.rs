@@ -54,7 +54,7 @@ pub fn welcome_points(lang: Lang) -> Vec<String> {
             "MKLM records the values before its first change; \"Back to before MKLM\" puts them back later.",
         ),
         (
-            "何も変えずに終えることもできます。そのときは「後でセットアップする」を押してください。設定画面から、もう一度始められます。",
+            "何も変えずに終えることもできます。そのときは［後でセットアップする］を押してください。設定画面から、もう一度始められます。",
             "You can also finish without changing anything: choose \"Set up later\". The setup can be started again from Settings.",
         ),
     ]
@@ -165,7 +165,7 @@ pub fn input_warning(warning: &InputWarning, lang: Lang) -> String {
 pub fn sign_in_copy_steps(lang: Lang) -> String {
     pick(
         lang,
-        "サインイン画面の入力方式を合わせるには: ［地域（設定のコピー）］を開き、［管理］タブの［設定のコピー］で「ようこそ画面とシステム アカウント」にチェックを付けて確定します。",
+        "サインイン画面の入力方式を合わせるには: ［地域（設定のコピー）］を開き、［管理］タブの［設定のコピー］で「ようこそ画面とシステム アカウント」にチェックを付けて［OK］を押します。",
         "To give the sign-in screen your input methods: open \"Region (copy settings)\", and on the Administrative tab choose \"Copy settings\", check \"Welcome screen and system accounts\" and confirm.",
     )
 }
@@ -427,7 +427,7 @@ pub fn cleanup_line(name: &str, lang: Lang) -> String {
 pub fn one_by_one_note(lang: Lang) -> String {
     pick(
         lang,
-        "キーボードごとに順に変更します（同時に行える変更は 1 つです）。それぞれの画面で切り替え方を確かめて「変更する」を押してください。",
+        "キーボードごとに順に変更します（同時に行える変更は 1 つです）。それぞれの画面で切り替え方を確かめて［変更する］を押してください。",
         "The keyboards are changed one at a time (one change can be made at a time). On each page, check how the change takes effect and choose Change.",
     )
 }

@@ -61,6 +61,11 @@ pub struct RecoveryItem {
     pub can_keep: bool,
     /// ... and "元に戻す…" (the revert preview), when the helper would accept it.
     pub can_revert: bool,
+    /// The accessible labels of those two buttons, naming the operation ("Keychron Receiver を
+    /// JIS に（確認待ち）をこのままにする"; design m3 E.2): with two entries, the buttons would
+    /// otherwise be read with the same names. Empty without the button.
+    pub keep_label: String,
+    pub revert_label: String,
 }
 
 /// The two ways a HID keyboard takes the values back (design m3 B.5).
@@ -271,13 +276,26 @@ pub fn recovery_page(
         {
             method_visible = true;
         }
+        let operation = text::recovery_operation(
+            &kind_text(&entry.kind, name_of, lang),
+            &text::entry_phase(phase(entry, item.attention), lang),
+            lang,
+        );
+        let can_keep = item.attention == Attention::AwaitingUser && item.decidable;
+        let can_revert = can_keep && item.revertible;
         items.push(RecoveryItem {
             op_id: entry.op_id.to_string(),
-            operation: text::recovery_operation(
-                &kind_text(&entry.kind, name_of, lang),
-                &text::entry_phase(phase(entry, item.attention), lang),
-                lang,
-            ),
+            keep_label: if can_keep {
+                text::recovery_keep_label(&operation, lang)
+            } else {
+                String::new()
+            },
+            revert_label: if can_revert {
+                text::recovery_revert_label(&operation, lang)
+            } else {
+                String::new()
+            },
+            operation,
             outcome,
             tone: match (item.attention, &decision) {
                 (Attention::Busy, _) => Tone::Neutral,
@@ -286,10 +304,8 @@ pub fn recovery_page(
                 }
                 _ => Tone::Info,
             },
-            can_keep: item.attention == Attention::AwaitingUser && item.decidable,
-            can_revert: item.attention == Attention::AwaitingUser
-                && item.decidable
-                && item.revertible,
+            can_keep,
+            can_revert,
         });
     }
     let can_recover = entries.iter().any(|item| {
@@ -472,6 +488,11 @@ impl SnapshotText for RecoveryPage {
                 if item.can_keep { " [keep]" } else { "" },
                 if item.can_revert { " [revert]" } else { "" }
             ));
+            for label in [&item.keep_label, &item.revert_label] {
+                if !label.is_empty() {
+                    out.push_str(&format!("  button: {label}\n"));
+                }
+            }
         }
         for (label, value) in [
             ("empty", &self.empty_note),
@@ -725,6 +746,8 @@ mod tests {
             "title: 確認が必要なことがあります\n\
              item: Keychron Receiver を JIS に（確認待ち）\n\
              \x20 このままにするか、元に戻すかを選んでください (Warning) [keep] [revert]\n\
+             \x20 button: Keychron Receiver を JIS に（確認待ち）をこのままにする\n\
+             \x20 button: Keychron Receiver を JIS に（確認待ち）を元に戻す…\n\
              uac: 次に Windows の確認画面が出ます（発行元は「不明」）。mklm-helper.exe であることを確かめて「はい」を押してください。\n\
              buttons: [後で] [undo]\n"
         );

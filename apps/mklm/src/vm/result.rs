@@ -28,6 +28,8 @@ pub struct ResultView {
     /// （変更前のまま）"), from the `SystemRead` after the session; "確かめています…" until it
     /// arrives.
     pub current_state: Vec<String>,
+    /// What happened, one part per line (design m3 B.12 "行ごとに出す"): the outcome, each
+    /// recovered operation, what is still pending and what to do about it.
     pub message: String,
     pub tone: Tone,
     /// US was kept: "US 配列には『半角/全角』キーがありません…［入力方式の案内］" (plan 3.4,
@@ -63,6 +65,9 @@ pub struct ResultContext<'a> {
     pub targets: &'a [SessionTarget],
     /// The request's last session view (the operation ID, whether the reset was reached).
     pub view: Option<&'a SessionView>,
+    /// The request was "今すぐ反映…" (`AppState::applying_now`): a `Recover` that only put
+    /// saved values into effect is "反映しました", not "回復しました" (design m3 B.12).
+    pub apply_now: bool,
 }
 
 /// The tone of a class.
@@ -208,6 +213,9 @@ fn finished(
         }
         // The recovered rows say what happened.
         (None, Outcome::Recovered, _) if !result.recovered.is_empty() => {}
+        (None, Outcome::Recovered, _) if context.apply_now => {
+            parts.message.push(i18n::result_applied_now(lang));
+        }
         (None, outcome, _) => parts.message.push(i18n::result_outcome(outcome, lang)),
     }
     for recovered in &result.recovered {
@@ -345,10 +353,9 @@ pub fn result_view(
     ResultView {
         title: i18n::outcome_title(parts.class, lang),
         current_state: current_state(context.targets, after, lang),
-        message: parts.message.join(match lang {
-            Lang::Ja => "",
-            Lang::En => " ",
-        }),
+        // One part per line: the parts are sentences and short status lines ("保存済み（反映待ち:
+        // …）") that would run together on one line.
+        message: parts.message.join("\n"),
         tone: class_tone(parts.class),
         ime_note: if ime {
             i18n::ime_note_us(lang)
@@ -516,6 +523,7 @@ pub fn shown_result(state: &crate::state::AppState, lang: Lang) -> Option<Result
         request: state.request.as_ref(),
         targets: &state.targets,
         view: state.last_view.as_deref(),
+        apply_now: state.applying_now,
     };
     let after = if state.result_read_pending {
         None
@@ -538,8 +546,10 @@ impl SnapshotText for ResultView {
         for line in &self.current_state {
             out.push_str(&format!("now: {line}\n"));
         }
+        for line in self.message.lines() {
+            out.push_str(&format!("message: {line}\n"));
+        }
         for (label, text) in [
-            ("message", &self.message),
             ("ime", &self.ime_note),
             ("run once", &self.run_once_note),
             ("next", &self.next_step),
@@ -655,6 +665,7 @@ mod tests {
             request: None,
             targets: &targets,
             view: None,
+            apply_now: false,
         };
         let done = finished_report(result(Outcome::Confirmed, None));
         let waiting = view(&done, &context, None, Lang::Ja);
@@ -694,6 +705,7 @@ mod tests {
             request: Some(&request),
             targets: &targets,
             view: None,
+            apply_now: false,
         };
         let after = read_after(KeyboardType::US);
         let ja = view(
@@ -728,7 +740,7 @@ mod tests {
             "title: 自動で元に戻しました\n\
              tone: Warning\n\
              now: Keychron Receiver: JIS として動作中（変更前のまま）\n\
-             message: 時間内に「このままにする」が選ばれなかったため、元に戻しました\n"
+             message: 時間内に［このままにする］が選ばれなかったため、元に戻しました\n"
         );
         assert_eq!(expired.next, None);
     }
@@ -850,8 +862,8 @@ mod tests {
             ja.snapshot_text(),
             "title: 自動で元に戻しました\n\
              tone: Warning\n\
-             message: MKLM の管理用プログラムが止まったため、すぐに回復しました。\
-             途中で止まりました → 元に戻しました（リセットの前に止まっていたため、キーボードの動作は変わっていません）\n"
+             message: MKLM の管理用プログラムが止まったため、すぐに回復しました。\n\
+             message: 途中で止まりました → 元に戻しました（リセットの前に止まっていたため、キーボードの動作は変わっていません）\n"
         );
         plain_japanese(&ja.snapshot_text());
         assert!(ja.details.contains("exit code 1"), "{}", ja.details);
@@ -945,5 +957,60 @@ mod tests {
             "A change waits for a PC restart (Keychron Receiver to JIS); until then no other change is possible."
         );
         assert!(en.details.contains("3f2a9c1e"));
+    }
+
+    /// Every part of a result is a line of its own (design m3 B.12): undoing two changes that
+    /// waited for the user, and a revert that leaves a reset pending, in both languages.
+    #[test]
+    fn each_part_of_a_result_is_a_line() {
+        let undone = |id: &str| RecoveredOp {
+            op_id: OpId::parse(id).unwrap(),
+            from: OpState::AwaitingConfirm,
+            to: OpState::Reverted,
+            decision: "undo".into(),
+        };
+        let mut undo = result(Outcome::Recovered, None);
+        undo.op_id = None;
+        undo.recovered = vec![
+            undone("3f2a9c1e-5b7d-4e8a-9c0f-1a2b3c4d5e6f"),
+            undone("1ef48b2f-8fca-4c9b-80f5-dfc0965c17a6"),
+        ];
+        undo.pending_action = Some(PendingAction::ResetKeyboard);
+        let context = ResultContext::default();
+        let ja = view(&finished_report(undo.clone()), &context, None, Lang::Ja);
+        assert_eq!(
+            ja.message,
+            "確認待ち → 元に戻しました\n\
+             確認待ち → 元に戻しました\n\
+             保存済み（反映待ち: キーボードのリセットが必要）\n\
+             抜き差しするか、［今すぐ反映…］を押してください"
+        );
+        let en = view(&finished_report(undo), &context, None, Lang::En);
+        assert_eq!(en.message.lines().count(), 4, "{}", en.message);
+        assert!(
+            en.snapshot_text()
+                .lines()
+                .filter(|l| l.starts_with("message: "))
+                .count()
+                == 4
+        );
+
+        let mut revert = result(Outcome::Reverted, None);
+        revert.pending_action = Some(PendingAction::ResetKeyboard);
+        let ja = view(&finished_report(revert.clone()), &context, None, Lang::Ja);
+        assert_eq!(
+            ja.message,
+            "元に戻しました。\n\
+             保存済み（反映待ち: キーボードのリセットが必要）\n\
+             抜き差しするか、［今すぐ反映…］を押してください"
+        );
+        let en = view(&finished_report(revert), &context, None, Lang::En);
+        assert_eq!(
+            en.message.lines().next(),
+            Some("Put back as it was."),
+            "{}",
+            en.message
+        );
+        assert_eq!(en.message.lines().count(), 3);
     }
 }

@@ -68,6 +68,9 @@ pub enum ListOp<T> {
 /// The operations that turn `old` into `new`, rows matched by `key`: removals of rows that are
 /// gone (from the end), then per position an unchanged row (nothing), a changed row (`Set`), a
 /// moved row (`Remove` + `Insert`) or a new one (`Insert`), then removal of what is left over.
+///
+/// Keys should be unique, but a repeated key is no error: a row to move is looked for only among
+/// the rows not yet placed, so every index stays in range and the result is always `new`.
 pub fn list_ops<T: Clone + PartialEq>(
     old: &[T],
     new: &[T],
@@ -90,7 +93,13 @@ pub fn list_ops<T: Clone + PartialEq>(
                 }
             }
             _ => {
-                if let Some(from) = current.iter().position(|r| key(r) == key(row)) {
+                // Only rows after the ones already placed (`current[..index]` is `new[..index]`).
+                if let Some(from) = current
+                    .iter()
+                    .skip(index)
+                    .position(|r| key(r) == key(row))
+                    .map(|offset| index + offset)
+                {
                     current.remove(from);
                     ops.push(ListOp::Remove(from));
                 }
@@ -122,7 +131,7 @@ pub fn apply_list_ops<T>(rows: &mut Vec<T>, ops: Vec<ListOp<T>>) {
 
 /// Words in Latin letters that a Japanese screen may contain (design m3 D.5, review U5): device
 /// names come from Windows and are passed in by the test; hexadecimal IDs (VID:PID, KLIDs) are
-/// skipped.
+/// skipped. "OK" is the button of Windows' own dialogs, as the Japanese Windows names it.
 #[cfg(test)]
 pub(crate) const LATIN_ALLOWED: &[&str] = &[
     "Shift",
@@ -143,10 +152,8 @@ pub(crate) const LATIN_ALLOWED: &[&str] = &[
     "JIS",
     "US",
     "MKLM",
-    "mklm",
-    "helper",
-    "exe",
     "PIN",
+    "OK",
     "IME",
     "PC",
     "Microsoft",
@@ -167,11 +174,16 @@ pub(crate) fn snapshot_values(snapshot: &str) -> String {
         .join("\n")
 }
 
+/// File names a Japanese screen may show as they are (design m3 D.5: "MKLM の管理用プログラム
+/// （mklm-helper.exe）"). Only the whole name is allowed: "helper" alone is a word D.5 forbids.
+#[cfg(test)]
+const FILE_NAMES_ALLOWED: &[&str] = &["mklm-helper.exe"];
+
 /// The Latin-letter words of `text` that are neither allowed nor part of `names`.
 #[cfg(test)]
 pub(crate) fn unexpected_latin(text: &str, names: &[&str]) -> Vec<String> {
     let mut stripped = text.to_string();
-    for name in names {
+    for name in FILE_NAMES_ALLOWED.iter().chain(names) {
         stripped = stripped.replace(name, " ");
     }
     stripped
@@ -213,6 +225,46 @@ mod tests {
         }
     }
 
+    /// Repeated keys (two rows with one display name) never produce an index out of range, and
+    /// the result is always the new list (the renderer's `VecModel` would panic otherwise).
+    #[test]
+    fn list_ops_survive_repeated_keys() {
+        fn key(row: &(String, u32)) -> &str {
+            &row.0
+        }
+        let old: Vec<(String, u32)> = Vec::new();
+        let new = rows("xx");
+        let mut applied = old.clone();
+        apply_list_ops(&mut applied, list_ops(&old, &new, key));
+        assert_eq!(applied, new);
+
+        // Every list of up to four rows over two keys, with two values, into every other.
+        let mut lists: Vec<Vec<(String, u32)>> = vec![Vec::new()];
+        for _ in 0..4 {
+            let longer: Vec<Vec<(String, u32)>> = lists
+                .iter()
+                .filter(|list| list.len() == lists.last().map_or(0, Vec::len))
+                .flat_map(|list| {
+                    [("a", 0), ("a", 1), ("b", 0), ("b", 1)]
+                        .into_iter()
+                        .map(move |(k, v)| {
+                            let mut list = list.clone();
+                            list.push((k.to_string(), v));
+                            list
+                        })
+                })
+                .collect();
+            lists.extend(longer);
+        }
+        for old in &lists {
+            for new in &lists {
+                let mut applied = old.clone();
+                apply_list_ops(&mut applied, list_ops(old, new, key));
+                assert_eq!(&applied, new, "{old:?} -> {new:?}");
+            }
+        }
+    }
+
     #[test]
     fn latin_words() {
         assert!(
@@ -226,5 +278,12 @@ mod tests {
             unexpected_latin("Raw Input: 0x7/0x2", &[]),
             vec!["Raw", "Input", "0x7", "0x2"]
         );
+        // The helper's file name is allowed as a whole, the word alone is not (design m3 D.5).
+        assert!(unexpected_latin("MKLM の管理用プログラム（mklm-helper.exe）", &[]).is_empty());
+        assert_eq!(
+            unexpected_latin("helper が応答しません", &[]),
+            vec!["helper"]
+        );
+        assert_eq!(unexpected_latin("mklm.exe", &[]), vec!["mklm", "exe"]);
     }
 }

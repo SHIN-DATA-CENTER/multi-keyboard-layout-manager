@@ -136,11 +136,19 @@ pub fn countdown(view: &SessionView, lang: Lang) -> Option<Countdown> {
     // hears (review U10): the focus lands on the key test, whose description this is.
     Some(Countdown {
         title: i18n::countdown_title(lang),
-        message: format!(
-            "{} {}",
-            changed.join(" "),
-            i18n::countdown_how(*seconds, lang)
-        ),
+        // Japanese sentences follow each other without a space.
+        message: match lang {
+            Lang::Ja => format!(
+                "{}{}",
+                changed.concat(),
+                i18n::countdown_how(*seconds, lang)
+            ),
+            Lang::En => format!(
+                "{} {}",
+                changed.join(" "),
+                i18n::countdown_how(*seconds, lang)
+            ),
+        },
         remaining: *remaining,
         total: *seconds,
         recognition: i18n::recognition(*verified, &arrivals, lang),
@@ -281,9 +289,9 @@ mod tests {
         assert_eq!(ja.remaining, 20);
         assert_eq!(
             ja.message,
-            "Keychron Receiver を JIS に切り替えました。 あと 20 秒で自動的に元に戻ります。\
+            "Keychron Receiver を JIS に切り替えました。あと 20 秒で自動的に元に戻ります。\
              そのキーボードで Shift+2 を押して確かめてから（\" なら JIS、@ なら US）、Tab で\
-             『このままにする』へ移って押してください。"
+             ［このままにする］へ移って押してください。"
         );
         assert_eq!(
             ja.recognition,
@@ -318,8 +326,8 @@ mod tests {
             tick(&mut view, remaining);
             let reminder = countdown(&view, Lang::En).unwrap().reminder;
             match remaining {
-                10 => assert_eq!(reminder, "10 seconds left"),
-                5 => assert_eq!(reminder, "5 seconds left"),
+                10 => assert_eq!(reminder, "Reverting in 10 seconds"),
+                5 => assert_eq!(reminder, "Reverting in 5 seconds"),
                 _ => assert_eq!(reminder, "", "{remaining}"),
             }
         }
@@ -344,11 +352,11 @@ mod tests {
         assert_eq!(
             ja.snapshot_text(),
             "title: 新しい配列を試してください\n\
-             message: Keychron Receiver を JIS に切り替えました。 あと 60 秒で自動的に元に戻ります。\
+             message: Keychron Receiver を JIS に切り替えました。あと 60 秒で自動的に元に戻ります。\
              そのキーボードで Shift+2 を押して確かめてから（\" なら JIS、@ なら US）、Tab で\
-             『このままにする』へ移って押してください。\n\
+             ［このままにする］へ移って押してください。\n\
              remaining: 5 / 60\n\
-             recognition: Windows の認識をまだ確かめられません。打鍵テストで確かめてください\n\
+             recognition: Windows の認識をまだ確かめられません。打鍵テストで確かめてください。\n\
              recognition tone: Warning\n\
              reminder: あと 5 秒で元に戻ります\n"
         );
@@ -360,7 +368,7 @@ mod tests {
              Press Shift+2 on that keyboard to check (\" means JIS, @ means US), then Tab to \
              \"Keep this layout\" and press it.\n\
              remaining: 20 / 20\n\
-             recognition: Windows reports: Keychron Receiver reports JIS ✓\n\
+             recognition: Windows reports: Keychron Receiver: JIS ✓\n\
              recognition tone: Success\n\
              reminder: \n"
         );

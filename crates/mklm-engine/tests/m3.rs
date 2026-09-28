@@ -6,7 +6,8 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,7 @@ use mklm_core::{
     JournalEntry, KeyboardType, LayoutChoice, Liveness, OpId, OpKind, OpState, OperationError,
     Outcome, PlanError, RESTORE_ON_UNINSTALL_VALUE, RegValue, RestoreScope, attention, fixtures,
 };
-use mklm_engine::memory::{Hive, MemoryRegistry, Mutation, ScriptedSink};
+use mklm_engine::memory::{CrashImage, FaultPlan, Hive, MemoryRegistry, Mutation, ScriptedSink};
 use mklm_engine::{
     DecisionPoll, EngineError, EventSink, Host, JournalSlot, MachineSettingsParams,
     RegistryBackend, ResolveParams, RestoreMode, SessionEnd, SessionEndSink,
@@ -216,6 +217,72 @@ fn a_cleanup_is_reverted_undone_and_restored_like_any_change() {
     assert_eq!(kept.outcome, Outcome::Confirmed);
     assert!(w.journal().baselines.is_empty(), "back at the baselines");
     no_in_flight(&w);
+}
+
+/// A restore to baseline that only puts back values no driver reads leaves no keyboard waiting
+/// (m2 D.11), also for a keyboard that is not present (no Raw Input report can clear it) and
+/// when a crash interrupts the restore and recovery closes it.
+#[test]
+fn a_restore_of_values_no_driver_reads_leaves_nothing_to_apply() {
+    let phantom = fixtures::ms_ble_phantom();
+    let base = {
+        let mut w = World::dev_machine();
+        w.registry
+            .seed(&device(&phantom.instance_id), PS2_TYPE, dword(7));
+        let op = op_of(&World::ok(w.cleanup(&phantom.instance_id, &[PS2_TYPE])));
+        World::ok(w.confirm(&op));
+        w.fork()
+    };
+
+    let mut w = base.fork();
+    let result = World::ok(w.restore_all(RestoreMode::Interactive));
+    assert_eq!(result.outcome, Outcome::AwaitingConfirm);
+    assert_eq!(result.pending_action, None);
+    assert_eq!(w.value(&device(&phantom.instance_id), PS2_TYPE), dword(7));
+    let restore = op_of(&result);
+    let entry = w.entry(&restore);
+    assert_eq!((entry.apply, entry.apply_pending), (None, None));
+    let kept = World::ok(w.confirm(&restore));
+    assert_eq!(
+        (kept.outcome, kept.pending_action),
+        (Outcome::Confirmed, None)
+    );
+    assert_eq!(w.entry(&restore).apply_pending, None);
+
+    // Reverted instead of kept: the same.
+    let mut w = base.fork();
+    let restore = op_of(&World::ok(w.restore_all(RestoreMode::Interactive)));
+    let back = World::ok(w.revert(&restore, NO_RESET));
+    assert_eq!(
+        (back.outcome, back.pending_action),
+        (Outcome::Reverted, None)
+    );
+    assert_eq!(w.entry(&restore).apply_pending, None);
+
+    // A crash at every point of the restore, then recovery.
+    let total = {
+        let mut dry = base.fork();
+        World::ok(dry.restore_all(RestoreMode::Interactive));
+        dry.registry.mutating_calls()
+    };
+    for n in 0..total {
+        let mut run = base.fork();
+        run.registry.set_faults(FaultPlan {
+            crash_after: Some(n),
+            ..Default::default()
+        });
+        let _ = run.restore_all(RestoreMode::Interactive);
+        let mut after = run.after_crash(CrashImage::ProcessKill, false);
+        let recovered = World::ok(after.recover());
+        assert_eq!(recovered.pending_action, None, "crash after {n}");
+        for entry in &after.journal().entries {
+            assert_eq!(
+                entry.apply_pending, None,
+                "crash after {n}: {} {:?}",
+                entry.op_id, entry.state
+            );
+        }
+    }
 }
 
 #[test]
@@ -774,6 +841,122 @@ fn the_callers_answer_comes_first() {
 }
 
 #[test]
+fn a_decision_that_already_arrived_comes_before_the_session_end() {
+    /// Ends the session as the countdown starts, while the caller's Keep is already queued.
+    struct EndsAtCountdown {
+        guard: Arc<SessionEnd>,
+        inner: ScriptedSink,
+    }
+    impl EventSink for EndsAtCountdown {
+        fn event(&mut self, event: &Event) {
+            self.inner.event(event);
+            if matches!(event, Event::CountdownStarted { .. }) {
+                let _ = self.guard.query_end_session(Duration::ZERO);
+            }
+        }
+        fn check_cancelled(&mut self) -> bool {
+            self.inner.check_cancelled()
+        }
+        fn wait_decision(&mut self, timeout: Duration) -> DecisionPoll {
+            self.inner.wait_decision(timeout)
+        }
+    }
+    let mut w = World::dev_machine();
+    let guard = Arc::new(SessionEnd::new());
+    let mut inner = EndsAtCountdown {
+        guard: Arc::clone(&guard),
+        inner: ScriptedSink::new([ScriptedSink::keep()]),
+    };
+    let params = set_params(KEYCHRON, LayoutChoice::Jis, LIVE);
+    let result = {
+        let mut sink = SessionEndSink::new(&mut inner, &guard);
+        World::ok(w.run(|e| e.set_layout(&params, &mut sink)))
+    };
+    assert!(guard.is_ending());
+    assert_eq!(
+        result.outcome,
+        Outcome::Confirmed,
+        "the caller's Keep stands"
+    );
+    assert_eq!(w.hid(KEYCHRON), jis());
+    assert_eq!(w.devices.restarted().len(), 1, "no second reset");
+    assert!(guard.query_end_session(Duration::ZERO));
+    no_in_flight(&w);
+}
+
+#[test]
+fn a_session_end_while_the_keyboard_is_reset_waits_for_the_revert() {
+    /// Sends `WM_QUERYENDSESSION` and `WM_ENDSESSION(TRUE)` from a window thread as the keyboard
+    /// is reset, before the countdown starts, and gives that thread the time it would have.
+    struct EndsDuringReset {
+        guard: Arc<SessionEnd>,
+        log: Arc<Mutex<Vec<Event>>>,
+        window: Option<thread::JoinHandle<(bool, bool, bool)>>,
+        inner: ScriptedSink,
+    }
+    impl EventSink for EndsDuringReset {
+        fn event(&mut self, event: &Event) {
+            self.log.lock().expect("the event log").push(event.clone());
+            if matches!(event, Event::ResettingKeyboard { .. }) && self.window.is_none() {
+                let guard = Arc::clone(&self.guard);
+                let log = Arc::clone(&self.log);
+                let answered = Arc::new(AtomicBool::new(false));
+                let flag = Arc::clone(&answered);
+                self.window = Some(thread::spawn(move || {
+                    let restored = guard.query_end_session(Duration::from_secs(10));
+                    let counted = log
+                        .lock()
+                        .expect("the event log")
+                        .iter()
+                        .any(|e| matches!(e, Event::CountdownStarted { .. }));
+                    flag.store(true, Ordering::SeqCst);
+                    let finished = guard.end_session(true, Duration::from_secs(10));
+                    (restored, counted, finished)
+                }));
+                let start = Instant::now();
+                while !answered.load(Ordering::SeqCst)
+                    && start.elapsed() < Duration::from_millis(300)
+                {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+            self.inner.event(event);
+        }
+        fn check_cancelled(&mut self) -> bool {
+            self.inner.check_cancelled()
+        }
+        fn wait_decision(&mut self, timeout: Duration) -> DecisionPoll {
+            self.inner.wait_decision(timeout)
+        }
+    }
+    let mut w = World::dev_machine();
+    let guard = Arc::new(SessionEnd::new());
+    let mut inner = EndsDuringReset {
+        guard: Arc::clone(&guard),
+        log: Arc::new(Mutex::new(Vec::new())),
+        window: None,
+        inner: ScriptedSink::default(),
+    };
+    let params = set_params(KEYCHRON, LayoutChoice::Jis, LIVE);
+    let result = {
+        let mut sink = SessionEndSink::new(&mut inner, &guard);
+        World::ok(w.run(|e| e.set_layout(&params, &mut sink)))
+    };
+    let window = inner.window.take().expect("the keyboard was reset");
+    let (restored, counted, finished) = window.join().expect("the window thread");
+    assert!(
+        restored && counted,
+        "WM_QUERYENDSESSION waited for the countdown to start and revert"
+    );
+    assert!(finished, "WM_ENDSESSION waited for the revert to finish");
+    assert_eq!((result.outcome, result.failure), (Outcome::Reverted, None));
+    assert_eq!(w.hid(KEYCHRON), us());
+    assert_eq!(w.devices.running_type(KEYCHRON), Some(KeyboardType::US));
+    assert_eq!(w.devices.restarted().len(), 2);
+    no_in_flight(&w);
+}
+
+#[test]
 fn while_the_session_ends_nothing_new_is_written() {
     let base = World::dev_machine();
     let guard = SessionEnd::new();
@@ -814,7 +997,7 @@ fn the_schema_1_journal_of_the_development_machine_keeps_working() {
     w.seed_journal(&ops, &baselines);
     let journal = w.journal();
     assert!(journal.unreadable.is_empty());
-    assert_eq!(journal.entries.len(), 2);
+    assert_eq!(journal.entries.len(), 9);
 
     // A new set: journaled next to them in schema 1; the M2 baselines of the Keychron stay.
     let set = World::ok(w.set(
@@ -827,7 +1010,7 @@ fn the_schema_1_journal_of_the_development_machine_keeps_working() {
     let set_op = op_of(&set);
     assert!(stored_json(&w, &set_op).starts_with("{\"schema_version\":1,"));
     let entry = w.entry(&set_op);
-    assert_eq!(entry.seq, 6, "after the stored seq 5");
+    assert_eq!(entry.seq, 10, "after the stored seq 9");
     let journal = w.journal();
     assert_eq!(
         journal.baselines.len(),

@@ -2876,6 +2876,11 @@ where
     /// (`as_of_now`: as if its last write phase were this boot, for values recovery just wrote),
     /// merged with what the entry already holds for this boot, without the keyboards whose Raw
     /// Input already reports the stored type (what the next request's housekeeping would clear).
+    ///
+    /// Records of values their keyboard's driver does not read (`is_unread_value`, what a cleanup
+    /// deleted and a restore to baseline puts back) are left out for every kind of operation, as
+    /// `restore_baseline` leaves them out of `apply` (D.11): no driver runs with
+    /// anything but its stored values because of them, so no keyboard waits for them.
     fn close_pending(
         &mut self,
         s: &mut Session<'_>,
@@ -2883,13 +2888,14 @@ where
         reapplied: &[String],
         as_of_now: bool,
     ) -> Result<Option<ApplyPending>, EngineError> {
-        let computed = if as_of_now {
-            let mut probe = entry.clone();
+        let mut probe = entry.clone();
+        probe
+            .records
+            .retain(|r| !is_unread_value(&s.keyboards, &r.target, &r.name));
+        if as_of_now {
             probe.boot_id = s.boot;
-            apply_pending_on_close(&probe, s.boot, reapplied)
-        } else {
-            apply_pending_on_close(entry, s.boot, reapplied)
-        };
+        }
+        let computed = apply_pending_on_close(&probe, s.boot, reapplied);
         let held = entry
             .apply_pending
             .clone()

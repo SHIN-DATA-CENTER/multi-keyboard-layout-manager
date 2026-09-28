@@ -6,6 +6,7 @@
 // control is off while a dialog is open over the page (`Modal`, design m3 E.1).
 
 import { Button, CheckBox, ComboBox } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
 import { KeyTestVm, Tone, WizardKeyboardVm, WizardVm } from "../structs.slint";
 import {
     Banner, Body, Caption, DialogBody, DialogButtons, KeyTestArea, Modal, PageHeader, RadioList,
@@ -46,7 +47,9 @@ component WizardRow inherits VerticalLayout {
             }
         }
 
+        // One width for every row, so that the choices line up (the name takes the rest).
         if root.keyboard.can-choose: ValueComboBox {
+            width: 120px * Theme.font-scale;
             model: ["JIS", "US"];
             value: root.keyboard.choice;
             enabled: !Modal.open;
@@ -100,7 +103,15 @@ export component WizardScreen inherits VerticalLayout {
     padding: 16px;
     spacing: 12px;
 
-    PageHeader {
+    // The screen stays while the steps change in it: each new step moves the focus to the title
+    // again, which reads the title and "手順 2 / 4: 入力方式", as a new page would (design m3 B.0,
+    // E.1; review U16).
+    private property <int> step: root.vm.step;
+    changed step => {
+        header.focus-heading();
+    }
+
+    header := PageHeader {
         title: @tr("Set up MKLM");
         subtitle: root.vm.heading;
     }
@@ -110,7 +121,8 @@ export component WizardScreen inherits VerticalLayout {
             text: root.vm.body;
         }
         for line in root.vm.lines: Body {
-            text: "・" + line;
+            // The bullet is translated: "・" in Japanese, "•" in English.
+            text: @tr("• {}", line);
         }
         for warning in root.vm.warnings: Banner {
             text: warning;
@@ -253,7 +265,9 @@ export component WizardScreen inherits VerticalLayout {
             horizontal-stretch: 1;
         }
 
-        Button {
+        // Not on the last step, where "完了" finishes with the sign-in start switch: "後で" there
+        // would finish too but silently ignore the switch.
+        if !root.vm.autostart-visible: Button {
             text: @tr("Set up later");
             enabled: !Modal.open;
             clicked => {

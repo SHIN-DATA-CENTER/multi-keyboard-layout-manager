@@ -6,9 +6,11 @@
 //! "disconnect means revert" rule (design m2 E.7) may never fire. The helper therefore watches the
 //! session itself (`mklm_win::session_end`) and, on `WM_QUERYENDSESSION`, reverts a running
 //! countdown exactly as if the caller had answered `RevertNow`; the caller's own answer, if it
-//! came first, stands. A change waiting for a reconnect stays in `AwaitingConfirm` (nothing is
-//! reverted without a countdown, design m2 D.2 b). The last resort stays the recovery at the next
-//! start (the RunOnce entry the GUI registers).
+//! came first, stands. An operation still in flight before its countdown (its values being
+//! written, or its keyboard reset) is waited for too: the engine's cancellation points roll it
+//! back, or its countdown reverts as soon as it starts. A change waiting for a reconnect stays in
+//! `AwaitingConfirm` (nothing is reverted without a countdown, design m2 D.2 b). The last resort
+//! stays the recovery at the next start (the RunOnce entry the GUI registers).
 //!
 //! [`SessionEnd`] is the state shared with the window thread; [`SessionEndSink`] wraps the
 //! request's [`EventSink`] to follow the countdown and to answer for the user when the session
@@ -25,12 +27,24 @@ use crate::sink::{DecisionPoll, EventSink};
 /// session end reaches it within a fraction of a second rather than at the next one-second tick.
 pub const COUNTDOWN_SLICE: Duration = Duration::from_millis(100);
 
+/// How long the session end looks for a decision the caller already sent before it answers
+/// `RevertNow` itself: long enough to take a frame that has arrived, too short to delay the
+/// revert.
+const ALREADY_SENT_POLL: Duration = Duration::from_millis(1);
+
 /// Where the request stands, as far as a session end cares.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 enum Phase {
-    /// No countdown runs.
+    /// Nothing is in flight and no countdown runs.
     #[default]
     Idle,
+    /// The operation is in flight before any countdown (`Planned`, `Written`, `Restarting`, or a
+    /// revert's `RevertPending`): its values are being written or its keyboard reset. While the
+    /// session ends, the engine's cancellation points roll it back, or its countdown reverts at
+    /// the first wait; the window waits (bounded) for either. It lasts through the
+    /// `AwaitingConfirm` that precedes `CountdownStarted`, and ends with a terminal state or with
+    /// a wait for a decision without a countdown (a reconnect wait, design m2 D.2 b).
+    InFlight(OpId),
     /// A countdown runs for this operation.
     Counting(OpId),
     /// Its revert started (`RevertPending` flushed).
@@ -44,7 +58,10 @@ impl Phase {
     fn op(&self) -> Option<&OpId> {
         match self {
             Phase::Idle => None,
-            Phase::Counting(op) | Phase::Reverting(op) | Phase::Restored(op) => Some(op),
+            Phase::InFlight(op)
+            | Phase::Counting(op)
+            | Phase::Reverting(op)
+            | Phase::Restored(op) => Some(op),
         }
     }
 }
@@ -101,9 +118,12 @@ impl SessionEnd {
     }
 
     /// `WM_QUERYENDSESSION`: the session may end. A running countdown reverts at once, as on
-    /// `RevertNow` (unless the caller answered first), and new writes are not started. Waits up to
-    /// `wait` for the reverted values to be written and flushed; true when no countdown is left
-    /// that still has to put values back. The window answers `TRUE` either way.
+    /// `RevertNow` (unless the caller answered first), and new writes are not started. An
+    /// operation in flight before its countdown (writing, or resetting its keyboard) is rolled
+    /// back at the engine's next cancellation point, or its countdown reverts as soon as it
+    /// starts. Waits up to `wait` for the values to be back (the reverted values written and
+    /// flushed, or the operation closed); true when nothing is left that still has to put values
+    /// back. The window answers `TRUE` either way.
     pub fn query_end_session(&self, wait: Duration) -> bool {
         let mut state = self.lock();
         state.ending = true;
@@ -114,8 +134,9 @@ impl SessionEnd {
     }
 
     /// `WM_ENDSESSION`. `ending` true: the process may be terminated once this returns; waits up
-    /// to `wait` for a revert in progress to finish (the old layout re-applied, the entry closed).
-    /// False: the session goes on; writes may start again. True when nothing is in progress.
+    /// to `wait` for a revert, or an operation in flight, to finish (the old layout re-applied,
+    /// the entry closed). False: the session goes on; writes may start again. True when nothing
+    /// is in progress.
     pub fn end_session(&self, ending: bool, wait: Duration) -> bool {
         let mut state = self.lock();
         state.ending = ending;
@@ -140,6 +161,16 @@ impl SessionEnd {
     fn observe(&self, event: &Event) {
         let mut state = self.lock();
         let next = match (event, &state.phase) {
+            (Event::Planned { op_id, .. }, Phase::Idle) => Some(Phase::InFlight(op_id.clone())),
+            (Event::StateChanged { op_id, state: to }, Phase::Idle) if to.is_in_flight() => {
+                Some(Phase::InFlight(op_id.clone()))
+            }
+            (Event::StateChanged { op_id, state: to }, Phase::InFlight(op)) if op == op_id => {
+                (!to.is_in_flight() && *to != OpState::AwaitingConfirm).then_some(Phase::Idle)
+            }
+            (Event::WaitingForReconnect { op_id, .. }, Phase::InFlight(op)) if op == op_id => {
+                Some(Phase::Idle)
+            }
             (Event::CountdownStarted { op_id, .. }, _) => Some(Phase::Counting(op_id.clone())),
             (Event::StateChanged { op_id, state: to }, phase) if phase.op() == Some(op_id) => {
                 match (to, phase) {
@@ -161,6 +192,23 @@ impl SessionEnd {
             state.phase = next;
             self.changed.notify_all();
         }
+    }
+
+    /// The request waits for a decision without a countdown (a reconnect wait, or the wait for a
+    /// later decision): an operation in flight is not any more, and the session end does not
+    /// wait for it (nothing is reverted without a countdown, design m2 D.2 b).
+    fn waits_without_countdown(&self) {
+        let mut state = self.lock();
+        if matches!(state.phase, Phase::InFlight(_)) {
+            state.phase = Phase::Idle;
+            self.changed.notify_all();
+        }
+    }
+
+    /// True when the session is ending and a countdown runs, i.e. when `revert_due` would answer.
+    fn revert_is_due(&self) -> bool {
+        let state = self.lock();
+        state.ending && matches!(state.phase, Phase::Counting(_))
     }
 
     /// The operation whose countdown must revert now: the session is ending and a countdown runs.
@@ -191,7 +239,8 @@ impl SessionEnd {
 /// - while the session is ending, `check_cancelled` is true: nothing new is journaled and no
 ///   keyboard is reset (the engine's two cancellation points, design m2 S4);
 /// - during a countdown, the wait for a decision is sliced ([`COUNTDOWN_SLICE`]) and answers
-///   `RevertNow` for the running operation as soon as the session ends;
+///   `RevertNow` for the running operation as soon as the session ends, unless the caller's own
+///   decision has already arrived;
 /// - dropping it (the request returned) marks the request finished.
 pub struct SessionEndSink<'a> {
     inner: &'a mut dyn EventSink,
@@ -211,7 +260,17 @@ impl<'a> SessionEndSink<'a> {
         Self { inner, guard }
     }
 
-    fn revert_now(&self) -> Option<DecisionPoll> {
+    /// The answer once the session end is due to revert the running countdown: a decision the
+    /// caller already sent (a frame that has arrived, or one the inner sink queued) comes first
+    /// (design m3 A.5: "呼び出し元が先に送っていれば何もしない"); otherwise `RevertNow`. `None`
+    /// while no revert is due.
+    fn answer_or_revert(&mut self) -> Option<DecisionPoll> {
+        if !self.guard.revert_is_due() {
+            return None;
+        }
+        if let answer @ DecisionPoll::Decided(_) = self.inner.wait_decision(ALREADY_SENT_POLL) {
+            return Some(answer);
+        }
         self.guard
             .revert_due()
             .map(|op_id| DecisionPoll::Decided(Decision::RevertNow { op_id }))
@@ -235,11 +294,12 @@ impl EventSink for SessionEndSink<'_> {
     }
 
     fn wait_decision(&mut self, timeout: Duration) -> DecisionPoll {
-        if let Some(revert) = self.revert_now() {
-            return revert;
+        if let Some(answer) = self.answer_or_revert() {
+            return answer;
         }
         if !self.guard.is_counting_down() {
             // A reconnect wait (or any other): the session end changes nothing there.
+            self.guard.waits_without_countdown();
             return self.inner.wait_decision(timeout);
         }
         let Some(deadline) = Instant::now().checked_add(timeout) else {
@@ -254,8 +314,8 @@ impl EventSink for SessionEndSink<'_> {
                 DecisionPoll::NoDecision => {}
                 answer => return answer,
             }
-            if let Some(revert) = self.revert_now() {
-                return revert;
+            if let Some(answer) = self.answer_or_revert() {
+                return answer;
             }
             // Past the deadline, or an inner sink that does not block (a test sink needs no
             // clock): the wait is over; the countdown asks again on its next tick.

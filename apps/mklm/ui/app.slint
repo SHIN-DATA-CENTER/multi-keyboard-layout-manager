@@ -134,6 +134,8 @@ export component AppWindow inherits Window {
     // --- The change page (B.3 to B.5) ---
     in property <string> change-keyboard-name;
     in property <[ChoiceVm]> change-choices;
+    // Switch now / at the restart (review U1), a kept model like `change-choices`.
+    in property <[ChoiceVm]> change-method-choices;
     in-out property <int> change-selected: -1;
     in-out property <int> change-method: -1;
     in-out property <int> change-standard: -1;
@@ -230,6 +232,8 @@ export component AppWindow inherits Window {
     callback open-recovery-folder();
     in property <RecoveryPageVm> recovery;
     in property <[RecoveryItemVm]> recovery-items;
+    // Switch back now / when replugged (design m3 B.5), a kept model.
+    in property <[ChoiceVm]> recovery-method-choices;
     // The apply method of the recovery page (0 = now, 1 = later), from the state.
     in-out property <int> recovery-method: 1;
     callback recovery-choose-method(int);
@@ -405,6 +409,7 @@ export component AppWindow inherits Window {
             if root.screen == Screen.change: ChangeScreen {
                 keyboard-name: root.change-keyboard-name;
                 choices: root.change-choices;
+                method-choices: root.change-method-choices;
                 selected <=> root.change-selected;
                 method <=> root.change-method;
                 standard <=> root.change-standard;
@@ -542,6 +547,7 @@ export component AppWindow inherits Window {
             if root.screen == Screen.recovery: RecoveryScreen {
                 page: root.recovery;
                 items: root.recovery-items;
+                method-choices: root.recovery-method-choices;
                 method <=> root.recovery-method;
                 choose-method(index) => {
                     root.recovery-choose-method(index);
