@@ -31,6 +31,8 @@ pub mod autostart;
 #[cfg(windows)]
 pub mod input_capture;
 #[cfg(windows)]
+pub mod journal_ui;
+#[cfg(windows)]
 pub mod reader;
 #[cfg(windows)]
 pub mod single_instance;

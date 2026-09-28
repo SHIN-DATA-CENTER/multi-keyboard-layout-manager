@@ -19,6 +19,7 @@ use slint::{CloseRequestResponse, ComponentHandle, Model, ModelRc, SharedString,
 use crate::args::{Args, StartMode};
 use crate::i18n::{Lang, LangChoice};
 use crate::input_capture::InputCapture;
+use crate::journal_ui::JournalUi;
 use crate::reader::{IoTask, IoWorker};
 use crate::settings::Settings;
 use crate::state::{
@@ -75,6 +76,8 @@ struct Controller {
     layout_timer: slint::Timer,
     /// Gathers keyboard arrivals and removals before the list is read again (design m3 B.2).
     settle_timer: slint::Timer,
+    /// The restart, post-reboot, conflict, history and recovery pages (WP-U4, WP-U5).
+    journal_ui: JournalUi,
 }
 
 impl std::fmt::Debug for Controller {
@@ -87,6 +90,7 @@ impl Controller {
     fn handle(&self, msg: AppMsg) {
         let effects = {
             let mut state = self.state.borrow_mut();
+            state.now = Some(std::time::Instant::now());
             state::update(&mut state, msg)
         };
         for effect in effects {
@@ -154,6 +158,7 @@ impl Controller {
                 let _ = slint::quit_event_loop();
             }
             Effect::Render => self.render(),
+            Effect::Journal(effect) => self.journal_ui.run(&self.window, &self.io, effect),
         }
     }
 
@@ -323,6 +328,9 @@ impl Controller {
         self.window.set_overlay(overlay(state.overlay));
         self.render_change(&state, lang);
         self.render_session(&state, lang);
+        // The restart, post-reboot, conflict, history and recovery pages (also without a read:
+        // they say what is missing).
+        self.journal_ui.render(&self.window, &state);
         let Some(read) = &state.read else {
             return;
         };
@@ -726,7 +734,12 @@ pub fn run(args: Args) -> ExitCode {
         Ok(io) => io,
         Err(error) => return fatal(&format!("the I/O worker could not start: {error}")),
     };
-    let start_hidden = args.start == StartMode::Tray && settings.wizard.completed;
+    // `--post-reboot` with nothing to check is `--tray` (design m3 F.2): the first read opens the
+    // check, in front, when there is one.
+    let start_hidden =
+        matches!(args.start, StartMode::Tray | StartMode::PostReboot) && settings.wizard.completed;
+    let mut journal_pages = crate::state::JournalPages::default();
+    journal_pages.post_reboot.requested = args.start == StartMode::PostReboot;
     let controller = Rc::new(Controller {
         window: window.clone_strong(),
         icon,
@@ -738,6 +751,7 @@ pub fn run(args: Args) -> ExitCode {
             // An elevated GUI shows no UAC prompt, so none is explained (design m3 B.5); when it
             // cannot be told, the explanation is shown (harmless).
             elevated: mklm_win::elevation::is_elevated().unwrap_or(false),
+            journal_pages,
             ..AppState::default()
         }),
         io,
@@ -750,6 +764,7 @@ pub fn run(args: Args) -> ExitCode {
         shown_rows: RefCell::new(Vec::new()),
         layout_timer: slint::Timer::default(),
         settle_timer: slint::Timer::default(),
+        journal_ui: JournalUi::new(&window),
     });
     APP.with(|app| *app.borrow_mut() = Some(controller.clone()));
     window.set_keyboards(ModelRc::from(controller.keyboards.clone()));
@@ -867,6 +882,9 @@ pub fn run(args: Args) -> ExitCode {
     }
 
     controller.run(Effect::Read);
+    // The RunOnce rule at start-up (design m3 A.4): a restart may be pending from a change that
+    // did not register the check (another front end, an elevated run).
+    controller.run(Effect::RunOnceRule);
     if start_hidden {
         controller.run(Effect::Render);
     } else {
@@ -948,8 +966,10 @@ fn wire_callbacks(window: &AppWindow) {
         }
     });
     wire_change_flow(window);
-    // WP-U1 to WP-U7 wire the remaining callbacks (wizard, restart, conflict, journal,
-    // recovery, settings) through `state::update`.
+    // The restart, post-reboot, conflict, history and recovery pages.
+    crate::journal_ui::wire(window);
+    // WP-U1, WP-U2, WP-U6 and WP-U7 wire the remaining callbacks (wizard, settings) through
+    // `state::update`.
 }
 
 /// The change flow's callbacks (design m3 B.3 to B.7, B.17; WP-U3).

@@ -24,6 +24,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::detect::{Step, Verdict};
 
+/// The restart, post-reboot, conflict, history and recovery pages (WP-U4, WP-U5).
+pub mod journal_pages;
+
 /// A language the GUI speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lang {
@@ -715,6 +718,8 @@ pub fn entry_state(
             "MKLM 以外の値を残しました",
             "Kept the values changed outside MKLM",
         ),
+        // "確定" is not a screen word (design m3 D.5): say what the user did.
+        (OpState::Confirmed, _, _) => journal_pages::history_kept(lang),
         (state, _, _) => self::state(state, lang),
     }
 }

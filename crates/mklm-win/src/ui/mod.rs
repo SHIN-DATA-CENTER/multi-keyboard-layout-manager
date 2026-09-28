@@ -8,8 +8,8 @@
 //!   and power resume.
 //! - Here: the active input language of the GUI thread, the Windows display language, the
 //!   per-user settings folder, foreground hand-over for the single instance, opening an
-//!   allowlisted settings page, copying diagnostics to the clipboard, and the start-up error
-//!   message box.
+//!   allowlisted settings page or the recovery files folder, copying diagnostics to the
+//!   clipboard, and the start-up error message box.
 
 pub mod shell_window;
 pub mod theme;
@@ -138,6 +138,44 @@ pub fn open_settings_page(page: SettingsPage) -> Result<(), Error> {
         }
     };
     if opened {
+        Ok(())
+    } else {
+        Err(last_error("ShellExecuteW"))
+    }
+}
+
+/// The levels below `%ProgramData%` of the folder with the offline recovery files (design m2
+/// G.1: Users may read it).
+const RECOVERY_FOLDER: [&str; 3] = ["SHIN DATA CENTER", "MKLM", "Recovery"];
+
+/// Opens `%ProgramData%\SHIN DATA CENTER\MKLM\Recovery` in Explorer (the history's
+/// "復旧用ファイルのフォルダーを開く", design m3 B.11). Only that folder: the path is built from the
+/// known-folder API and constants, and every level must be a plain directory, not a reparse point,
+/// so nothing but that folder is ever handed to `ShellExecuteW` (a folder opens in Explorer; no
+/// program runs). Fails when the folder does not exist yet (the helper creates it with its first
+/// change). Blocking for a moment: call it off the UI thread.
+pub fn open_recovery_folder() -> Result<(), Error> {
+    use std::os::windows::fs::MetadataExt;
+
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    let mut path = crate::protected_dir::program_data_dir()?;
+    for level in RECOVERY_FOLDER {
+        path.push(level);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| Error::Win32 {
+            function: "GetFileAttributesExW",
+            code: error.raw_os_error().map_or(0, |code| code as u32),
+        })?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 || !metadata.is_dir() {
+            return Err(Error::Insecure {
+                path: path.display().to_string(),
+                reason: "not a plain directory".to_string(),
+            });
+        }
+    }
+    let _com = ComApartment::enter();
+    let folder = wide_os(path.as_os_str());
+    if shell_open(PCWSTR(folder.as_ptr()), PCWSTR::null(), PCWSTR::null()) {
         Ok(())
     } else {
         Err(last_error("ShellExecuteW"))

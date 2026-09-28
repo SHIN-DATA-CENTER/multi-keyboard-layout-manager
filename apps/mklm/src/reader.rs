@@ -1,7 +1,8 @@
 //! The I/O worker (design m3 A.4): one long-lived thread for every blocking call that is not a
 //! helper session — enumerating keyboards (hundreds of milliseconds), reading the journal, saving
-//! settings, the RunOnce rule, opening a settings page, and the preparation of a change
-//! (`PrepareChange`, design m3 B.5). Tasks run in order; repeated reads that queue up are merged,
+//! settings, the RunOnce rule, opening a settings page or the recovery files folder, restarting
+//! the PC (design m3 B.8, B.11), and the preparation of a change (`PrepareChange`, design m3
+//! B.5). Tasks run in order; repeated reads that queue up are merged,
 //! and of several queued preparations only the last runs (the page dropped the others). Results
 //! go back with `slint::invoke_from_event_loop`.
 
@@ -17,7 +18,7 @@ use mklm_win::ui::SettingsPage;
 
 use crate::app::post;
 use crate::settings::Settings;
-use crate::state::{AppMsg, PrepareFailure, PreparedChange, SystemRead};
+use crate::state::{AppMsg, JournalMsg, PrepareFailure, PreparedChange, SystemRead};
 
 /// A job for the I/O worker.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +41,11 @@ pub enum IoTask {
     /// `mklm_client::run_once::apply_run_once_rule(PostRebootCommand::Gui)`.
     RunOnceRule,
     OpenSettingsPage(SettingsPage),
+    /// The RunOnce rule, then `mklm_win::session::restart_pc` (design m3 B.8): the rule first, so
+    /// that the check after the restart opens by itself.
+    RestartPc,
+    /// `%ProgramData%\SHIN DATA CENTER\MKLM\Recovery` in Explorer (design m3 B.11).
+    OpenRecoveryFolder,
 }
 
 /// The UI thread's handle on the worker.
@@ -97,19 +103,60 @@ fn run(tasks: Receiver<IoTask>) {
                     let _ = settings.save(&dir);
                 }
                 IoTask::RunOnceRule => {
-                    // WP-U4: warn in the UI on an error; `TellUser` cannot happen unelevated.
-                    let _ = mklm_client::run_once::apply_run_once_rule(
+                    // The pages warn when the check after the restart could not be registered.
+                    let outcome = mklm_client::run_once::apply_run_once_rule(
                         mklm_client::run_once::PostRebootCommand::Gui,
                     );
+                    post(AppMsg::Journal(JournalMsg::RunOnceDone(outcome)));
                 }
                 IoTask::OpenSettingsPage(page) => {
                     let _ = mklm_win::ui::open_settings_page(page);
+                }
+                IoTask::RestartPc => restart_pc(),
+                IoTask::OpenRecoveryFolder => {
+                    if mklm_win::ui::open_recovery_folder().is_err() {
+                        post(AppMsg::Journal(JournalMsg::RecoveryFolderFailed));
+                    }
                 }
             }
         }
         if result_read {
             post(AppMsg::ResultReadArrived);
         }
+    }
+}
+
+/// "今すぐ再起動" (design m3 B.8): only while the journal, read again now, still has a reason to
+/// restart (`PendingReboot` flushed by the helper, plan 2.3); then the RunOnce rule, so that the
+/// check after the restart opens by itself; then the restart. A failed registration does not stop
+/// the restart (the pages say it, and the journal still asks for the check on the next start of
+/// MKLM); a failed restart is reported.
+fn restart_pc() {
+    let still_needed = mklm_client::journal::read_journal()
+        .map_err(|error| format!("reading the journal failed: {error}"))
+        .and_then(|read| {
+            let boot = mklm_client::journal::boot_id()
+                .map_err(|error| format!("reading the boot ID failed: {error}"))?;
+            Ok(!mklm_client::gate::restart_reasons(&read.journal, boot).is_empty())
+        });
+    match still_needed {
+        Ok(true) => {}
+        Ok(false) => {
+            post(AppMsg::Journal(JournalMsg::RestartNotNeeded));
+            return;
+        }
+        Err(error) => {
+            post(AppMsg::Journal(JournalMsg::RestartFailed(error)));
+            return;
+        }
+    }
+    let outcome =
+        mklm_client::run_once::apply_run_once_rule(mklm_client::run_once::PostRebootCommand::Gui);
+    post(AppMsg::Journal(JournalMsg::RunOnceDone(outcome)));
+    if let Err(error) = mklm_win::session::restart_pc() {
+        post(AppMsg::Journal(JournalMsg::RestartFailed(
+            error.to_string(),
+        )));
     }
 }
 
