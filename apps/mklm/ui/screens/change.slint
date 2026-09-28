@@ -29,13 +29,17 @@ export component ChangeScreen inherits VerticalLayout {
     in-out property <int> selected: -1;
     // 0 = switch now, 1 = at the restart (review U1).
     in-out property <int> method: -1;
+    // The PC's standard layout of a migration from fixed mode: 0 = JIS, 1 = US.
+    in-out property <int> standard: -1;
     in property <ChangeVm> vm;
     in property <KeyTestVm> key-test;
     in-out property <bool> show-details: false;
     callback choose(int);
     callback choose-method(int);
+    callback choose-standard(int);
     callback key-pressed(string, bool);
     callback restart-detection();
+    callback use-detected();
     callback restore-baseline();
     callback apply();
     callback cancel();
@@ -43,11 +47,11 @@ export component ChangeScreen inherits VerticalLayout {
     spacing: 12px;
 
     PageHeader {
-        title: @tr("Layout of {}", root.keyboard-name);
+        title: root.vm.title != "" ? root.vm.title : @tr("Layout of {}", root.keyboard-name);
     }
 
     DialogBody {
-        RadioList {
+        if !root.vm.restore-mode: RadioList {
             label: @tr("Layout");
             choices: root.choices;
             selected <=> root.selected;
@@ -57,11 +61,11 @@ export component ChangeScreen inherits VerticalLayout {
         }
 
         // In-place detection: only this keyboard's keys count (design m3 B.3).
-        Caption {
+        if !root.vm.restore-mode && root.vm.detect-instruction != "": Caption {
             text: root.vm.detect-instruction;
         }
 
-        KeyTestArea {
+        if !root.vm.restore-mode: KeyTestArea {
             vm: root.key-test;
             key-pressed(text, shift) => {
                 root.key-pressed(text, shift);
@@ -81,6 +85,12 @@ export component ChangeScreen inherits VerticalLayout {
                 accessible-live-region: polite;
             }
 
+            if root.vm.detect-choose-text != "": Button {
+                text: root.vm.detect-choose-text;
+                clicked => {
+                    root.use-detected();
+                }
+            }
             Button {
                 text: @tr("Start again");
                 clicked => {
@@ -88,9 +98,25 @@ export component ChangeScreen inherits VerticalLayout {
                 }
             }
         }
+        if root.vm.summary != "": Body {
+            text: root.vm.summary;
+        }
         if root.vm.preparing: Caption {
             text: @tr("Checking…");
             accessible-live-region: polite;
+        }
+        if root.vm.note != "": Banner {
+            text: root.vm.note;
+            tone: root.vm.note-tone;
+            accessible-live-region: polite;
+        }
+        if root.vm.standard-visible: RadioList {
+            label: @tr("The PC's standard layout");
+            choices: root.vm.standard-choices;
+            selected <=> root.standard;
+            chosen(index) => {
+                root.choose-standard(index);
+            }
         }
         if root.vm.method-visible: RadioList {
             label: @tr("How the change takes effect");
@@ -122,7 +148,7 @@ export component ChangeScreen inherits VerticalLayout {
             text: root.vm.all-users-note;
             tone: Tone.info;
         }
-        if root.vm.lines.length > 0: CheckBox {
+        if root.vm.lines.length > 0 || root.vm.details != "": CheckBox {
             text: @tr("Show the technical details");
             checked <=> root.show-details;
         }
@@ -130,6 +156,10 @@ export component ChangeScreen inherits VerticalLayout {
             spacing: 4px;
             for line in root.vm.lines: PlanLine {
                 line: line;
+            }
+            if root.vm.details != "": Caption {
+                text: root.vm.details;
+                font-family: "Consolas";
             }
         }
         if root.vm.uac-line != "": Caption {
@@ -139,7 +169,7 @@ export component ChangeScreen inherits VerticalLayout {
 
     DialogButtons {
         alignment: stretch;
-        Button {
+        if !root.vm.restore-mode: Button {
             text: @tr("Back to before MKLM…");
             clicked => {
                 root.restore-baseline();

@@ -136,6 +136,20 @@ export struct ChangeVm {
     detect-feedback: string,
     detect-feedback-tone: Tone,
     detect-verdict: string,
+    // Selects the detected layout in one click ("JIS を選ぶ"); empty when none.
+    detect-choose-text: string,
+    // "MKLM 導入前に戻す…" of this device: no choices and no detection (design m3 B.4).
+    restore-mode: bool,
+    // What the restore puts back.
+    summary: string,
+    // Fixed mode: the PC's standard layout of the migration (design m3 B.1, B.4).
+    standard-visible: bool,
+    standard-choices: [ChoiceVm],
+    // Why nothing can be sent now (refused, unreadable, nothing to change).
+    note: string,
+    note-tone: Tone,
+    // English diagnostics under the technical details.
+    details: string,
 }
 
 // The keep-or-revert countdown (plan 3.5 step 3, design m3 B.6).

@@ -150,6 +150,20 @@ pub(crate) const LATIN_ALLOWED: &[&str] = &[
     "Windows",
 ];
 
+/// The values of a [`SnapshotText`] (`label: value` lines) that are words for people: the
+/// English labels, the technical details (`line`, `details`) and plain ASCII values (tones,
+/// counts, flags) are left out, so that [`unexpected_latin`] checks what a Japanese screen says.
+#[cfg(test)]
+pub(crate) fn snapshot_values(snapshot: &str) -> String {
+    snapshot
+        .lines()
+        .filter_map(|line| line.split_once(": "))
+        .filter(|(label, value)| !matches!(*label, "line" | "details") && !value.is_ascii())
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The Latin-letter words of `text` that are neither allowed nor part of `names`.
 #[cfg(test)]
 pub(crate) fn unexpected_latin(text: &str, names: &[&str]) -> Vec<String> {

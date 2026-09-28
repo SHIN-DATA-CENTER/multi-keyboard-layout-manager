@@ -22,7 +22,9 @@ use crate::i18n::{Lang, LangChoice};
 use crate::input_capture::InputCapture;
 use crate::reader::{IoTask, IoWorker};
 use crate::settings::Settings;
-use crate::state::{self, AppMsg, AppState, Effect, Page, SessionId, SessionOutcome};
+use crate::state::{
+    self, AppMsg, AppState, Effect, OverlayKind, Page, QuitAnswer, SessionId, SessionOutcome,
+};
 use crate::theme::{ResolvedTheme, ThemeMode, is_dark_rgb};
 use crate::tray;
 use crate::ui::{self, AppWindow, TrayIcon};
@@ -95,6 +97,16 @@ impl Controller {
     fn run(&self, effect: Effect) {
         match effect {
             Effect::Read => self.io.send(IoTask::Read),
+            Effect::ReadForResult => self.io.send(IoTask::ReadForResult),
+            Effect::PrepareChange { token, gate } => {
+                self.io.send(IoTask::PrepareChange { token, gate });
+            }
+            Effect::CopyText(text) => {
+                // WP-W2: `copy_text_to_clipboard` (English diagnostics only, design m3 B.17).
+                if let Err(error) = mklm_win::ui::copy_text_to_clipboard(&text) {
+                    eprintln!("mklm: warning: copying the details failed: {error}");
+                }
+            }
             Effect::SaveSettings(settings) => {
                 if let Some(dir) = &self.settings_dir {
                     self.io.send(IoTask::SaveSettings {
@@ -300,6 +312,11 @@ impl Controller {
             verdict_tone: tone(test.verdict_tone),
             device: test.device.into(),
         });
+        self.window
+            .set_navigation_enabled(state::navigation_enabled(&state));
+        self.window.set_overlay(overlay(state.overlay));
+        self.render_change(&state, lang);
+        self.render_session(&state, lang);
         let Some(read) = &state.read else {
             return;
         };
@@ -343,6 +360,162 @@ impl Controller {
             },
         );
         self.update_keyboards(rows);
+    }
+
+    /// The change page (design m3 B.4, B.5; WP-U3).
+    fn render_change(&self, state: &AppState, lang: Lang) {
+        let Some(draft) = &state.draft else {
+            return;
+        };
+        let display = state.read.as_ref().and_then(|read| read.snapshot.as_ref());
+        let other_name = draft
+            .other_keyboard
+            .as_deref()
+            .map(|id| state::display_name(state, id));
+        let page = vm::change::change_page(&vm::change::ChangeContext {
+            draft,
+            display,
+            uac_notice_seen: state.settings.change.uac_notice_seen,
+            elevated: state.elevated,
+            seconds: vm::change::countdown_seconds(&state.settings),
+            other_name: other_name.as_deref(),
+            lang,
+        });
+        let index = |index: Option<usize>| index.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1);
+        let choices = |rows: &[vm::change::ChoiceRow]| {
+            ModelRc::new(VecModel::from(
+                rows.iter()
+                    .map(|row| ui::ChoiceVm {
+                        text: row.text.as_str().into(),
+                        detail: row.detail.as_str().into(),
+                        enabled: row.enabled,
+                    })
+                    .collect::<Vec<_>>(),
+            ))
+        };
+        self.window
+            .set_change_keyboard_name(draft.name.as_str().into());
+        self.window.set_change_choices(choices(&page.choices));
+        self.window.set_change_selected(index(page.selected));
+        self.window
+            .set_change_method(index(page.method.map(vm::change::ApplyMethod::index)));
+        self.window
+            .set_change_standard(index(page.standard_selected));
+        self.window.set_change(ui::ChangeVm {
+            title: page.title.into(),
+            preparing: page.preparing,
+            method_visible: page.method_visible,
+            live_text: page.live_text.into(),
+            live_detail: page.live_detail.into(),
+            restart_text: page.restart_text.into(),
+            restart_detail: page.restart_detail.into(),
+            takes_effect: page.takes_effect.into(),
+            all_users_note: page.all_users_note.into(),
+            migration_note: page.migration_note.into(),
+            ime_note: page.ime_note.into(),
+            warnings: ModelRc::new(VecModel::from(
+                page.warnings
+                    .into_iter()
+                    .map(SharedString::from)
+                    .collect::<Vec<_>>(),
+            )),
+            lines: ModelRc::new(VecModel::from(
+                page.lines
+                    .into_iter()
+                    .map(|line| ui::PlanLineVm {
+                        key: line.key.into(),
+                        name: line.name.into(),
+                        now: line.now.into(),
+                        after: line.after.into(),
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            uac_line: page.uac_line.into(),
+            apply_text: page.apply_text.into(),
+            can_apply: page.can_apply,
+            detect_instruction: page.detect.instruction.into(),
+            detect_feedback: page.detect.feedback.into(),
+            detect_feedback_tone: tone(page.detect.feedback_tone),
+            detect_verdict: page.detect.verdict.into(),
+            detect_choose_text: page.detect.choose_text.into(),
+            restore_mode: page.restore,
+            summary: page.summary.into(),
+            standard_visible: page.standard_visible,
+            standard_choices: choices(&page.standard_choices),
+            note: page.note.into(),
+            note_tone: tone(page.note_tone),
+            details: page.details.into(),
+        });
+    }
+
+    /// The session overlays and the result (design m3 B.6, B.7, B.17; WP-U3).
+    fn render_session(&self, state: &AppState, lang: Lang) {
+        let empty = mklm_client::session::SessionView::default();
+        let view = state::session_view(state).unwrap_or(&empty);
+        match state.overlay {
+            OverlayKind::Progress => {
+                let progress = vm::session::progress(state::progress_stage(state), view, lang);
+                self.window.set_progress(ui::ProgressVm {
+                    title: progress.title.into(),
+                    step: progress.step.into(),
+                    detail: progress.detail.into(),
+                });
+            }
+            OverlayKind::Countdown => {
+                if let Some(countdown) = vm::session::countdown(view, lang) {
+                    self.window.set_countdown(ui::CountdownVm {
+                        title: countdown.title.into(),
+                        message: countdown.message.into(),
+                        remaining: i32::try_from(countdown.remaining).unwrap_or(i32::MAX),
+                        total: i32::try_from(countdown.total).unwrap_or(i32::MAX),
+                        recognition: countdown.recognition.into(),
+                        recognition_tone: tone(countdown.recognition_tone),
+                        reminder: countdown.reminder.into(),
+                    });
+                }
+            }
+            OverlayKind::Reconnect => {
+                if let Some(reconnect) = vm::session::reconnect(view, lang) {
+                    self.window.set_reconnect(ui::ReconnectVm {
+                        title: reconnect.title.into(),
+                        instructions: reconnect.instructions.into(),
+                        status: reconnect.status.into(),
+                        status_tone: tone(reconnect.status_tone),
+                        can_keep: reconnect.can_keep,
+                    });
+                }
+            }
+            OverlayKind::Result => {
+                if let Some(result) = vm::result::shown_result(state, lang) {
+                    self.window.set_result(ui::ResultVm {
+                        title: result.title.into(),
+                        current_state: ModelRc::new(VecModel::from(
+                            result
+                                .current_state
+                                .into_iter()
+                                .map(SharedString::from)
+                                .collect::<Vec<_>>(),
+                        )),
+                        message: result.message.into(),
+                        tone: tone(result.tone),
+                        ime_note: result.ime_note.into(),
+                        run_once_note: result.run_once_note.into(),
+                        next_step: result.next_step.into(),
+                        details: result.details.into(),
+                    });
+                }
+            }
+            OverlayKind::RecoveryConfirm => {
+                self.window
+                    .set_recovery_after_countdown(state.recovery_question.unwrap_or(false));
+            }
+            OverlayKind::QuitConfirm => {
+                let names = vm::session::reconnect_names(view);
+                self.window
+                    .set_quit_message(crate::i18n::quit_confirm(&names, lang).into());
+            }
+            OverlayKind::None | OverlayKind::CloseNotice => {}
+        }
     }
 
     /// Applies the difference between the shown rows and `rows` to the kept model.
@@ -417,6 +590,19 @@ fn screen(page: Page) -> ui::Screen {
         Page::ImeHelp => ui::Screen::ImeHelp,
         Page::Settings => ui::Screen::Settings,
         Page::About => ui::Screen::About,
+    }
+}
+
+fn overlay(overlay: OverlayKind) -> ui::Overlay {
+    match overlay {
+        OverlayKind::None => ui::Overlay::None,
+        OverlayKind::Progress => ui::Overlay::Progress,
+        OverlayKind::Countdown => ui::Overlay::Countdown,
+        OverlayKind::Reconnect => ui::Overlay::Reconnect,
+        OverlayKind::Result => ui::Overlay::Result,
+        OverlayKind::RecoveryConfirm => ui::Overlay::RecoveryConfirm,
+        OverlayKind::CloseNotice => ui::Overlay::CloseNotice,
+        OverlayKind::QuitConfirm => ui::Overlay::QuitConfirm,
     }
 }
 
@@ -537,6 +723,9 @@ pub fn run(args: Args) -> ExitCode {
             lang: Some(lang),
             settings,
             visible: !start_hidden,
+            // An elevated GUI shows no UAC prompt, so none is explained (design m3 B.5); when it
+            // cannot be told, the explanation is shown (harmless).
+            elevated: mklm_win::elevation::is_elevated().unwrap_or(false),
             ..AppState::default()
         }),
         io,
@@ -735,6 +924,43 @@ fn wire_callbacks(window: &AppWindow) {
             // WP-U6: save the choice in settings.toml.
         }
     });
-    // WP-U1 to WP-U7 wire the remaining callbacks (assign, wizard, session, restart, conflict,
-    // journal, recovery, settings) through `state::update`.
+    wire_change_flow(window);
+    // WP-U1 to WP-U7 wire the remaining callbacks (wizard, restart, conflict, journal,
+    // recovery, settings) through `state::update`.
+}
+
+/// The change flow's callbacks (design m3 B.3 to B.7, B.17; WP-U3).
+fn wire_change_flow(window: &AppWindow) {
+    let index = |index: i32| usize::try_from(index).ok();
+    window.on_assign(|row: SharedString| dispatch(AppMsg::OpenChange(row.to_string())));
+    window.on_change_choose(move |i| {
+        if let Some(i) = index(i) {
+            dispatch(AppMsg::ChangeChoose(i));
+        }
+    });
+    window.on_change_choose_method(move |i| {
+        if let Some(i) = index(i) {
+            dispatch(AppMsg::ChangeChooseMethod(i));
+        }
+    });
+    window.on_change_choose_standard(move |i| {
+        if let Some(i) = index(i) {
+            dispatch(AppMsg::ChangeChooseStandard(i));
+        }
+    });
+    window.on_change_restart_detection(|| dispatch(AppMsg::ChangeRestartDetection));
+    window.on_change_use_detected(|| dispatch(AppMsg::ChangeUseDetected));
+    window.on_restore_baseline(|| dispatch(AppMsg::OpenRestore));
+    window.on_change_apply(|| dispatch(AppMsg::ChangeApply));
+    window.on_uac_go(|| dispatch(AppMsg::UacGo));
+    window.on_cancel_change(|| dispatch(AppMsg::CancelChange));
+    window.on_keep(|| dispatch(AppMsg::KeepChange));
+    window.on_revert(|| dispatch(AppMsg::RevertChange));
+    window.on_decide_later(|| dispatch(AppMsg::DecideLater));
+    window.on_result_closed(|| dispatch(AppMsg::ResultClosed));
+    window.on_result_next_step(|| dispatch(AppMsg::ResultNextStep));
+    window.on_copy_details(|| dispatch(AppMsg::CopyDetails));
+    window.on_quit_revert(|| dispatch(AppMsg::QuitConfirmAnswered(QuitAnswer::RevertAndQuit)));
+    window.on_quit_leave(|| dispatch(AppMsg::QuitConfirmAnswered(QuitAnswer::QuitLeavingIt)));
+    window.on_quit_cancel(|| dispatch(AppMsg::QuitConfirmAnswered(QuitAnswer::Cancel)));
 }

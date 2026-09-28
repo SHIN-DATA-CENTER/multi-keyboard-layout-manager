@@ -12,13 +12,17 @@
 //! module's job alone (design m3 D.4).
 
 use mklm_client::describe::ResetPhase;
+use mklm_client::gate::BlockReason;
 use mklm_client::outcome::HelperExitKind;
 use mklm_client::{HelperExit, LaunchError, LaunchFailure, OutcomeClass};
 use mklm_core::{
-    Attention, EffectiveLayout, ErrorCode, FailureReason, GlobalMode, LayoutBasis, LayoutTable,
-    OpState, PendingAction, Transport,
+    Attention, EffectiveLayout, ErrorCode, FailureReason, GlobalMode, KeyboardType, Layout,
+    LayoutBasis, LayoutChoice, LayoutTable, OpState, OperationError, PendingAction, RegValue,
+    Transport,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::detect::{Step, Verdict};
 
 /// A language the GUI speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -806,6 +810,827 @@ pub fn attention(attention: Attention, lang: Lang) -> Option<String> {
         ),
     };
     Some(pick(lang, ja, en))
+}
+
+// --- The change flow (design m3 B.3 to B.7, B.17; WP-U3) ---
+
+/// A layout by name: "JIS" / "US".
+pub fn layout_name(layout: Layout) -> String {
+    table(&layout.into(), LANG_NEUTRAL)
+}
+
+/// Table names are the same in both languages; `table` only needs a language for "other".
+const LANG_NEUTRAL: Lang = Lang::En;
+
+/// The change page's title: "Keychron Receiver の配列" (also `@tr("Layout of {}")` in Slint).
+pub fn change_title(name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{name} の配列"),
+        Lang::En => format!("Layout of {name}"),
+    }
+}
+
+/// The restore page's title (design m3 B.4 "MKLM 導入前に戻す…").
+pub fn restore_title(name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{name} を MKLM 導入前に戻す"),
+        Lang::En => format!("Put {name} back to before MKLM"),
+    }
+}
+
+/// One layout choice of the change page (design m3 B.4): `(text, detail)`. `standard` is the
+/// PC's standard layout now; `current` adds "（現在）".
+pub fn layout_choice(
+    choice: LayoutChoice,
+    standard: &LayoutTable,
+    current: bool,
+    lang: Lang,
+) -> (String, String) {
+    let (text, detail) = match choice {
+        LayoutChoice::Jis => ("JIS".to_string(), String::new()),
+        LayoutChoice::Us => ("US".to_string(), String::new()),
+        LayoutChoice::Standard => {
+            let standard = table(standard, lang);
+            match lang {
+                Lang::Ja => (
+                    format!("標準に従う（今は {standard}）"),
+                    "値を消して PC の標準配列に従わせます。打鍵での確認がまだです".to_string(),
+                ),
+                Lang::En => (
+                    format!("Follow the PC's standard layout (now {standard})"),
+                    "Removes the values so that the keyboard follows the PC's standard layout. Not yet verified by typing".to_string(),
+                ),
+            }
+        }
+    };
+    let suffix = match (current, lang) {
+        (false, _) => "",
+        (true, Lang::Ja) => "（現在）",
+        (true, Lang::En) => " (current)",
+    };
+    (format!("{text}{suffix}"), detail)
+}
+
+/// The PC's standard layout for a migration from fixed mode (design m3 B.1, B.4):
+/// "JIS（おすすめ: 今の JIS）".
+pub fn standard_choice(layout: Layout, recommended: bool, lang: Lang) -> String {
+    let name = layout_name(layout);
+    match (recommended, lang) {
+        (false, _) => name,
+        (true, Lang::Ja) => format!("{name}（おすすめ: 今の {name}）"),
+        (true, Lang::En) => format!("{name} (recommended: the current {name})"),
+    }
+}
+
+/// What the in-place detection asks for next (design m3 B.3); empty once both keys are in.
+pub fn detect_instruction(step: Step, lang: Lang) -> String {
+    match step {
+        Step::LeftOfBackspace => pick(
+            lang,
+            "わからないときは、このキーボードで Backspace の左のキーを押してください（打鍵テスト）",
+            "Not sure? Press the key left of Backspace on this keyboard (key test)",
+        ),
+        Step::LeftOfRightShift => pick(
+            lang,
+            "次に、このキーボードで右の Shift の左のキーを押してください",
+            "Next, press the key left of the right Shift on this keyboard",
+        ),
+        Step::Done => String::new(),
+    }
+}
+
+/// An answer key came from another keyboard (`Press::OtherKeyboard`, design m3 B.3).
+pub fn detect_other_keyboard(other: &str, name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{other} のキーです。{name} で押してください"),
+        Lang::En => format!("That key is from {other}. Press it on {name}"),
+    }
+}
+
+/// A key only JIS keyboards have was pressed on the keyboard (design m3 B.3).
+pub fn detect_jis_hint(lang: Lang) -> String {
+    pick(
+        lang,
+        "JIS の可能性が高いです（JIS 配列にしかないキーが押されました）",
+        "Probably JIS (a key only JIS keyboards have was pressed)",
+    )
+}
+
+/// The detection's verdict for `name`.
+pub fn detect_verdict(verdict: Verdict, name: &str, lang: Lang) -> String {
+    match (verdict, lang) {
+        (Verdict::Jis, Lang::Ja) => format!("✓ {name} は JIS 配列のキーボードです"),
+        (Verdict::Jis, Lang::En) => format!("✓ {name} is a JIS keyboard"),
+        (Verdict::Us, Lang::Ja) => format!("✓ {name} は US 配列のキーボードです"),
+        (Verdict::Us, Lang::En) => format!("✓ {name} is a US keyboard"),
+        (Verdict::Mixed, _) => pick(
+            lang,
+            "判定できませんでした。『やり直す』を押して、もう一度試してください",
+            "Could not tell. Choose \"Start again\" and try once more",
+        ),
+    }
+}
+
+/// The button that selects the detected layout (one click, design m3 B.3): "JIS を選ぶ".
+pub fn detect_choose(layout: Layout, lang: Lang) -> String {
+    let name = layout_name(layout);
+    match lang {
+        Lang::Ja => format!("{name} を選ぶ"),
+        Lang::En => format!("Choose {name}"),
+    }
+}
+
+/// Every change applies to every user of the PC (plan 3.5).
+pub fn all_users_note(lang: Lang) -> String {
+    pick(
+        lang,
+        "ⓘ この設定は、この PC のすべてのユーザーに適用されます。",
+        "ⓘ This setting applies to every user of this PC.",
+    )
+}
+
+/// Fixed mode: the change is a migration that carries this assignment (design m3 B.4).
+pub fn migration_note(lang: Lang) -> String {
+    pick(
+        lang,
+        "この PC は固定モードです。キーボードごとモードへ移行し、この割り当ても同時に書きます（PC の再起動が 1 回必要）。",
+        "This PC is in fixed mode. MKLM switches it to per-keyboard mode and writes this assignment at the same time (one PC restart is needed).",
+    )
+}
+
+/// A US keyboard has no 半角/全角 key (plan 3.4; design m3 B.13, review U19).
+pub fn ime_note_us(lang: Lang) -> String {
+    pick(
+        lang,
+        "US 配列には「半角/全角」キーがありません。日本語入力のオン/オフは Alt+` です。",
+        "A US keyboard has no 半角/全角 key: turn Japanese input on and off with Alt+`.",
+    )
+}
+
+/// Plan 1.4: the target is the only keyboard that typed recently.
+pub fn only_keyboard_warning(lang: Lang) -> String {
+    pick(
+        lang,
+        "このキーボードは、最近入力のあった唯一のキーボードです。PC の再起動で反映することをおすすめします。",
+        "This keyboard is the only one that typed recently. Applying the change with a PC restart is recommended.",
+    )
+}
+
+/// "標準に従う" is not verified by typing yet (design m2 D.2).
+pub fn standard_unverified(lang: Lang) -> String {
+    pick(
+        lang,
+        "打鍵での確認がまだです。後で Shift+2 で確かめてください。",
+        "Not yet verified by typing. Check it later with Shift+2.",
+    )
+}
+
+/// Every planned value is in place already (`preview::nothing_to_change`).
+pub fn nothing_to_change(lang: Lang) -> String {
+    pick(
+        lang,
+        "変更はありません（すでにこの設定です）。",
+        "Nothing to change: it is set this way already.",
+    )
+}
+
+/// Why the preparation could not read what a change is planned with (design m3 B.5).
+pub fn prepare_failed(incomplete: bool, lang: Lang) -> String {
+    if incomplete {
+        pick(
+            lang,
+            "Windows がキーボードの情報をすべて返さなかったため、今は変更できません。［最新の情報に更新］してからもう一度試してください。",
+            "Windows did not report every keyboard completely, so no change is possible now. Refresh and try again.",
+        )
+    } else {
+        pick(
+            lang,
+            "キーボードか記録（ジャーナル）を読めなかったため、今は変更できません。もう一度試してください。",
+            "The keyboards or the journal could not be read, so no change is possible now. Try again.",
+        )
+    }
+}
+
+/// A change the rules refuse before any prompt (the English error goes to the details).
+pub fn operation_refused(error: &OperationError, lang: Lang) -> String {
+    match error {
+        OperationError::UnknownKeyboard { .. } => error_code(ErrorCode::UnknownKeyboard, lang),
+        OperationError::MigrationRequired { .. } => error_code(ErrorCode::MigrationRequired, lang),
+        OperationError::NotFixedMode => error_code(ErrorCode::NotFixedMode, lang),
+        OperationError::InconsistentGlobal => pick(
+            lang,
+            "PC 全体のキーボードの値が食い違っているため、この変更はできません。",
+            "The PC-wide keyboard values are inconsistent, so this change is not possible.",
+        ),
+        OperationError::StandardNotAllowed { .. } => pick(
+            lang,
+            "このキーボードは「標準に従う」にできません。",
+            "This keyboard cannot follow the standard layout.",
+        ),
+        OperationError::LayerDriverMissing { .. } => pick(
+            lang,
+            "配列のファイルが Windows に見つからないため、この変更はできません。",
+            "The layout file is missing from Windows, so this change is not possible.",
+        ),
+        OperationError::Plan(_) => pick(
+            lang,
+            "MKLM の安全規則に反するため、この変更はできません。理由は技術的な詳細にあります。",
+            "MKLM's safety rules do not allow this change; the technical details say why.",
+        ),
+    }
+}
+
+/// The one or two lines about the UAC prompt next to the button (review U14).
+pub fn uac_line(lang: Lang) -> String {
+    pick(
+        lang,
+        "次に Windows の確認画面が出ます（発行元は「不明」）。mklm-helper.exe であることを確かめて「はい」を押してください。",
+        "Windows asks for permission next (the publisher shows as \"Unknown\"). Check that it names mklm-helper.exe, then choose Yes.",
+    )
+}
+
+/// The change page's main button: "変更する（次に Windows の確認が出ます）", or "変更する" when
+/// no prompt follows (an elevated GUI, design m3 B.5).
+pub fn apply_button(restore: bool, prompt: bool, lang: Lang) -> String {
+    match (restore, prompt) {
+        (false, true) => pick(
+            lang,
+            "変更する（次に Windows の確認が出ます）",
+            "Change (Windows asks next)",
+        ),
+        (false, false) => pick(lang, "変更する", "Change"),
+        (true, true) => pick(
+            lang,
+            "元に戻す（次に Windows の確認が出ます）",
+            "Put back (Windows asks next)",
+        ),
+        (true, false) => pick(lang, "元に戻す", "Put back"),
+    }
+}
+
+/// A registry value in the technical details.
+pub fn reg_value(value: &RegValue, lang: Lang) -> String {
+    match value {
+        RegValue::Absent => pick(lang, "（なし）", "(none)"),
+        RegValue::Dword { value } => value.to_string(),
+        RegValue::Sz { value } => format!("\"{value}\""),
+        RegValue::Other { reg_type, data_hex } => format!("({reg_type}: {data_hex})"),
+    }
+}
+
+/// The PC-wide values in the technical details.
+pub fn global_values(lang: Lang) -> String {
+    pick(lang, "PC 全体", "PC-wide")
+}
+
+/// What a restore to before MKLM does (design m2 D.5, m3 B.4).
+pub fn restore_summary(writes: usize, lang: Lang) -> String {
+    if writes == 0 {
+        pick(
+            lang,
+            "MKLM 導入前の値のままです。戻すものはありません。",
+            "Everything is as it was before MKLM; there is nothing to put back.",
+        )
+    } else {
+        match lang {
+            Lang::Ja => format!("{writes} 件の値を MKLM 導入前の値に戻します。"),
+            Lang::En => format!("{writes} values go back to what they were before MKLM."),
+        }
+    }
+}
+
+/// Values changed outside MKLM: the restore stops and asks first (`ConflictPolicy::Report`).
+pub fn restore_conflicts(count: usize, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!(
+            "MKLM 以外が変更した値が {count} 件あります。戻す前に、その値をどうするかを選びます。"
+        ),
+        Lang::En => format!(
+            "{count} values were changed outside MKLM; you choose what to do with them before anything is put back."
+        ),
+    }
+}
+
+/// Values of keyboards that are gone are left alone (design review C3).
+pub fn restore_removed(count: usize, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("接続されていないキーボードの値 {count} 件は、そのままにします。"),
+        Lang::En => format!("{count} values of keyboards that are gone are left alone."),
+    }
+}
+
+/// Open changes the restore closes (design review C7).
+pub fn restore_supersedes(count: usize, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("確認待ちの変更 {count} 件は、この操作に置き換えられます。"),
+        Lang::En => format!("{count} changes waiting for you are replaced by this restore."),
+    }
+}
+
+/// The baseline itself did not pin the built-in keyboard; it is put back as found.
+pub fn restore_keeps_inv_ps2_violation(lang: Lang) -> String {
+    pick(
+        lang,
+        "MKLM 導入前の値は、内蔵（PS/2）キーボードの配列を固定していませんでした。そのとおりに戻します。",
+        "Before MKLM, the values did not pin the built-in (PS/2) keyboard's layout; they are put back as they were.",
+    )
+}
+
+/// The restore order could not keep the built-in keyboard usable.
+pub fn restore_refused(lang: Lang) -> String {
+    pick(
+        lang,
+        "この戻し方では内蔵（PS/2）キーボードの配列が決まらなくなるため、戻せません。",
+        "Putting these values back would leave the built-in (PS/2) keyboard without a layout, so it is not possible.",
+    )
+}
+
+// --- A running session (design m3 B.6, B.7) ---
+
+/// What the progress dialog says the session is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressStep {
+    /// The helper is being launched: the UAC prompt may be up.
+    WaitingForPrompt,
+    /// Connected; nothing reported yet.
+    Preparing,
+    /// The operation is journaled.
+    Journaled,
+    /// `(step, of)` written.
+    Written(usize, usize),
+    /// The user chose "keep"; waiting for the result.
+    Keeping,
+    /// The user (or the window's ×, Esc) chose "revert"; waiting for the result.
+    Reverting,
+    /// "Decide later" or quitting on the reconnect path.
+    Leaving,
+    /// The helper stopped; MKLM checks the journal.
+    HelperLost,
+    /// The recovery after a lost helper runs.
+    Recovering,
+}
+
+pub fn progress_title(lang: Lang) -> String {
+    pick(
+        lang,
+        "キーボードの設定を変更しています",
+        "Changing the keyboard settings",
+    )
+}
+
+pub fn progress_step(step: ProgressStep, lang: Lang) -> String {
+    match step {
+        ProgressStep::WaitingForPrompt => pick(
+            lang,
+            "管理者の確認を待っています…",
+            "Waiting for the administrator prompt…",
+        ),
+        ProgressStep::Preparing => pick(lang, "準備しています…", "Preparing…"),
+        ProgressStep::Journaled => pick(lang, "操作を記録しました", "The operation is journaled"),
+        ProgressStep::Written(step, of) => match lang {
+            Lang::Ja => format!("書き込み {step} / {of}"),
+            Lang::En => format!("Written {step} of {of}"),
+        },
+        ProgressStep::Keeping => pick(lang, "このままにします…", "Keeping the new layout…"),
+        ProgressStep::Reverting => pick(lang, "元に戻しています…", "Reverting…"),
+        ProgressStep::Leaving => pick(
+            lang,
+            "後で決めます。変更は確認待ちのまま残ります…",
+            "Leaving it for later; the change keeps waiting for you…",
+        ),
+        ProgressStep::HelperLost => pick(
+            lang,
+            "MKLM の管理用プログラム（mklm-helper.exe）が止まりました。確かめています…",
+            "MKLM's administrator program (mklm-helper.exe) stopped. Checking…",
+        ),
+        ProgressStep::Recovering => pick(
+            lang,
+            "キーボードを元に戻しています…",
+            "Putting the keyboard back…",
+        ),
+    }
+}
+
+/// "Keychron Receiver をリセットしています…".
+pub fn progress_resetting(name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{name} をリセットしています…"),
+        Lang::En => format!("Resetting {name}…"),
+    }
+}
+
+/// A reported keyboard type in words (review U5: no hex): "JIS 配列" / "US 配列" /
+/// "不明な種類（8/2）".
+pub fn recognized(reported: Option<KeyboardType>, lang: Lang) -> String {
+    match (reported, lang) {
+        (Some(KeyboardType::JIS), Lang::Ja) => "JIS 配列".into(),
+        (Some(KeyboardType::JIS), Lang::En) => "JIS".into(),
+        (Some(KeyboardType::US), Lang::Ja) => "US 配列".into(),
+        (Some(KeyboardType::US), Lang::En) => "US".into(),
+        (Some(other), Lang::Ja) => format!("不明な種類（{}/{}）", other.ty, other.subtype),
+        (Some(other), Lang::En) => {
+            format!("an unknown type ({}/{})", other.ty, other.subtype)
+        }
+        (None, Lang::Ja) => "不明".into(),
+        (None, Lang::En) => "unknown".into(),
+    }
+}
+
+pub fn countdown_title(lang: Lang) -> String {
+    pick(lang, "新しい配列を試してください", "Try the new layout")
+}
+
+/// "Keychron Receiver を JIS に切り替えました。"
+pub fn countdown_switched(name: &str, layout: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{name} を {layout} に切り替えました。"),
+        Lang::En => format!("{name} switched to {layout}."),
+    }
+}
+
+/// The time limit and how to keep the change (review U10): part of the one announcement.
+pub fn countdown_how(seconds: u32, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!(
+            "あと {seconds} 秒で自動的に元に戻ります。そのキーボードで Shift+2 を押して確かめてから（\" なら JIS、@ なら US）、Tab で『このままにする』へ移って押してください。"
+        ),
+        Lang::En => format!(
+            "It reverts automatically in {seconds} seconds. Press Shift+2 on that keyboard to check (\" means JIS, @ means US), then Tab to \"Keep this layout\" and press it."
+        ),
+    }
+}
+
+/// "Keychron Receiver は JIS 配列です".
+pub fn arrival(name: &str, kind: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{name} は {kind}です"),
+        Lang::En => format!("{name} reports {kind}"),
+    }
+}
+
+/// "Windows の認識: … ✓", or that it cannot be confirmed yet (review U5).
+pub fn recognition(verified: bool, arrivals: &[String], lang: Lang) -> String {
+    match (verified, lang) {
+        (true, Lang::Ja) => format!("Windows の認識: {} ✓", arrivals.join("、")),
+        (true, Lang::En) => format!("Windows reports: {} ✓", arrivals.join(", ")),
+        (false, _) => pick(
+            lang,
+            "Windows の認識をまだ確かめられません。打鍵テストで確かめてください",
+            "Windows has not confirmed it yet; check with the key test",
+        ),
+    }
+}
+
+/// The polite reminder at 10 and 5 seconds left (design m3 E.3).
+pub fn countdown_reminder(remaining: u32, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("あと {remaining} 秒で元に戻ります"),
+        Lang::En => format!("{remaining} seconds left"),
+    }
+}
+
+pub fn reconnect_title(lang: Lang) -> String {
+    pick(
+        lang,
+        "キーボードを接続し直してください",
+        "Reconnect the keyboard",
+    )
+}
+
+pub fn reconnect_instructions(names: &[String], lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!(
+            "{} を抜いて差し直してください（Bluetooth は電源をオフにしてからオンにします）。その後 Shift+2 で確かめてください。",
+            names.join("、")
+        ),
+        Lang::En => format!(
+            "Unplug and replug {} (Bluetooth: turn it off and on), then try Shift+2.",
+            names.join(", ")
+        ),
+    }
+}
+
+pub fn reconnect_status(arrived: bool, lang: Lang) -> String {
+    if arrived {
+        pick(
+            lang,
+            "接続し直したキーボードが新しい種類を報告しています ✓",
+            "The keyboard is back and reports the new type ✓",
+        )
+    } else {
+        pick(
+            lang,
+            "接続し直すのを待っています…",
+            "Waiting for the keyboard to reconnect…",
+        )
+    }
+}
+
+/// Quitting while a reconnect waits for keep or revert (design m3 F.5 `quit-confirm`).
+pub fn quit_confirm(names: &[String], lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!(
+            "{} の変更は、このままにするか元に戻すかをまだ決めていません。終了して後で決める場合、変更は確認待ちのまま残り、次に MKLM を開いたときに決められます。",
+            names.join("、")
+        ),
+        Lang::En => format!(
+            "You have not decided yet whether to keep the change of {}. If you quit and decide later, the change keeps waiting and MKLM asks again when you open it.",
+            names.join(", ")
+        ),
+    }
+}
+
+// --- The key test (design m3 B.6; review U2) ---
+
+pub fn key_test_prompt(lang: Lang) -> String {
+    pick(
+        lang,
+        "キーを押してください（Shift+2 で @ なら US、\" なら JIS）",
+        "Press a key (Shift+2: @ means US, \" means JIS)",
+    )
+}
+
+pub fn key_test_not_japanese(lang: Lang) -> String {
+    pick(
+        lang,
+        "入力方式が日本語ではないため判定できません。Win+Space で日本語に切り替えてください",
+        "Cannot tell: the input method is not Japanese. Switch to Japanese with Win+Space",
+    )
+}
+
+pub fn key_test_other_keyboard(from: &str, name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("このキーは {from} から送られました。{name} で押してください"),
+        Lang::En => format!("This key came from {from}. Press it on {name}"),
+    }
+}
+
+pub fn key_test_unexpected(lang: Lang) -> String {
+    pick(
+        lang,
+        "Shift+2 → 想定外の文字です",
+        "Shift+2 → an unexpected character",
+    )
+}
+
+pub fn key_test_as_expected(text: &str, got: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("Shift+2 → {text} : ✓ 期待どおり {got} です"),
+        Lang::En => format!("Shift+2 → {text} : ✓ {got}, as expected"),
+    }
+}
+
+pub fn key_test_wrong(text: &str, want: &str, got: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!(
+            "Shift+2 → {text} : ⚠ {want} になるはずが {got} です。『元に戻す』をおすすめします"
+        ),
+        Lang::En => format!(
+            "Shift+2 → {text} : ⚠ it should type {want} but types {got}. Revert is recommended"
+        ),
+    }
+}
+
+pub fn key_test_neutral(text: &str, got: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("Shift+2 → {text} : {got} 配列として動作しています"),
+        Lang::En => format!("Shift+2 → {text} : it types {got}"),
+    }
+}
+
+pub fn key_test_device(name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("このキーを送ったキーボード: {name}"),
+        Lang::En => format!("Sent by: {name}"),
+    }
+}
+
+// --- The result (design m3 B.17) ---
+
+/// Until the read after the session arrives (review U7).
+pub fn checking_now(lang: Lang) -> String {
+    pick(lang, "確かめています…", "Checking…")
+}
+
+/// One "今の状態" line: "Keychron Receiver: US として動作中（変更前のまま）".
+pub fn current_state_line(
+    name: &str,
+    typing: Option<&LayoutTable>,
+    present: bool,
+    unchanged: bool,
+    lang: Lang,
+) -> String {
+    match (present, typing) {
+        (false, _) => match lang {
+            Lang::Ja => format!("{name}: 未接続"),
+            Lang::En => format!("{name}: not connected"),
+        },
+        (true, None) => match lang {
+            Lang::Ja => format!("{name}: 動作を確かめられません"),
+            Lang::En => format!("{name}: cannot tell how it types"),
+        },
+        (true, Some(layout)) => {
+            let layout = table(layout, lang);
+            match (lang, unchanged) {
+                (Lang::Ja, false) => format!("{name}: {layout} として動作中"),
+                (Lang::Ja, true) => format!("{name}: {layout} として動作中（変更前のまま）"),
+                (Lang::En, false) => format!("{name}: types {layout}"),
+                (Lang::En, true) => format!("{name}: types {layout} (as before)"),
+            }
+        }
+    }
+}
+
+/// What a finished request did, when the reason does not say it (design m3 B.17).
+pub fn result_outcome(outcome: mklm_core::Outcome, lang: Lang) -> String {
+    use mklm_core::Outcome;
+    match outcome {
+        Outcome::NoChange => pick(
+            lang,
+            "すでにその設定だったため、何も変更していません。",
+            "It was set this way already; nothing was changed.",
+        ),
+        Outcome::Confirmed => pick(
+            lang,
+            "新しい配列のままにしました。",
+            "The new layout is kept.",
+        ),
+        Outcome::AwaitingConfirm => pick(
+            lang,
+            "変更は確認待ちです。キーボードを接続し直してから、メイン画面の［確認…］で、このままにするか元に戻すかを選んでください。",
+            "The change waits for you: reconnect the keyboard, then choose keep or revert with \"Review…\" on the main screen.",
+        ),
+        Outcome::PendingReboot => takes_effect(PendingAction::RestartPc, 0, lang),
+        Outcome::Reverted => pick(lang, "元に戻しました。", "Put back as it was."),
+        Outcome::RevertedPendingReboot => pick(
+            lang,
+            "元に戻しました。PC を再起動すると反映されます（シャットダウンではなく再起動）。",
+            "Put back; it takes effect when the PC restarts (Restart, not Shut down).",
+        ),
+        Outcome::Failed => pick(lang, "完了できませんでした。", "It was not done."),
+        Outcome::Conflict => pick(
+            lang,
+            "MKLM 以外がキーボードの設定を変更していました。どうするかを選んでください。",
+            "Something other than MKLM changed the keyboard settings; choose what to do.",
+        ),
+        Outcome::Recovered => pick(lang, "回復しました。", "Recovered."),
+    }
+}
+
+/// INV-PS2 would break with the values as they are (design review C12).
+pub fn result_inv_ps2(lang: Lang) -> String {
+    pick(
+        lang,
+        "今の値のままでは内蔵（PS/2）キーボードの配列が決まらないため、MKLM は止めました。どうするかを選んでください。",
+        "With the values as they are now the built-in (PS/2) keyboard would have no fixed layout, so MKLM stopped. Choose what to do.",
+    )
+}
+
+/// One operation a recovery or an undo acted on: "途中で止まりました → 元に戻しました（…）".
+pub fn recovered_line(what: Option<&str>, from: OpState, to: OpState, lang: Lang) -> String {
+    // It has been recovered, so no "（回復が必要）" on the state it was found in.
+    let from_text = match from {
+        OpState::Planned | OpState::Written => pick(lang, "途中で止まりました", "Stopped halfway"),
+        other => state(other, lang),
+    };
+    let to_text = state(to, lang);
+    let phase = match (to, mklm_client::describe::reset_phase_from(from)) {
+        (OpState::Reverted | OpState::RevertedPendingReboot, ResetPhase::NotReached) => pick(
+            lang,
+            "（リセットの前に止まっていたため、キーボードの動作は変わっていません）",
+            " (it stopped before the keyboard reset, so the keyboard never switched)",
+        ),
+        _ => String::new(),
+    };
+    match what {
+        Some(what) => format!("{what}: {from_text} → {to_text}{phase}"),
+        None => format!("{from_text} → {to_text}{phase}"),
+    }
+}
+
+/// The helper was lost and MKLM recovered at once (design m3 B.17).
+pub fn result_recovered_after_loss(lang: Lang) -> String {
+    pick(
+        lang,
+        "MKLM の管理用プログラムが止まったため、すぐに回復しました。",
+        "MKLM's administrator program stopped, so MKLM recovered at once.",
+    )
+}
+
+/// The helper was lost and the recovery did not run (declined, skipped, or its prompt refused).
+pub fn result_recovery_waits(lang: Lang) -> String {
+    pick(
+        lang,
+        "変更は確認待ちのまま残っています。［回復…］で回復できます。それまで、キーボードの配列は変更できません。",
+        "The change is still waiting. \"Recover…\" recovers it; until then no keyboard's layout can be changed.",
+    )
+}
+
+/// The helper was lost and whether recovery is needed could not be read.
+pub fn result_lost_unknown(lang: Lang) -> String {
+    pick(
+        lang,
+        "MKLM の管理用プログラムが止まりました。回復が必要かどうかを確かめられなかったため、メイン画面の表示を確かめてください。",
+        "MKLM's administrator program stopped, and whether recovery is needed could not be read; check the main screen.",
+    )
+}
+
+/// After a recovery, entries still wait for keep or revert (design m2 C7).
+pub fn result_still_waiting(lang: Lang) -> String {
+    pick(
+        lang,
+        "確認待ちの変更があります。『確認待ちの変更をすべて元に戻す』で戻せます。",
+        "A change still waits for you; \"Undo every change waiting for you\" puts it back.",
+    )
+}
+
+/// The post-reboot RunOnce rule could not be applied (design m3 B.17 `run_once_note`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOnceNote {
+    /// An elevated GUI does not register (`RunOnceOutcome::TellUser`).
+    Elevated,
+    /// Registering failed.
+    NotRegistered,
+    /// The journal could not be read to decide.
+    Unchecked,
+}
+
+pub fn run_once_note(note: RunOnceNote, lang: Lang) -> String {
+    match note {
+        RunOnceNote::Elevated => pick(
+            lang,
+            "管理者として実行している MKLM は、再起動後の確認を登録できません。PC を再起動してサインインしたら、MKLM を開いてください。",
+            "An MKLM run as administrator cannot register the check after the restart. After restarting the PC and signing in, open MKLM.",
+        ),
+        RunOnceNote::NotRegistered => pick(
+            lang,
+            "再起動後の確認を登録できませんでした。PC を再起動してサインインしたら、MKLM を開いてください。",
+            "The check after the restart could not be registered. After restarting the PC and signing in, open MKLM.",
+        ),
+        RunOnceNote::Unchecked => pick(
+            lang,
+            "記録を読めなかったため、再起動後の確認が必要かを確かめられませんでした。PC を再起動した後は、MKLM を開いて確かめてください。",
+            "The journal could not be read to see whether a check after the restart is needed. After restarting the PC, open MKLM to check.",
+        ),
+    }
+}
+
+/// The result's next-step button (design m3 B.17).
+pub fn next_step(step: crate::vm::result::NextStep, lang: Lang) -> String {
+    use crate::vm::result::NextStep;
+    match step {
+        NextStep::Restart => pick(lang, "再起動の画面へ", "Go to the restart"),
+        NextStep::PostReboot => pick(lang, "再起動後の確認へ", "Check after the restart"),
+        NextStep::Conflict => pick(lang, "衝突を解決…", "Resolve…"),
+        NextStep::Recovery => pick(lang, "回復…", "Recover…"),
+        NextStep::ImeHelp => pick(lang, "入力方式の案内", "Input method guide"),
+    }
+}
+
+/// Why a new change cannot start (the gate before any prompt, design m3 B.5): `what` is the
+/// blocking operation in words (`vm::journal::kind_text`).
+pub fn block_reason(reason: &BlockReason, what: &str, lang: Lang) -> String {
+    match reason {
+        BlockReason::JournalUnreadable { .. } => error_code(ErrorCode::JournalUnreadable, lang),
+        BlockReason::Busy(_) => match lang {
+            Lang::Ja => {
+                format!("別の MKLM が処理中です（{what}）。終わってからもう一度試してください。")
+            }
+            Lang::En => {
+                format!("Another MKLM process is working ({what}); try again when it has finished.")
+            }
+        },
+        BlockReason::PostRebootCheck(_) => match lang {
+            Lang::Ja => format!("PC の再起動後の確認がまだです（{what}）。先に確認してください。"),
+            Lang::En => format!("The check after the restart is still open ({what}); do it first."),
+        },
+        BlockReason::NeedsRecovery(_) => match lang {
+            Lang::Ja => format!("途中で止まった操作があります（{what}）。先に回復してください。"),
+            Lang::En => format!("An operation was interrupted ({what}); recover it first."),
+        },
+        BlockReason::AwaitingUser(_) => match lang {
+            Lang::Ja => format!(
+                "確認待ちの変更があります（{what}）。先にそれをこのままにするか元に戻してください。"
+            ),
+            Lang::En => format!("A change is still waiting ({what}); keep or undo it first."),
+        },
+        BlockReason::WaitingForReboot(_) => match lang {
+            Lang::Ja => format!(
+                "PC の再起動を待っている変更があります（{what}）。再起動するまで、ほかの変更はできません。"
+            ),
+            Lang::En => format!(
+                "A change waits for a PC restart ({what}); until then no other change is possible."
+            ),
+        },
+        BlockReason::Conflict(_) => match lang {
+            Lang::Ja => {
+                format!("MKLM 以外による変更の確認が必要です（{what}）。先に解決してください。")
+            }
+            Lang::En => {
+                format!("Values changed outside MKLM need a decision ({what}); resolve them first.")
+            }
+        },
+    }
 }
 
 #[cfg(test)]
