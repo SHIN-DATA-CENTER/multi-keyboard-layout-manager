@@ -26,7 +26,8 @@ use crate::app::post;
 use crate::autostart::{self, AutostartTask};
 use crate::log;
 use crate::settings::{Settings, SettingsStore};
-use crate::state::{AppMsg, JournalMsg, PrepareFailure, PreparedChange, SystemRead};
+use crate::state::{AppMsg, JournalMsg, PrepareFailure, PreparedChange, SystemRead, WizardMsg};
+use crate::vm::wizard::ForeignValues;
 
 /// A job for the I/O worker.
 #[derive(Debug, Clone, PartialEq)]
@@ -56,6 +57,10 @@ pub enum IoTask {
     RestartPc,
     /// `%ProgramData%\SHIN DATA CENTER\MKLM\Recovery` in Explorer (design m3 B.11).
     OpenRecoveryFolder,
+    /// The override values of the non-keyboard collections of these keyboards' devices
+    /// (`mklm_win::read_non_keyboard_values`, read only; the wizard's step 3, design m3 B.1, J.9),
+    /// answered by `WizardMsg::ForeignRead`.
+    ReadNonKeyboardValues(Vec<mklm_core::KeyboardDevice>),
 }
 
 impl IoTask {
@@ -69,7 +74,8 @@ impl IoTask {
             | IoTask::ReadForResult
             | IoTask::PrepareChange { .. }
             | IoTask::OpenSettingsPage(_)
-            | IoTask::OpenRecoveryFolder => false,
+            | IoTask::OpenRecoveryFolder
+            | IoTask::ReadNonKeyboardValues(_) => false,
         }
     }
 }
@@ -192,6 +198,10 @@ fn run(tasks: Receiver<IoTask>, mut store: Option<SettingsStore>) {
                         post(AppMsg::Journal(JournalMsg::RecoveryFolderFailed));
                     }
                 }
+                IoTask::ReadNonKeyboardValues(keyboards) => {
+                    let found = read_non_keyboard_values(&keyboards);
+                    post(AppMsg::Wizard(WizardMsg::ForeignRead(found)));
+                }
             }
             if writes {
                 add_pending_write(-1);
@@ -284,6 +294,38 @@ pub fn read_system() -> SystemRead {
         boot,
         summary,
     }
+}
+
+/// The values on non-keyboard collections of the devices of `keyboards` (design m3 B.1, J.9),
+/// read unelevated. A hint only: problems are logged, and an error leaves the rows without it.
+fn read_non_keyboard_values(
+    keyboards: &[mklm_core::KeyboardDevice],
+) -> Result<Vec<ForeignValues>, String> {
+    let mut issues = Vec::new();
+    let found = mklm_win::read_non_keyboard_values(keyboards, &mut issues);
+    for issue in &issues {
+        log::warn(format!("non-keyboard values: {issue}"));
+    }
+    let found = found.map_err(|error| {
+        log::warn(format!("reading the non-keyboard values failed: {error}"));
+        error.to_string()
+    })?;
+    Ok(found
+        .into_iter()
+        .filter_map(|values| {
+            let names: Vec<String> = values
+                .overrides
+                .present_value_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            (!names.is_empty()).then_some(ForeignValues {
+                instance_id: values.instance_id,
+                keyboard: values.keyboard_instance_id,
+                names,
+            })
+        })
+        .collect())
 }
 
 /// What a change is planned with (design m3 B.5, m2 F.2 step 4), read unelevated: nothing here

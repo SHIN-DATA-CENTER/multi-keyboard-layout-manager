@@ -28,6 +28,9 @@
 //! The pages about journal entries (design m3 B.8 to B.12; WP-U4, WP-U5) — the restart, the check
 //! after it, conflicts, the history and the recovery page — are in [`journal_pages`]; their
 //! requests go through the same session flow.
+//!
+//! The first-run wizard (design m3 B.1; WP-U2) is in [`wizard`]: its requests go through the same
+//! session flow too, and the change pages it opens for ordinary changes return to it.
 
 use std::time::{Duration, Instant};
 
@@ -63,7 +66,11 @@ pub const KEYBOARD_SETTLE: Duration = Duration::from_millis(750);
 /// The restart, post-reboot, conflict, history and recovery pages (WP-U4, WP-U5).
 pub mod journal_pages;
 
+/// The first-run wizard (WP-U2).
+pub mod wizard;
+
 pub use journal_pages::{JournalEffect, JournalMsg, JournalPages};
+pub use wizard::{WizardMsg, WizardState};
 
 /// The page in the main area (matches `Screen` in ui/structs.slint). Twelve pages: the change
 /// page covers assignment, detection and the apply method (review U14).
@@ -182,6 +189,9 @@ pub struct ChangeDraft {
     pub last_press: Option<Press>,
     /// An answer key came from this other keyboard (instance ID): the page names the one to use.
     pub other_keyboard: Option<String>,
+    /// Opened by the first-run wizard for one of its changes (design m3 B.1 step 4): leaving the
+    /// page or ending its session returns to the wizard.
+    pub wizard: bool,
 }
 
 impl ChangeDraft {
@@ -203,6 +213,7 @@ impl ChangeDraft {
             plan: None,
             last_press: None,
             other_keyboard: None,
+            wizard: false,
         }
     }
 
@@ -348,6 +359,9 @@ pub struct AppState {
     pub reveal_on_attention: bool,
     /// The autostart value as the I/O worker last read it (design m3 F.3); `None` until then.
     pub autostart: Option<AutostartReport>,
+    /// The first-run wizard while it is open (design m3 B.1): at start while
+    /// `settings.wizard.completed` is false, or from Settings.
+    pub wizard: Option<WizardState>,
 }
 
 /// Something that happened (a user action, a worker's answer, a watcher).
@@ -489,6 +503,8 @@ pub enum AppMsg {
     AutostartToggled(bool),
     /// The I/O worker read (and maybe changed) the autostart value.
     AutostartRead(Box<AutostartReport>),
+    /// The first-run wizard (design m3 B.1; WP-U2).
+    Wizard(WizardMsg),
 }
 
 /// Something `app.rs` must do.
@@ -529,6 +545,10 @@ pub enum Effect {
     /// Read or change the autostart value on the I/O worker (design m3 F.3); answered by
     /// [`AppMsg::AutostartRead`].
     Autostart(AutostartTask),
+    /// Read the override values of the non-keyboard collections of these keyboards' devices on
+    /// the I/O worker (the wizard's step 3, design m3 B.1, J.9); answered by
+    /// `WizardMsg::ForeignRead`.
+    ReadNonKeyboardValues(Vec<mklm_core::KeyboardDevice>),
     ShowWindow,
     HideWindow,
     Quit,
@@ -643,6 +663,7 @@ fn stop_identifying(state: &mut AppState) {
 /// (the skeleton never panics on a click).
 pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
     match msg {
+        AppMsg::Navigate(Page::Wizard) => wizard::open(state),
         AppMsg::Navigate(page) => {
             if page != Page::Main {
                 stop_identifying(state);
@@ -650,6 +671,8 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             state.page = page;
             if !matches!(page, Page::Change | Page::UacNotice) {
                 state.draft = None;
+                // Away from the wizard and the change pages it opens: the wizard is closed.
+                state.wizard = None;
             }
             journal_pages::entered(state, page);
             let mut effects = vec![Effect::Render];
@@ -686,6 +709,8 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
                     effects.push(effect);
                 }
             }
+            // The wizard reads what its steps need next (design m3 B.1).
+            effects.extend(wizard::after_read(state));
             effects
         }
         AppMsg::ResultReadArrived => {
@@ -853,7 +878,17 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             token,
             at,
             prepared,
-        } => change_prepared(state, token, at, *prepared),
+        } => {
+            // The wizard's migration is prepared like a change (design m3 B.1, B.5).
+            if state
+                .wizard
+                .as_ref()
+                .is_some_and(|wizard| wizard.preparing == Some(token))
+            {
+                return wizard::prepared(state, token, *prepared).unwrap_or_default();
+            }
+            change_prepared(state, token, at, *prepared)
+        }
         AppMsg::ChangeApply => {
             if state.session != SessionPhase::Idle || state.page != Page::Change {
                 return Vec::new();
@@ -872,6 +907,10 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             if state.page != Page::UacNotice || state.session != SessionPhase::Idle {
                 return Vec::new();
             }
+            // A request of the wizard page (design m3 B.1 step 4).
+            if let Some(effects) = wizard::uac_go(state) {
+                return effects;
+            }
             let Some((request, apply)) = ready_request(state) else {
                 state.page = Page::Change;
                 return vec![Effect::Render];
@@ -887,14 +926,15 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
                 return Vec::new();
             }
             match state.page {
-                // Back to the choices: nothing is lost, nothing happens.
+                // Back to where the request was made: nothing is lost, nothing happens.
                 Page::UacNotice => {
-                    state.page = Page::Change;
+                    if !wizard::uac_cancel(state) {
+                        state.page = Page::Change;
+                    }
                     vec![Effect::Render]
                 }
                 Page::Change => {
-                    state.draft = None;
-                    state.page = Page::Main;
+                    leave_change(state);
                     vec![Effect::Read, Effect::Render]
                 }
                 _ => Vec::new(),
@@ -986,8 +1026,7 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             state.blocked = None;
             journal_pages::result_closed(state);
             if matches!(state.page, Page::Change | Page::UacNotice) {
-                state.page = Page::Main;
-                state.draft = None;
+                leave_change(state);
             }
             vec![Effect::Read, Effect::Render]
         }
@@ -1009,7 +1048,9 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
                 crate::vm::result::NextStep::Recovery => Page::Recovery,
                 crate::vm::result::NextStep::ImeHelp => Page::ImeHelp,
             };
-            let mut effects = update(state, AppMsg::Navigate(page));
+            // Away from the wizard after one of its requests: it has done its part.
+            let mut effects = wizard::leaving_for_next_step(state);
+            effects.extend(update(state, AppMsg::Navigate(page)));
             if !effects.contains(&Effect::Read) {
                 effects.insert(0, Effect::Read);
             }
@@ -1077,7 +1118,17 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             state.autostart = Some(*report);
             vec![Effect::Render]
         }
+        AppMsg::Wizard(msg) => wizard::handle(state, msg),
     }
+}
+
+/// Leaves the change page (or its UAC explanation) without a session: back to the wizard when it
+/// opened the page, else to the main screen.
+fn leave_change(state: &mut AppState) {
+    let to_wizard =
+        state.draft.as_ref().is_some_and(|draft| draft.wizard) && state.wizard.is_some();
+    state.draft = None;
+    state.page = if to_wizard { Page::Wizard } else { Page::Main };
 }
 
 /// The journal needs the user at start-up (design m3 F.2): the post-reboot check, a recovery or
@@ -1510,8 +1561,12 @@ fn session_ended(state: &mut AppState, outcome: SessionOutcome) -> Vec<Effect> {
     state.recovery_question = None;
     state.decided = None;
     state.note = SessionNote::None;
+    let from_wizard = state.draft.as_ref().is_some_and(|draft| draft.wizard);
     state.draft = None;
-    if matches!(state.page, Page::Change | Page::UacNotice) {
+    // The wizard's requests and the change pages it opened go back to the wizard (design m3 B.1).
+    if wizard::session_ended(state, from_wizard) {
+        state.page = Page::Wizard;
+    } else if matches!(state.page, Page::Change | Page::UacNotice) {
         state.page = Page::Main;
     }
     let abandoned = matches!(
@@ -1675,6 +1730,10 @@ fn device_key(
             visible_change = true;
         }
     }
+    // The wizard's detection on its keyboards step (design m3 B.1, B.3).
+    let (wizard_changed, wizard_learned) = wizard::device_key(state, &instance_id, scancode);
+    visible_change |= wizard_changed;
+    let learned = learned.or(wizard_learned);
     // The detection's verdict is what the keyboard physically is (design m3 B.3).
     if let Some((id, layout)) = learned
         && state.settings.learn_physical(PhysicalLayout {

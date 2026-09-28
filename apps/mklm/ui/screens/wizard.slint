@@ -1,55 +1,123 @@
 // The first-run wizard (plan 3.1, design m3 B.1; review U3): 1 welcome, 2 input methods (user
 // and sign-in screen), 3 the keyboards' layouts (JIS / US per connected keyboard, the in-place
 // detection, problem values on their row), 4 summary (nothing to do, one migration that carries
-// the assignments, or ordinary changes).
+// the assignments, or ordinary changes one at a time), then finish with the sign-in start switch.
+// Rust (src/state/wizard.rs, src/vm/wizard.rs) decides everything; this file lays it out.
 
-import { Button, ComboBox } from "std-widgets.slint";
-import { Theme } from "../theme.slint";
-import { KeyTestVm, Tone, WizardKeyboardVm } from "../structs.slint";
+import { Button, CheckBox, ComboBox } from "std-widgets.slint";
+import { KeyTestVm, Tone, WizardKeyboardVm, WizardVm } from "../structs.slint";
 import {
-    Banner, Body, Caption, DialogBody, DialogButtons, KeyTestArea, PageHeader, StubNotice,
+    Banner, Body, Caption, DialogBody, DialogButtons, KeyTestArea, PageHeader, RadioList,
 } from "../widgets.slint";
 
+// A combo box that follows `value` also after the user picked from it (a pick replaces the
+// binding of `current-index`; the row's data may still change, e.g. from the detection).
+component ValueComboBox inherits ComboBox {
+    in property <int> value;
+    current-index: value;
+    changed value => {
+        self.current-index = self.value;
+    }
+}
+
+// One connected keyboard: its name and how it types now, the layout choice, and the problems of
+// its values with "keep / delete" when its driver does not read them.
+component WizardRow inherits VerticalLayout {
+    in property <WizardKeyboardVm> keyboard;
+    callback choose(int);
+    callback problem-choice(int);
+    spacing: 4px;
+
+    HorizontalLayout {
+        spacing: 8px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            Body {
+                text: root.keyboard.name;
+            }
+
+            Caption {
+                text: root.keyboard.current;
+            }
+
+            if root.keyboard.note != "": Caption {
+                text: root.keyboard.note;
+            }
+        }
+
+        if root.keyboard.can-choose: ValueComboBox {
+            model: ["JIS", "US"];
+            value: root.keyboard.choice;
+            accessible-label: @tr("Layout of {}", root.keyboard.name);
+            selected => {
+                root.choose(self.current-index);
+            }
+        }
+    }
+
+    if root.keyboard.problem != "": Banner {
+        text: root.keyboard.problem;
+        tone: Tone.warning;
+    }
+    if root.keyboard.problem-deletable: HorizontalLayout {
+        alignment: start;
+        ValueComboBox {
+            model: [@tr("Leave it (recommended)"), @tr("Delete it (the driver does not read it)")];
+            value: root.keyboard.problem-choice;
+            accessible-label: @tr("What to do with the values of {}", root.keyboard.name);
+            selected => {
+                root.problem-choice(self.current-index);
+            }
+        }
+    }
+}
+
 export component WizardScreen inherits VerticalLayout {
-    // 0 = welcome, 1 = input methods, 2 = keyboards, 3 = summary.
-    in property <int> step;
-    // "手順 3 / 4: キーボードの配列" (review U16 e: the position in words).
-    in property <string> heading;
-    in property <string> body;
-    in property <[string]> warnings;
+    in property <WizardVm> vm;
     in property <[WizardKeyboardVm]> keyboards;
     in property <KeyTestVm> key-test;
-    // Fixed-mode migration only: the PC's standard layout ("標準配列（おすすめ: 今の JIS）").
-    in property <bool> standard-visible;
-    in-out property <int> standard-index;
-    in property <bool> can-next: true;
-    in property <string> next-text: @tr("Next");
+    // The migration's standard layout: 0 = JIS, 1 = US.
+    in-out property <int> standard: -1;
+    in-out property <bool> autostart: true;
+    in-out property <bool> show-details: false;
     callback back();
     callback next();
     callback skip();
+    callback secondary();
     callback open-settings-page(int);
-    callback keyboard-choice(int, int);
-    callback problem-choice(int, int);
+    // (row ID, 0 = JIS / 1 = US)
+    callback keyboard-choice(string, int);
+    // (row ID, 0 = keep / 1 = delete)
+    callback problem-choice(string, int);
+    callback choose-standard(int);
+    callback autostart-toggled(bool);
     callback key-pressed(string, bool);
+    callback restart-detection();
+    callback use-detected();
     padding: 16px;
     spacing: 12px;
 
     PageHeader {
         title: @tr("Set up MKLM");
-        subtitle: root.heading;
+        subtitle: root.vm.heading;
     }
 
     DialogBody {
-        Body {
-            text: root.body;
+        if root.vm.body != "": Body {
+            text: root.vm.body;
         }
-
-        for warning in root.warnings: Banner {
+        for line in root.vm.lines: Body {
+            text: "・" + line;
+        }
+        for warning in root.vm.warnings: Banner {
             text: warning;
             tone: Tone.warning;
         }
-
-        if root.step == 1: HorizontalLayout {
+        for note in root.vm.notes: Banner {
+            text: note;
+            tone: Tone.info;
+        }
+        if root.vm.settings-buttons: HorizontalLayout {
             spacing: 8px;
             alignment: start;
             Button {
@@ -73,83 +141,107 @@ export component WizardScreen inherits VerticalLayout {
                 }
             }
         }
-        if root.step == 2: VerticalLayout {
-            spacing: 6px;
-            for keyboard[index] in root.keyboards: VerticalLayout {
-                spacing: 2px;
-                HorizontalLayout {
-                    spacing: 8px;
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        Body {
-                            text: keyboard.name;
-                        }
-
-                        Caption {
-                            text: keyboard.current;
-                        }
-                    }
-
-                    ComboBox {
-                        model: ["JIS", "US"];
-                        current-index: keyboard.choice;
-                        accessible-label: @tr("Layout of {}", keyboard.name);
-                        selected => {
-                            root.keyboard-choice(index, self.current-index);
-                        }
-                    }
+        if root.vm.step == 2: VerticalLayout {
+            spacing: 10px;
+            for keyboard in root.keyboards: WizardRow {
+                keyboard: keyboard;
+                choose(index) => {
+                    root.keyboard-choice(keyboard.id, index);
                 }
-
-                if keyboard.problem != "": Caption {
-                    text: keyboard.problem;
+                problem-choice(index) => {
+                    root.problem-choice(keyboard.id, index);
                 }
-                if keyboard.problem-deletable: ComboBox {
-                    model: [@tr("Leave it (recommended)"), @tr("Delete it (the driver does not read it)")];
-                    current-index: keyboard.problem-choice;
-                    accessible-label: @tr("Stored value on {}", keyboard.name);
-                    selected => {
-                        root.problem-choice(index, self.current-index);
-                    }
-                }
-            }
-            Caption {
-                text: @tr("Not sure? Press the key left of Backspace on that keyboard:");
-            }
-
-            KeyTestArea {
-                vm: root.key-test;
-                key-pressed(text, shift) => {
-                    root.key-pressed(text, shift);
-                }
-            }
-
-            StubNotice {
-                package: "WP-U2";
             }
         }
-        if root.step == 3 && root.standard-visible: HorizontalLayout {
+        // The in-place detection: the first answer key fixes the keyboard (design m3 B.3).
+        if root.vm.step == 2 && root.vm.detect-instruction != "": Caption {
+            text: root.vm.detect-instruction;
+        }
+        if root.vm.step == 2: KeyTestArea {
+            vm: root.key-test;
+            key-pressed(text, shift) => {
+                root.key-pressed(text, shift);
+            }
+        }
+        if root.vm.detect-feedback != "": Banner {
+            text: root.vm.detect-feedback;
+            tone: root.vm.detect-feedback-tone;
+            accessible-live-region: polite;
+        }
+        if root.vm.detect-verdict != "": HorizontalLayout {
             spacing: 8px;
-            alignment: start;
-            Caption {
-                text: @tr("The PC's standard layout:");
-                vertical-alignment: center;
+            Body {
+                text: root.vm.detect-verdict;
+                horizontal-stretch: 1;
+                accessible-live-region: polite;
             }
 
-            ComboBox {
-                model: ["JIS", "US"];
-                current-index <=> root.standard-index;
-                accessible-label: @tr("The PC's standard layout");
+            if root.vm.detect-choose-text != "": Button {
+                text: root.vm.detect-choose-text;
+                clicked => {
+                    root.use-detected();
+                }
             }
+            Button {
+                text: @tr("Start again");
+                clicked => {
+                    root.restart-detection();
+                }
+            }
+        }
+        if root.vm.standard-visible: RadioList {
+            label: @tr("The PC's standard layout");
+            choices: root.vm.standard-choices;
+            selected <=> root.standard;
+            chosen(index) => {
+                root.choose-standard(index);
+            }
+        }
+        if root.vm.migration: Banner {
+            tone: Tone.warning;
+            text: @tr("If you cannot type at the sign-in screen: use the on-screen keyboard (the accessibility button at the bottom right), sign in with your PIN or fingerprint, or plug in another keyboard.");
+        }
+        if root.vm.busy: Caption {
+            text: @tr("Checking…");
+            accessible-live-region: polite;
+        }
+        if root.vm.note != "": Banner {
+            text: root.vm.note;
+            tone: root.vm.note-tone;
+            accessible-live-region: polite;
+        }
+        if root.vm.autostart-visible: CheckBox {
+            text: @tr("Start MKLM on the taskbar (inside \"^\") when I sign in");
+            checked <=> root.autostart;
+            toggled => {
+                root.autostart-toggled(self.checked);
+            }
+        }
+        if root.vm.details != "": CheckBox {
+            text: @tr("Show the technical details");
+            checked <=> root.show-details;
+        }
+        if root.show-details && root.vm.details != "": Caption {
+            text: root.vm.details;
+            font-family: "Consolas";
+        }
+        if root.vm.uac-line != "": Caption {
+            text: root.vm.uac-line;
         }
     }
 
     DialogButtons {
-        if root.step > 0: Button {
+        alignment: stretch;
+        if root.vm.back-visible: Button {
             text: @tr("Back");
             clicked => {
                 root.back();
             }
         }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+
         Button {
             text: @tr("Set up later");
             clicked => {
@@ -157,10 +249,16 @@ export component WizardScreen inherits VerticalLayout {
             }
         }
 
+        if root.vm.secondary-text != "": Button {
+            text: root.vm.secondary-text;
+            clicked => {
+                root.secondary();
+            }
+        }
         Button {
-            text: root.next-text;
+            text: root.vm.next-text != "" ? root.vm.next-text : @tr("Next");
             primary: true;
-            enabled: root.can-next;
+            enabled: root.vm.can-next;
             clicked => {
                 root.next();
             }

@@ -7,7 +7,7 @@ import { Theme } from "theme.slint";
 import {
     BadgeVm, ChangeVm, ChoiceVm, CheckRowVm, ConflictKeyboardVm, CountdownVm, JournalRowVm,
     KeyboardRowVm, KeyTestVm, Overlay, PlanLineVm, ProgressVm, ReconnectVm, RecoveryItemVm,
-    RecoveryPageVm, ResultVm, Screen, StatusVm, Tone, WizardKeyboardVm,
+    RecoveryPageVm, ResultVm, Screen, StatusVm, Tone, WizardKeyboardVm, WizardVm,
 } from "structs.slint";
 import { MainScreen } from "screens/main.slint";
 import { WizardScreen } from "screens/wizard.slint";
@@ -110,20 +110,22 @@ export component AppWindow inherits Window {
     callback refresh();
 
     // --- Wizard (B.1) ---
-    in property <int> wizard-step;
-    in property <string> wizard-heading;
-    in property <string> wizard-body;
-    in property <[string]> wizard-warnings;
+    in property <WizardVm> wizard;
     in property <[WizardKeyboardVm]> wizard-keyboards;
-    in property <bool> wizard-standard-visible;
-    in-out property <int> wizard-standard-index;
-    in property <bool> wizard-can-next: true;
-    in property <string> wizard-next-text;
+    in-out property <int> wizard-standard: -1;
+    in-out property <bool> wizard-autostart: true;
     callback wizard-back();
     callback wizard-next();
     callback wizard-skip();
-    callback wizard-keyboard-choice(int, int);
-    callback wizard-problem-choice(int, int);
+    callback wizard-secondary();
+    // (row ID, 0 = JIS / 1 = US)
+    callback wizard-keyboard-choice(string, int);
+    // (row ID, 0 = keep / 1 = delete)
+    callback wizard-problem-choice(string, int);
+    callback wizard-choose-standard(int);
+    callback wizard-autostart-toggled(bool);
+    callback wizard-restart-detection();
+    callback wizard-use-detected();
 
     // --- The change page (B.3 to B.5) ---
     in property <string> change-keyboard-name;
@@ -350,16 +352,11 @@ export component AppWindow inherits Window {
                 }
             }
             if root.screen == Screen.wizard: WizardScreen {
-                step: root.wizard-step;
-                heading: root.wizard-heading;
-                body: root.wizard-body;
-                warnings: root.wizard-warnings;
+                vm: root.wizard;
                 keyboards: root.wizard-keyboards;
                 key-test: root.key-test;
-                standard-visible: root.wizard-standard-visible;
-                standard-index <=> root.wizard-standard-index;
-                can-next: root.wizard-can-next;
-                next-text: root.wizard-next-text;
+                standard <=> root.wizard-standard;
+                autostart <=> root.wizard-autostart;
                 back => {
                     root.wizard-back();
                 }
@@ -368,6 +365,9 @@ export component AppWindow inherits Window {
                 }
                 skip => {
                     root.wizard-skip();
+                }
+                secondary => {
+                    root.wizard-secondary();
                 }
                 open-settings-page(page) => {
                     root.open-settings-page(page);
@@ -378,8 +378,20 @@ export component AppWindow inherits Window {
                 problem-choice(row, choice) => {
                     root.wizard-problem-choice(row, choice);
                 }
+                choose-standard(index) => {
+                    root.wizard-choose-standard(index);
+                }
+                autostart-toggled(on) => {
+                    root.wizard-autostart-toggled(on);
+                }
                 key-pressed(text, shift) => {
                     root.key-pressed(text, shift);
+                }
+                restart-detection => {
+                    root.wizard-restart-detection();
+                }
+                use-detected => {
+                    root.wizard-use-detected();
                 }
             }
             if root.screen == Screen.change: ChangeScreen {

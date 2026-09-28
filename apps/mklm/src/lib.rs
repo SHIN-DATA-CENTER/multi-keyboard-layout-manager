@@ -43,6 +43,8 @@ pub mod tray;
 #[cfg(windows)]
 pub mod watchers;
 #[cfg(windows)]
+pub mod wizard_ui;
+#[cfg(windows)]
 pub mod worker;
 
 /// Code generated from `ui/app.slint` (design m3 B).
