@@ -63,7 +63,7 @@ pub fn unread_value_names(driver: &KeyboardDriver) -> &'static [&'static str] {
 /// (`KeyboardNumber*Override`) on an i8042prt devnode are not on the write allowlist and are left
 /// to the user, like values on non-keyboard collections.
 pub fn cleanup_candidates(device: &KeyboardDevice) -> Vec<&'static str> {
-    if device.transport == Transport::Virtual {
+    if is_read_only_device(device) {
         return Vec::new();
     }
     let present = device.overrides.present_value_names();
@@ -97,14 +97,14 @@ pub fn is_unread_value(keyboards: &[KeyboardDevice], target: &WriteTarget, name:
 /// Allowed: names of [`unread_value_names`] (exact, canonical spelling), each at most once, on a
 /// kbdhid or i8042prt keyboard that is not virtual. Refused: a name the driver reads
 /// ([`AllowlistError::OperationNotAllowed`]), any other name ([`AllowlistError::ValueNotAllowed`]),
-/// other drivers ([`AllowlistError::ReadOnlyDriver`]) and virtual keyboards. A name whose value does
-/// not exist is allowed; there is simply nothing to delete.
+/// other drivers ([`AllowlistError::ReadOnlyDriver`]) and virtual or Remote Desktop keyboards. A
+/// name whose value does not exist is allowed; there is simply nothing to delete.
 pub fn check_cleanup(
     device: &KeyboardDevice,
     names: &[String],
 ) -> Result<Vec<PlannedWrite>, AllowlistError> {
     let own = pair_names(&device.driver)?;
-    if device.transport == Transport::Virtual {
+    if is_read_only_device(device) {
         return Err(AllowlistError::VirtualKeyboard);
     }
     let unread = unread_value_names(&device.driver);
@@ -228,6 +228,14 @@ pub enum AllowlistError {
     InconsistentGlobal { reason: String },
 }
 
+/// Virtual keyboards, and the Remote Desktop keyboard whatever transport a snapshot gives it
+/// (plan 3.2: shown, never written). The reader already makes the latter virtual
+/// ([`crate::classify_keyboard_transport`]); checking it here keeps the rule in the core, so the
+/// GUI's read-only rows and what the engine may write never disagree.
+fn is_read_only_device(device: &KeyboardDevice) -> bool {
+    device.transport == Transport::Virtual || device.is_remote_desktop()
+}
+
 fn pair_names(driver: &KeyboardDriver) -> Result<(&'static str, &'static str), AllowlistError> {
     match driver {
         KeyboardDriver::Kbdhid => Ok((value_names::HID_TYPE, value_names::HID_SUBTYPE)),
@@ -304,13 +312,13 @@ fn pair_op(
 ///
 /// Allowed: the driver's own type/subtype names set together to 4/0 or 7/2, or (kbdhid only) both
 /// deleted to follow the standard. PS/2 values are never deleted: without them i8042prt falls back
-/// to the global values or US.
+/// to the global values or US. Virtual and Remote Desktop keyboards are refused.
 pub fn check_device_writes(
     device: &KeyboardDevice,
     writes: &[PlannedWrite],
 ) -> Result<DeviceOverrides, AllowlistError> {
     let (type_name, subtype_name) = pair_names(&device.driver)?;
-    if device.transport == Transport::Virtual {
+    if is_read_only_device(device) {
         return Err(AllowlistError::VirtualKeyboard);
     }
     let [type_op, subtype_op] = collect_ops(writes, [type_name, subtype_name])?;
@@ -827,6 +835,76 @@ mod tests {
             },
             PS2_TYPE
         ));
+    }
+
+    /// A Remote Desktop devnode that a snapshot gives a writable driver and a physical transport
+    /// (a hand-made document, or a reader that classified it otherwise): the core still refuses
+    /// it, so the GUI's read-only row and what may be written cannot disagree (plan 3.2).
+    #[test]
+    fn the_remote_desktop_keyboard_is_refused_whatever_its_transport() {
+        let with_values = DeviceOverrides {
+            keyboard_type_override: Some(4),
+            keyboard_subtype_override: Some(0),
+            override_keyboard_type: Some(7),
+            override_keyboard_subtype: Some(2),
+            ..Default::default()
+        };
+        let as_ps2 = KeyboardDevice {
+            instance_id: r"ACPI\PNP0303\0".into(),
+            hardware_ids: vec![r"TS_INPT\TS_KBD".into()],
+            overrides: with_values.clone(),
+            ..fixtures::internal_ps2()
+        };
+        let on_the_bus = KeyboardDevice {
+            driver: KeyboardDriver::Kbdhid,
+            transport: Transport::Usb,
+            hardware_ids: Vec::new(),
+            overrides: with_values,
+            ..fixtures::rdp_keyboard()
+        };
+        for kb in [&as_ps2, &on_the_bus] {
+            assert!(kb.is_remote_desktop(), "{}", kb.instance_id);
+            assert_ne!(kb.transport, Transport::Virtual);
+            for layout in [Some(Layout::Jis), Some(Layout::Us), None] {
+                if let Some(writes) = device_layout_writes(&kb.driver, layout) {
+                    assert_eq!(
+                        check_device_writes(kb, &writes),
+                        Err(AllowlistError::VirtualKeyboard),
+                        "{} {layout:?}",
+                        kb.instance_id
+                    );
+                }
+            }
+            assert_eq!(
+                cleanup_candidates(kb),
+                Vec::<&str>::new(),
+                "{}",
+                kb.instance_id
+            );
+            let unread: Vec<String> = unread_value_names(&kb.driver)
+                .iter()
+                .map(|name| name.to_string())
+                .collect();
+            assert_eq!(
+                check_cleanup(kb, &unread),
+                Err(AllowlistError::VirtualKeyboard),
+                "{}",
+                kb.instance_id
+            );
+        }
+        // The same devnodes without the Remote Desktop IDs are writable as before.
+        let ps2 = KeyboardDevice {
+            hardware_ids: Vec::new(),
+            ..as_ps2
+        };
+        assert!(
+            check_device_writes(
+                &ps2,
+                &device_layout_writes(&ps2.driver, Some(Layout::Jis)).unwrap()
+            )
+            .is_ok()
+        );
+        assert_eq!(cleanup_candidates(&ps2), vec![HID_TYPE, HID_SUBTYPE]);
     }
 
     /// Synthetic IDs and services (not what Windows uses; see `fixtures::rdp_keyboard`).

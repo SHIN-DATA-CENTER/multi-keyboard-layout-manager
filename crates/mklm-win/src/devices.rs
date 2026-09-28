@@ -2,8 +2,8 @@
 
 use mklm_core::{
     DeviceOverrides, INTERNAL_CONTAINER_ID, KeyboardAnomaly, KeyboardDevice, KeyboardDriver,
-    Transport, classify_transport_with_bus_service, is_remote_desktop_keyboard,
-    non_keyboard_anomaly, usb_serial_from_chain, vendor_product_from_ids,
+    classify_keyboard_transport, non_keyboard_anomaly, usb_serial_from_chain,
+    vendor_product_from_ids,
 };
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_GETIDLIST_FILTER_CLASS, CM_GETIDLIST_FILTER_ENUMERATOR, CM_GETIDLIST_FILTER_PRESENT,
@@ -170,20 +170,14 @@ pub fn read_keyboard(
         .unwrap_or_else(|| instance_id.to_string());
 
     let vendor_product = vendor_product_from_ids(instance_id, &hardware_ids);
-    // The Remote Desktop keyboard is virtual whatever bus enumerates it (its hardware ID says
-    // what it is); a PS/2 driver keeps its PS/2 bans.
-    let transport = if driver != KeyboardDriver::I8042prt
-        && is_remote_desktop_keyboard(instance_id, &hardware_ids)
-    {
-        Transport::Virtual
-    } else {
-        classify_transport_with_bus_service(
-            instance_id,
-            &ancestors.chain,
-            &driver,
-            ancestors.bus_service.as_deref(),
-        )
-    };
+    // The Remote Desktop keyboard is virtual whatever enumerates or serves it (plan 3.2).
+    let transport = classify_keyboard_transport(
+        instance_id,
+        &hardware_ids,
+        &ancestors.chain,
+        &driver,
+        ancestors.bus_service.as_deref(),
+    );
     let reported_type = present
         .then(|| {
             raw.iter()
