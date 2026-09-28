@@ -2006,6 +2006,9 @@ pub enum AutostartNote {
     Unreadable,
     /// The last change could not be written.
     WriteFailed,
+    /// This MKLM runs elevated: its HKCU may be another administrator's, so it does not change
+    /// the value (the same rule as the post-reboot RunOnce value, design m3 F.2, F.3).
+    Elevated,
 }
 
 /// The note next to the sign-in start switch.
@@ -2025,6 +2028,11 @@ pub fn autostart_note(note: AutostartNote, lang: Lang) -> String {
             lang,
             "サインイン時の起動を変更できませんでした。もう一度切り替えるか、MKLM を開き直してから試してください。",
             "The sign-in start could not be changed. Switch it again, or open MKLM again and retry.",
+        ),
+        AutostartNote::Elevated => pick(
+            lang,
+            "管理者として実行している MKLM では、サインイン時の起動を変更できません。MKLM を通常の方法で開き直してから変更してください。",
+            "The sign-in start cannot be changed while MKLM runs as administrator. Open MKLM the usual way and change it there.",
         ),
     }
 }
@@ -2289,6 +2297,7 @@ mod tests {
             AutostartNote::DisabledByUser,
             AutostartNote::Unreadable,
             AutostartNote::WriteFailed,
+            AutostartNote::Elevated,
         ] {
             japanese.push(autostart_note(note, Lang::Ja));
             assert!(!autostart_note(note, Lang::En).is_empty());

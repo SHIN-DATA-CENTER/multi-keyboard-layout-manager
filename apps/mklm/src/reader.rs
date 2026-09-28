@@ -240,6 +240,7 @@ fn panic_reply(task: &IoTask) -> Option<AppMsg> {
         IoTask::Autostart(_) => AppMsg::AutostartRead(Box::new(autostart::AutostartReport {
             state: Err(FAILED.to_string()),
             write_error: None,
+            elevated: false,
         })),
         IoTask::RestartPc => AppMsg::Journal(JournalMsg::RestartFailed(FAILED.to_string())),
         IoTask::OpenRecoveryFolder => AppMsg::Journal(JournalMsg::RecoveryFolderFailed),

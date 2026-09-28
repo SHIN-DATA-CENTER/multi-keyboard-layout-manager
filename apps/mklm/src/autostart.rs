@@ -12,6 +12,9 @@
 //!   "Windows のスタートアップ設定で無効になっています" next to it ([`view`]). Registering never
 //!   touches Task Manager's state.
 //! - Turning it off removes the value; M5's uninstaller removes it too.
+//! - An elevated MKLM never writes it, not even the repair: an elevated process may run as another
+//!   administrator than the signed-in user, so its `HKCU` would be the wrong account's (the rule
+//!   of the post-reboot RunOnce value, F.2). The switch shows the value, unavailable, with a note.
 //!
 //! Every read and write runs on the I/O worker ([`run`], Windows only); the decisions
 //! ([`write_for`], [`view`]) are pure and work on a copy of the value ([`RunValue`]).
@@ -72,6 +75,8 @@ pub struct AutostartReport {
     pub state: Result<RunValue, String>,
     /// The write the task needed failed (English reason).
     pub write_error: Option<String>,
+    /// This process is elevated (or that could not be told), so nothing was written.
+    pub elevated: bool,
 }
 
 /// A write to the Run value.
@@ -144,6 +149,11 @@ pub fn view(report: Option<&AutostartReport>) -> AutostartView {
             available: false,
             note: Some(AutostartNote::Unreadable),
         },
+        Ok(state) if report.elevated => AutostartView {
+            on: state.command_line.is_some() && !state.disabled_by_user,
+            available: false,
+            note: Some(AutostartNote::Elevated),
+        },
         Ok(state) if state.disabled_by_user => AutostartView {
             on: false,
             available: false,
@@ -174,6 +184,8 @@ fn read_value() -> Result<RunValue, mklm_win::Error> {
 #[cfg(windows)]
 pub fn run(task: AutostartTask) -> AutostartReport {
     let expected = std::env::current_exe().ok().map(|exe| command_line(&exe));
+    // Unknown counts as elevated: writing to the wrong account's HKCU is the worse mistake.
+    let elevated = !matches!(mklm_win::elevation::is_elevated(), Ok(false));
     let before = match read_value() {
         Ok(state) => state,
         Err(error) => {
@@ -181,9 +193,20 @@ pub fn run(task: AutostartTask) -> AutostartReport {
             return AutostartReport {
                 state: Err(error.to_string()),
                 write_error: None,
+                elevated,
             };
         }
     };
+    if elevated {
+        if task != AutostartTask::Read {
+            crate::log::info(format!("autostart: {task:?} skipped (elevated)"));
+        }
+        return AutostartReport {
+            state: Ok(before),
+            write_error: None,
+            elevated,
+        };
+    }
     let write_error = match write_for(task, &before, expected.as_deref(), Path::is_file) {
         Ok(None) => None,
         Ok(Some(write)) => {
@@ -214,6 +237,7 @@ pub fn run(task: AutostartTask) -> AutostartReport {
     AutostartReport {
         state: read_value().map_err(|error| error.to_string()),
         write_error,
+        elevated,
     }
 }
 
@@ -396,6 +420,7 @@ mod tests {
         let on = AutostartReport {
             state: Ok(registered(&expected())),
             write_error: None,
+            elevated: false,
         };
         assert_eq!(
             view(Some(&on)),
@@ -412,6 +437,7 @@ mod tests {
                 ..registered(&expected())
             }),
             write_error: None,
+            elevated: false,
         };
         assert_eq!(
             view(Some(&disabled)),
@@ -424,6 +450,7 @@ mod tests {
         let failed = AutostartReport {
             state: Ok(RunValue::default()),
             write_error: Some("access denied".into()),
+            elevated: false,
         };
         assert_eq!(
             view(Some(&failed)),
@@ -436,11 +463,43 @@ mod tests {
         let unreadable = AutostartReport {
             state: Err("access denied".into()),
             write_error: None,
+            elevated: false,
         };
         assert_eq!(
             view(Some(&unreadable)).note,
             Some(AutostartNote::Unreadable)
         );
         assert!(!view(Some(&unreadable)).available);
+    }
+
+    #[test]
+    fn an_elevated_mklm_shows_the_value_but_cannot_change_it() {
+        let elevated = AutostartReport {
+            state: Ok(registered(&expected())),
+            write_error: None,
+            elevated: true,
+        };
+        assert_eq!(
+            view(Some(&elevated)),
+            AutostartView {
+                on: true,
+                available: false,
+                note: Some(AutostartNote::Elevated)
+            }
+        );
+        let nothing = AutostartReport {
+            state: Ok(RunValue::default()),
+            ..elevated.clone()
+        };
+        assert!(!view(Some(&nothing)).on);
+        // Unreadable wins: the note says what the user can do about it.
+        let unreadable = AutostartReport {
+            state: Err("access denied".into()),
+            ..elevated
+        };
+        assert_eq!(
+            view(Some(&unreadable)).note,
+            Some(AutostartNote::Unreadable)
+        );
     }
 }

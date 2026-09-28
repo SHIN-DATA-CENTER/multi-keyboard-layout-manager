@@ -59,6 +59,7 @@ fn registered(disabled_by_user: bool) -> AutostartReport {
             disabled_by_user,
         }),
         write_error: None,
+        elevated: false,
     }
 }
 
@@ -89,9 +90,11 @@ fn scenes() -> Vec<Scene> {
     elevated.elevated = true;
     elevated.restore_on_uninstall = Some(Ok(true));
     elevated.confirming = Some(false);
+    // An elevated MKLM does not write the Run value: the switch shows it, unavailable, with a note.
     elevated.autostart = Some(AutostartReport {
         state: Ok(RunValue::default()),
-        write_error: Some("access denied".into()),
+        write_error: None,
+        elevated: true,
     });
 
     vec![opened, on, first, later, unreadable, elevated]

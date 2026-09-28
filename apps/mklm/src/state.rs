@@ -3435,6 +3435,7 @@ mod tests {
         AppMsg::AutostartRead(Box::new(AutostartReport {
             state: Ok(value),
             write_error: None,
+            elevated: false,
         }))
     }
 

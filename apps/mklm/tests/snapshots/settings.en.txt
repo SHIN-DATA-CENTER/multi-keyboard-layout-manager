@@ -54,8 +54,8 @@ can change: false
 
 == an elevated MKLM: no prompt to explain ==
 autostart: ☐
-autostart available: true
-autostart note: The sign-in start could not be changed. Switch it again, or open MKLM again and retry.
+autostart available: false
+autostart note: The sign-in start cannot be changed while MKLM runs as administrator. Open MKLM the usual way and change it there.
 long countdown: ☐
 show hidden: ☐
 uninstall: Put the keyboards back when MKLM is uninstalled: on

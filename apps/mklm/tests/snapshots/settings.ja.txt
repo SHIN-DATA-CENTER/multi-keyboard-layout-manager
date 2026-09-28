@@ -54,8 +54,8 @@ can change: false
 
 == an elevated MKLM: no prompt to explain ==
 autostart: ☐
-autostart available: true
-autostart note: サインイン時の起動を変更できませんでした。もう一度切り替えるか、MKLM を開き直してから試してください。
+autostart available: false
+autostart note: 管理者として実行している MKLM では、サインイン時の起動を変更できません。MKLM を通常の方法で開き直してから変更してください。
 long countdown: ☐
 show hidden: ☐
 uninstall: アンインストール時にキーボードの設定を元に戻す: オン

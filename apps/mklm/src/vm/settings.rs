@@ -313,6 +313,7 @@ mod tests {
                 disabled_by_user: true,
             }),
             write_error: None,
+            elevated: false,
         };
         let page = settings_page(&SettingsInput {
             autostart: Some(&report),
