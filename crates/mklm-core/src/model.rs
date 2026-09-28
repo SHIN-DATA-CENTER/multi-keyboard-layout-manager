@@ -103,7 +103,9 @@ pub enum Transport {
     Ps2,
     I2c,
     Spi,
-    /// Remote Desktop, VM or software keyboards. Always read-only.
+    /// Remote Desktop (`TERMINPUT_BUS\…`, hardware ID `TS_INPT\TS_KBD`; see
+    /// [`KeyboardDevice::is_remote_desktop`]), VM or software keyboards. Always read-only, and
+    /// never "another usable keyboard" (plan 1.4).
     Virtual,
     Unknown,
 }

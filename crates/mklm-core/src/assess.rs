@@ -388,6 +388,36 @@ mod tests {
     }
 
     #[test]
+    fn remote_desktop_keyboard_has_no_layout_and_no_anomalies() {
+        // Raw Input names no device for it, so nothing is reported; terminpt reads no values.
+        let rdp = fixtures::rdp_keyboard();
+        let snapshot = SystemSnapshot {
+            keyboards: vec![fixtures::internal_ps2(), rdp.clone()],
+            ..fixtures::dev_machine()
+        };
+        let a = assess(&snapshot);
+        let ka = find(&a, &rdp.instance_id);
+        assert_eq!(ka.transport, Transport::Virtual);
+        assert!(ka.is_internal);
+        assert_eq!(
+            (ka.stored_type, ka.reported_type, ka.predicted_type),
+            (None, None, None)
+        );
+        assert_eq!((&ka.current, &ka.after_restart), (&None, &None));
+        assert_eq!(ka.pending_action, None);
+        assert_eq!(ka.anomalies, vec![]);
+        assert_eq!(a.pending_action, None);
+        assert_eq!(a.inv_ps2, InvPs2Status::Holds);
+        // A row of its own, although it shares the built-in container.
+        assert!(
+            a.groups
+                .iter()
+                .any(|g| g.keyboards == vec![rdp.instance_id.clone()])
+        );
+    }
+
+    /// Synthetic IDs and service (not what Windows uses; see `fixtures::rdp_keyboard`).
+    #[test]
     fn unsupported_driver_has_no_prediction() {
         let rdp = KeyboardDevice {
             instance_id: r"ROOT\RDP_KBD\0000".into(),

@@ -791,6 +791,46 @@ mod tests {
     }
 
     #[test]
+    fn the_remote_desktop_keyboard_is_never_written() {
+        let rdp = fixtures::rdp_keyboard();
+        assert_eq!(device_layout_writes(&rdp.driver, Some(Layout::Jis)), None);
+        assert_eq!(device_layout_writes(&rdp.driver, None), None);
+        for writes in [
+            device_layout_writes(&KeyboardDriver::Kbdhid, Some(Layout::Jis)).unwrap(),
+            device_layout_writes(&KeyboardDriver::I8042prt, Some(Layout::Us)).unwrap(),
+        ] {
+            assert_eq!(
+                check_device_writes(&rdp, &writes),
+                Err(AllowlistError::ReadOnlyDriver {
+                    service: "terminpt".into()
+                })
+            );
+        }
+        // Even with values someone wrote by hand, nothing is offered for deletion.
+        let with_values = KeyboardDevice {
+            overrides: DeviceOverrides {
+                keyboard_type_override: Some(7),
+                keyboard_subtype_override: Some(2),
+                override_keyboard_type: Some(7),
+                override_keyboard_subtype: Some(2),
+                ..Default::default()
+            },
+            ..rdp.clone()
+        };
+        assert!(cleanup_candidates(&rdp).is_empty());
+        assert!(cleanup_candidates(&with_values).is_empty());
+        assert!(check_cleanup(&with_values, &[PS2_TYPE.to_string()]).is_err());
+        assert!(!is_unread_value(
+            std::slice::from_ref(&with_values),
+            &WriteTarget::Device {
+                instance_id: rdp.instance_id.clone()
+            },
+            PS2_TYPE
+        ));
+    }
+
+    /// Synthetic IDs and services (not what Windows uses; see `fixtures::rdp_keyboard`).
+    #[test]
     fn read_only_keyboards() {
         let rdp = KeyboardDevice {
             driver: KeyboardDriver::Other("TermDD".into()),

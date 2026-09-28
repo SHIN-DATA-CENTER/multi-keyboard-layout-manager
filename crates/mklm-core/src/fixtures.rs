@@ -138,6 +138,36 @@ pub fn ms_ble_phantom() -> KeyboardDevice {
     }
 }
 
+/// The Remote Desktop keyboard of an RDP session, as read in session 1 of the RDP host
+/// (DESKTOP-3TCSIET, 2026-09-29; `docs/research/rdp-keyboard.md`): one devnode per session, served
+/// by terminpt, in the built-in container. Raw Input names no device for it, so no type is
+/// reported. Not part of [`dev_machine`] (another PC, and its snapshots list four keyboards).
+pub fn rdp_keyboard() -> KeyboardDevice {
+    KeyboardDevice {
+        instance_id: r"TERMINPUT_BUS\UMB\2&2C22BCC9&0&SESSION1KEYBOARD0".into(),
+        display_name: "リモート デスクトップ キーボード デバイス".into(),
+        device_description: Some("リモート デスクトップ キーボード デバイス".into()),
+        container_id: Some(INTERNAL_CONTAINER_ID.into()),
+        is_internal: true,
+        present: true,
+        driver: KeyboardDriver::Other("terminpt".into()),
+        transport: Transport::Virtual,
+        vendor_id: None,
+        product_id: None,
+        usb_serial: None,
+        hardware_ids: ids(&[r"TS_INPT\TS_KBD"]),
+        parent_chain: ids(&[
+            r"UMB\UMB\1&841921D&0&TERMINPUT_BUS",
+            r"ROOT\UMBUS\0000",
+            r"HTREE\ROOT\0",
+        ]),
+        overrides: DeviceOverrides::default(),
+        reported_type: None,
+        dev_node_status: Some(0x0180_200A),
+        problem_code: Some(0),
+    }
+}
+
 /// Global values after the M0 migration (per-keyboard mode, JIS standard).
 pub fn global_per_keyboard() -> GlobalSettings {
     GlobalSettings {
@@ -261,7 +291,7 @@ mod tests {
     /// The derived fields in the fixtures agree with the parsers.
     #[test]
     fn fixtures_are_self_consistent() {
-        for kb in dev_machine().keyboards {
+        for kb in dev_machine().keyboards.into_iter().chain([rdp_keyboard()]) {
             assert_eq!(
                 classify_transport(&kb.instance_id, &kb.parent_chain, &kb.driver),
                 kb.transport,

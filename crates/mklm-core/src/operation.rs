@@ -563,6 +563,7 @@ mod tests {
                 ]
             )]
         );
+        // Synthetic (not an ID Windows uses): a virtual keyboard of another driver.
         let rdp = KeyboardDevice {
             instance_id: r"TS_INPT\TS_KBD\1".into(),
             driver: KeyboardDriver::Other("TermDD".into()),
@@ -582,6 +583,22 @@ mod tests {
                 ..
             }))
         ));
+        // The Remote Desktop keyboard as Windows lists it (plan 3.2: read-only).
+        let real = fixtures::rdp_keyboard();
+        let mut keyboards = snapshot.keyboards.clone();
+        keyboards.push(real.clone());
+        for choice in [LayoutChoice::Jis, LayoutChoice::Us, LayoutChoice::Standard] {
+            assert!(
+                matches!(
+                    set_layout_writes(&keyboards, &snapshot.global, &real.instance_id, choice),
+                    Err(OperationError::Plan(PlanError::Device {
+                        error: AllowlistError::ReadOnlyDriver { .. },
+                        ..
+                    }))
+                ),
+                "{choice:?}"
+            );
+        }
     }
 
     #[test]
@@ -707,6 +724,7 @@ mod tests {
             dev_node_status: Some(0x0180_0002),
             ..pinned.clone()
         };
+        // Synthetic (not an ID Windows uses): any virtual keyboard.
         let virtual_kb = KeyboardDevice {
             instance_id: r"TS_INPT\TS_KBD\1".into(),
             transport: Transport::Virtual,
@@ -714,11 +732,23 @@ mod tests {
             container_id: None,
             ..fixtures::keychron()
         };
+        // The Remote Desktop keyboard as Windows lists it, classified as the reader does: started
+        // and present, but it types what the client sends (design m2 D.2: not virtual).
+        let rdp = fixtures::rdp_keyboard();
+        let rdp = KeyboardDevice {
+            transport: crate::transport::classify_transport(
+                &rdp.instance_id,
+                &rdp.parent_chain,
+                &rdp.driver,
+            ),
+            ..rdp
+        };
         let cases = [
             (vec![fixtures::keychron(), pinned.clone()], false),
             (vec![fixtures::keychron(), keychron_second()], true),
             (vec![fixtures::keychron(), not_started], true),
             (vec![fixtures::keychron(), virtual_kb], true),
+            (vec![fixtures::keychron(), rdp], true),
             (
                 vec![
                     fixtures::keychron(),

@@ -278,7 +278,13 @@ mod tests {
     #[test]
     fn ids_without_vendor_product() {
         assert_eq!(parse_vendor_product(r"ACPI\FUJ0309\4&320DB4C2&0"), None);
+        // Synthetic, then the Remote Desktop keyboard as Windows lists it (`fixtures::rdp_keyboard`).
         assert_eq!(parse_vendor_product(r"ROOT\RDP_KBD\0000"), None);
+        assert_eq!(
+            parse_vendor_product(r"TERMINPUT_BUS\UMB\2&2C22BCC9&0&SESSION1KEYBOARD0"),
+            None
+        );
+        assert_eq!(parse_vendor_product(r"TS_INPT\TS_KBD"), None);
         assert_eq!(parse_vendor_product(r"HID\VID_12&PID_3456"), None);
         assert_eq!(parse_vendor_product(r"HID\VID_1234&XID_3456"), None);
         assert_eq!(parse_vendor_product(r"HID\VID_1234&PID_345"), None);
