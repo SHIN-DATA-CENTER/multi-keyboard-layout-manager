@@ -732,7 +732,7 @@ mod tests {
             row.snapshot_text(),
             "リモート デスクトップ キーボード デバイス [リモート デスクトップ ] assigned=— pending= \
              current=接続元の PC からの入力 (Neutral) badges=リモート デスクトップ assign=false\n  \
-             blocked: 接続元の報告: 日本語キーボード (JIS)。このセッションのキーの割り当てと同じとは限りません\n"
+             blocked: 接続元の報告: 日本語キーボード (JIS)。このセッションのキー配列と同じとは限りません\n"
         );
         assert!(!row.can_assign && !row.apply_now);
         assert_eq!(row.id, fixtures::rdp_keyboard().instance_id);
@@ -777,6 +777,27 @@ mod tests {
         let row = rdp_row(&snapshot, Some(&blocked), Lang::Ja);
         assert!(row.blocked_note.starts_with("接続元の報告: "), "{row:?}");
         assert!(!row.can_assign);
+    }
+
+    #[test]
+    fn a_client_in_the_english_keyboard_mode() {
+        // A Japanese Windows set to "English keyboard (101/102)" reports 7/0: the English 101
+        // table under KeyboardType Mapping\JPN, so the caption never says "日本語キーボード".
+        let snapshot = remote_session(Some(mklm_core::KeyboardType::US_ON_JAPANESE));
+        let row = rdp_row(&snapshot, None, Lang::Ja);
+        assert_eq!(
+            row.blocked_note,
+            "接続元の報告: 英語キーボード (101/102 キー)。このセッションのキー配列と同じとは限りません"
+        );
+        assert!(!row.blocked_note.contains("日本語"), "{row:?}");
+        assert_eq!(row.current, "接続元の PC からの入力");
+        assert!(!row.can_assign);
+        let english = rdp_row(&snapshot, None, Lang::En);
+        assert_eq!(
+            english.blocked_note,
+            "The client reports an English keyboard (101/102 keys); this session's key table may \
+             differ"
+        );
     }
 
     #[test]

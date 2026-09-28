@@ -130,3 +130,28 @@ fn the_japanese_catalogue_is_complete() {
         );
     }
 }
+
+/// The IME help's Remote Desktop paragraph (docs/research/rdp-keyboard.md): the session's table is
+/// "キー配列". "割り当て" stays the Microsoft IME's key assignment of the paragraph above, so the
+/// Ctrl+Space advice does not read as something that waits for a new session.
+#[test]
+fn the_remote_desktop_paragraph_keeps_its_terms_apart() {
+    let entries = po_entries(&manifest_dir().join("translations/ja/LC_MESSAGES/mklm.po"));
+    let (_, remote) = entries
+        .iter()
+        .find(|(id, _)| id.starts_with("Over Remote Desktop,"))
+        .expect("the Remote Desktop paragraph");
+    assert!(
+        remote.contains("キー配列はセッションが始まったときに決まる"),
+        "{remote}"
+    );
+    assert!(!remote.contains("キーの割り当て"), "{remote}");
+    assert_eq!(remote.matches("割り当て").count(), 1, "{remote}");
+    assert!(
+        remote.contains("上の手順で Ctrl+Space を割り当てて"),
+        "{remote}"
+    );
+    // Every sentence says where it applies; none starts with the conjunction-like "そこで".
+    assert!(!remote.contains("そこで"), "{remote}");
+    assert!(remote.contains("Shift+英数（英数キーの働き）"), "{remote}");
+}

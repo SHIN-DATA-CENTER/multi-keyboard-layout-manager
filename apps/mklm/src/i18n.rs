@@ -618,11 +618,16 @@ pub fn remote_current(lang: Lang) -> String {
 /// What the Remote Desktop client reported about its keyboard (`OsInfo::client_keyboard_type`),
 /// said as the client's report only, because the session may type with another table; `None`
 /// for a type this has no name for.
+///
+/// Type 7 is the Japanese family, but its subtype decides the table (`Terminal Server\KeyboardType
+/// Mapping\JPN`): 7/0 is kbd101, what Windows' "English keyboard (101/102)" setting reports
+/// (`KeyboardType::US_ON_JAPANESE`), so it is named as English like 4/x. Only the Japanese
+/// subtypes (1, 2, 3, NEC 0xD01..=0xD04) are called Japanese; any other subtype gets no caption.
 pub fn remote_client_report(reported: KeyboardType, lang: Lang) -> Option<String> {
     let keyboard = match (reported.ty, reported.subtype) {
         (7, 2) => pick(lang, "日本語キーボード (JIS)", "a Japanese keyboard (JIS)"),
-        (7, _) => pick(lang, "日本語キーボード", "a Japanese keyboard"),
-        (4, _) => pick(
+        (7, 1 | 3 | 0xD01..=0xD04) => pick(lang, "日本語キーボード", "a Japanese keyboard"),
+        (7, 0) | (4, _) => pick(
             lang,
             "英語キーボード (101/102 キー)",
             "an English keyboard (101/102 keys)",
@@ -631,7 +636,7 @@ pub fn remote_client_report(reported: KeyboardType, lang: Lang) -> Option<String
     };
     Some(match lang {
         Lang::Ja => {
-            format!("接続元の報告: {keyboard}。このセッションのキーの割り当てと同じとは限りません")
+            format!("接続元の報告: {keyboard}。このセッションのキー配列と同じとは限りません")
         }
         Lang::En => format!("The client reports {keyboard}; this session's key table may differ"),
     })
@@ -683,9 +688,9 @@ pub fn badge(kind: BadgeKind, lang: Lang) -> (String, String) {
         ),
         BadgeKind::RemoteDesktop => (
             "リモート デスクトップ",
-            "リモート デスクトップ: 接続元の PC から届くキー入力です。キーの割り当てはセッションが始まったとき（サインインしたとき）に決まり、MKLM では変更できません",
+            "リモート デスクトップ: 接続元の PC から届くキー入力です。このキーボードは変更できません。キー配列はセッションが始まったとき（サインインしたとき）に決まるため、再起動を待つ変更は、再起動して新しくサインインするまで反映されません",
             "Remote Desktop",
-            "Remote Desktop: keys sent by the PC you connect from. Their key table is fixed when the session starts (at sign-in); MKLM cannot change it",
+            "Remote Desktop: keys sent by the PC you connect from. This keyboard cannot be changed. Its key table is fixed when the session starts (at sign-in), so a change that waits for a restart reaches it only after the restart and a new sign-in",
         ),
         BadgeKind::NotConnected => (
             "未接続",
@@ -2309,6 +2314,83 @@ mod tests {
         for i in 0..3 {
             assert_eq!(LangChoice::from_index(i).index(), i);
         }
+    }
+
+    #[test]
+    fn what_a_remote_desktop_client_reports() {
+        let ja = |ty| remote_client_report(ty, Lang::Ja);
+        let en = |ty| remote_client_report(ty, Lang::En);
+        assert_eq!(
+            ja(KeyboardType::JIS).as_deref(),
+            Some(
+                "接続元の報告: 日本語キーボード (JIS)。このセッションのキー配列と同じとは限りません"
+            )
+        );
+        // 7/0 is Windows' "English keyboard (101/102)" (kbd101 under KeyboardType Mapping\JPN),
+        // named like 4/0, never as a Japanese keyboard.
+        for english in [KeyboardType::US_ON_JAPANESE, KeyboardType::US] {
+            assert_eq!(
+                ja(english).as_deref(),
+                Some(
+                    "接続元の報告: 英語キーボード (101/102 キー)。このセッションのキー配列と同じとは限りません"
+                ),
+                "{english:?}"
+            );
+            assert_eq!(
+                en(english).as_deref(),
+                Some(
+                    "The client reports an English keyboard (101/102 keys); this session's key \
+                     table may differ"
+                ),
+                "{english:?}"
+            );
+        }
+        // The other Japanese subtypes (NEC PC-98, AX, IBM 5576) without a table name.
+        for japanese in [
+            KeyboardType::NEC,
+            KeyboardType::new(7, 1),
+            KeyboardType::new(7, 3),
+            KeyboardType::new(7, 0xD01),
+            KeyboardType::new(7, 0xD04),
+        ] {
+            assert_eq!(
+                en(japanese).as_deref(),
+                Some("The client reports a Japanese keyboard; this session's key table may differ"),
+                "{japanese:?}"
+            );
+        }
+        // Types and subtypes without a name here: no caption.
+        for unknown in [
+            KeyboardType::HID_UNKNOWN,
+            KeyboardType::new(7, 4),
+            KeyboardType::new(7, 0x10002),
+            KeyboardType::new(8, 3),
+        ] {
+            assert_eq!(ja(unknown), None, "{unknown:?}");
+            assert_eq!(en(unknown), None, "{unknown:?}");
+        }
+    }
+
+    #[test]
+    fn the_remote_desktop_badge_holds_whatever_the_session_follows() {
+        // The row is never changeable, but a PC-wide change may reach new sessions (the session may
+        // follow the PC's standard layout): no "MKLM cannot change it".
+        let (label, long) = badge(BadgeKind::RemoteDesktop, Lang::Ja);
+        assert_eq!(label, "リモート デスクトップ");
+        assert!(!long.contains("MKLM"), "{long}");
+        assert!(!long.contains("キーの割り当て"), "{long}");
+        assert!(long.contains("このキーボードは変更できません"), "{long}");
+        assert!(
+            long.ends_with("再起動を待つ変更は、再起動して新しくサインインするまで反映されません"),
+            "{long}"
+        );
+        let (_, long) = badge(BadgeKind::RemoteDesktop, Lang::En);
+        assert!(!long.contains("MKLM"), "{long}");
+        assert!(long.contains("This keyboard cannot be changed."), "{long}");
+        assert!(
+            long.ends_with("reaches it only after the restart and a new sign-in"),
+            "{long}"
+        );
     }
 
     #[test]
