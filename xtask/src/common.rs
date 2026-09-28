@@ -35,10 +35,19 @@ pub fn release_tag_version(tag: &str) -> anyhow::Result<Version> {
     stable_tag_version(tag).with_context(|| format!("{tag:?} is not a tag of the form vX.Y.Z"))
 }
 
+/// The anchors file of a tag, `None` when the tag has none. A tag missing from the local
+/// repository is an error, never "no anchors": the checks would silently skip it.
+pub fn anchors_text_at(repo: &mut dyn Repo, tag: &str) -> anyhow::Result<Option<String>> {
+    if repo.tag_commit(tag)?.is_none() {
+        bail!("the tag {tag} is not in the local repository (git fetch --tags)");
+    }
+    repo.show(tag, ANCHORS_REPO_PATH)
+}
+
 /// The trust anchors a tag's build embeds; `None` when the tag has no anchors file or a file
 /// without keys (a build that cannot update at all, such as v0.1.0).
 pub fn anchors_at(repo: &mut dyn Repo, tag: &str) -> anyhow::Result<Option<TrustAnchors>> {
-    let Some(text) = repo.show(tag, ANCHORS_REPO_PATH)? else {
+    let Some(text) = anchors_text_at(repo, tag)? else {
         return Ok(None);
     };
     let file = parse_anchors(&text).with_context(|| format!("{tag}:{ANCHORS_REPO_PATH}"))?;

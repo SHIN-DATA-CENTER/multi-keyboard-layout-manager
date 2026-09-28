@@ -13,7 +13,7 @@ use mklm_update::keys::{ANCHORS_REPO_PATH, parse_anchors, signature_key_id};
 use mklm_update::verify::verify_file_signature;
 use mklm_update::{KEY_DRILL_COMMENT_PREFIX, KeyId, KeyRole};
 
-use crate::common::{Env, read, shown, write};
+use crate::common::{Env, anchors_text_at, read, shown, write};
 use crate::prepare::signing_media;
 use crate::releases::window_targets;
 use crate::time::format_utc;
@@ -89,7 +89,7 @@ pub fn check(env: &mut Env<'_>, dir: &Path, role: KeyRole) -> anyhow::Result<Key
     let window = window_targets(&releases, now);
     let mut checked = Vec::new();
     for target in &window {
-        let Some(anchors_text) = env.repo.show(&target.tag, ANCHORS_REPO_PATH)? else {
+        let Some(anchors_text) = anchors_text_at(env.repo, &target.tag)? else {
             writeln!(
                 env.out,
                 "note: {} has no trust anchors; not checked",

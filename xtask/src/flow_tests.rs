@@ -385,6 +385,13 @@ fn every_check_before_signing() {
             Box::new(|w, _| w.web.routes.clear()),
         ),
         (
+            "a release of the window is not a local tag",
+            "not in the local repository",
+            Box::new(|w, _| {
+                w.repo.tags.remove("v0.1.0");
+            }),
+        ),
+        (
             "the alternate key is the main key",
             "same key",
             Box::new(|w, o| o.alt_key_id = Some(w.p1.id)),
