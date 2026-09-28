@@ -1,8 +1,16 @@
 name: Release
 
 # Pushing a tag vX.Y.Z (matching [workspace.package] version in Cargo.toml) builds the x64 and
-# ARM64 installers and attaches them, with SHA256SUMS, to a DRAFT release. A person checks the
-# draft and publishes it. The asset names are stable: the auto-updater (M5b) relies on them.
+# ARM64 installers (ARM64 cross-compiled on x64), attests their build provenance, smoke-tests them
+# on a throwaway runner, and attaches them, with SHA256SUMS, to a DRAFT release titled
+# "UNSIGNED, DO NOT PUBLISH". The maintainer signs latest.json offline and publishes with
+# `cargo xtask prepare-release` and `cargo xtask publish` (docs/maintainer/release-signing.ja.md;
+# design m5b B.5). The asset names are stable: the auto-updater relies on them.
+#
+# Guards (design m5b A.10, A.9, G.6): no RUSTFLAGS-like input may reach the build
+# (installer/check-build-env.ps1; no command here passes --config), the executables are not debug
+# builds and carry no development marker, the helper imports no WinHTTP, NSIS is the official zip
+# pinned by SHA-256, and every action is pinned by SHA.
 
 on:
   push:
@@ -16,6 +24,11 @@ jobs:
     name: installer (${{ matrix.arch }})
     runs-on: windows-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
+      # Build provenance attestations (design m5b G.6; SECURITY-1).
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: true
       matrix:
@@ -24,6 +37,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Every tag and its history: check-keys reads the trust anchors of earlier tags with
+          # `git show` (design m5b B.3; FIX-VERIFICATION-15).
+          fetch-depth: 0
 
       - name: Check that the tag matches the version in Cargo.toml
         shell: pwsh
@@ -34,19 +50,72 @@ jobs:
           if ($toml -notmatch '(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"') { throw 'No version in Cargo.toml.' }
           if ("v$($Matches[1])" -ne $env:TAG) { throw "Tag $env:TAG does not match Cargo.toml version $($Matches[1])." }
 
+      - name: No extra compiler flags, wrappers or Cargo configuration (design m5b A.10)
+        shell: powershell
+        run: |
+          ./installer/check-build-env.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Install the pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install
 
-      - name: Install NSIS 3.12
+      - name: The trust anchors of this release and of every earlier tag (design m5b B.2, B.3)
+        run: cargo xtask check-keys
+
+      # SECURITY-1: the official zip, not a package manager's copy. The SHA-256 was computed from
+      # the download of 2026-09-29 and matched the SHA-256, SHA-1 and MD5 that SourceForge lists
+      # for NSIS 3/3.12/nsis-3.12.zip (2,362,938 bytes).
+      - name: NSIS 3.12 (the official zip, pinned by SHA-256)
         shell: pwsh
+        env:
+          NSIS_ZIP_URL: https://downloads.sourceforge.net/project/nsis/NSIS%203/3.12/nsis-3.12.zip
+          NSIS_ZIP_SHA256: 56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f
         run: |
-          choco install nsis --version=3.12.0 -y --no-progress
-          if ($LASTEXITCODE -ne 0) { throw "choco failed ($LASTEXITCODE)." }
+          $zip = Join-Path $env:RUNNER_TEMP 'nsis-3.12.zip'
+          Invoke-WebRequest -Uri $env:NSIS_ZIP_URL -OutFile $zip -UserAgent 'Wget/1.21.4' -MaximumRetryCount 3 -RetryIntervalSec 15
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:NSIS_ZIP_SHA256) { throw "nsis-3.12.zip has SHA-256 $hash, expected $env:NSIS_ZIP_SHA256." }
+          Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP
+          $makensis = Join-Path $env:RUNNER_TEMP 'nsis-3.12\makensis.exe'
+          if (-not (Test-Path $makensis)) { throw "$makensis is missing from the zip." }
+          "MAKENSIS=$makensis" >> $env:GITHUB_ENV
 
       # SIGNING: a signing step would go inside build-installer.ps1 (see its SIGNING note).
       - name: Build the installer
         shell: pwsh
-        run: ./installer/build-installer.ps1 -Arch ${{ matrix.arch }}
+        run: ./installer/build-installer.ps1 -Arch ${{ matrix.arch }} -Makensis $env:MAKENSIS
+
+      - name: Release executables only, no network code in the helper (design m5b A.10, A.9)
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.arch == 'x64' && 'x86_64-pc-windows-msvc' || 'aarch64-pc-windows-msvc' }}
+        run: |
+          $dir = "target/$env:TARGET/release"
+          foreach ($exe in 'mklm.exe', 'mklm-cli.exe', 'mklm-helper.exe') {
+            $path = Join-Path $dir $exe
+            if ((Get-Item $path).VersionInfo.IsDebug) { throw "$exe is marked as a debug build (VS_FF_DEBUG)." }
+            & ./installer/find-marker.ps1 -Expect Absent -Path $path
+            if ($LASTEXITCODE -ne 0) { throw "$exe carries the development marker." }
+          }
+          # dumpbin is not on PATH; the x64 one reads ARM64 executables too (OPS-UX-TEST-19).
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found.' }
+          $imports = & $dumpbin /nologo /imports (Join-Path $dir 'mklm-helper.exe')
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed ($LASTEXITCODE)." }
+          if ($imports -match '(?i)^\s*winhttp\.dll\s*$') { throw 'mklm-helper.exe imports WINHTTP.dll.' }
+          Write-Host 'The three executables are release builds without the marker; the helper imports no WinHTTP.'
+
+      # Required: prepare-release checks it with `gh attestation verify` before anything is signed
+      # (design m5b B.3; SECURITY-1). A failure fails the job, and no draft is made.
+      - name: Build provenance of the installer (design m5b G.6)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/MKLM-Setup-*.exe
+
+      - name: The production fetch path (design m5b F.8)
+        if: matrix.arch == 'x64'
+        run: cargo xtask fetch-smoke
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -54,9 +123,39 @@ jobs:
           path: dist/MKLM-Setup-*.exe
           if-no-files-found: error
 
+  smoke:
+    name: smoke test
+    needs: build
+    # Pinned: the installers refuse Windows before build 26100 (design m5b D.9.3).
+    runs-on: windows-2025
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Upgrade from the latest published release, refusals with their exit codes, the rolled
+      # back swap, the ARM64 refusal and the uninstall (design m5b D.9.3). A throwaway runner.
+      - name: Smoke test (design m5b D.9.3)
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $version = $env:TAG.Substring(1)
+          ./installer/smoke-test.ps1 -OnThrowawayMachine -Repository $env:GITHUB_REPOSITORY -Installer "dist/MKLM-Setup-$version-x64.exe" -Arm64Installer "dist/MKLM-Setup-$version-arm64.exe"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
   draft-release:
     name: draft release
-    needs: build
+    needs: [build, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -71,13 +170,27 @@ jobs:
         working-directory: dist
         run: sha256sum MKLM-Setup-*.exe > SHA256SUMS && cat SHA256SUMS
 
+      # A pre-release tag (with "-") is never offered as an update: the channel takes X.Y.Z only.
+      # A release draft is not published from this page: latest.json and its signature are added
+      # and checked first (design m5b B.5).
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
-          gh release create "$TAG" dist/MKLM-Setup-*.exe dist/SHA256SUMS \
-            --repo "$REPO" --draft --verify-tag \
-            --title "MKLM $TAG" \
-            --notes "Installers for Windows 11 24H2 or later (x64 / ARM64). Not code-signed yet: see docs/install-guide.ja.md."
+          if [[ "$TAG" == *-* ]]; then
+            gh release create "$TAG" dist/MKLM-Setup-*.exe dist/SHA256SUMS \
+              --repo "$REPO" --draft --verify-tag --prerelease \
+              --title "MKLM $TAG (pre-release, no auto-update)" \
+              --notes "Pre-release installers for Windows 11 24H2 or later (x64 / ARM64). Not offered by the auto-updater. Not code-signed: see docs/install-guide.ja.md."
+          else
+            notes="署名と公開は docs/maintainer/release-signing.ja.md の手順（cargo xtask prepare-release と publish）で行う。このページの Publish ボタンは使わない。
+          Sign and publish with docs/maintainer/release-signing.ja.md (cargo xtask prepare-release, then publish). Do not use the Publish button of this page.
+
+          Installers for Windows 11 24H2 or later (x64 / ARM64). Not code-signed yet: see docs/install-guide.ja.md."
+            gh release create "$TAG" dist/MKLM-Setup-*.exe dist/SHA256SUMS \
+              --repo "$REPO" --draft --verify-tag \
+              --title "MKLM $TAG — UNSIGNED, DO NOT PUBLISH" \
+              --notes "$notes"
+          fi

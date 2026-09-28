@@ -37,6 +37,11 @@ features = [
     "Win32_System_Ole",
     "Win32_System_Pipes",
     "Win32_System_Registry",
+    # `WTSEnumerateProcessesW`: the session and user of each GUI process, for the update runner's
+    # quit-if-idle (proc_identity::process_users, design m5b D.8).
+    "Win32_System_RemoteDesktop",
+    # Who holds an installed file open (update_dir::file_holders, design m5b D.8 step 4).
+    "Win32_System_RestartManager",
     "Win32_System_Shutdown",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",

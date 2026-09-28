@@ -1,21 +1,24 @@
 //! One update run (design m5b D.6, D.7, D.9.1, D.12, D.13): its ID, the machine records `Run` and
 //! `LastResult`, the NSIS exit codes, the outcome rules, and the waits and deadlines.
 //!
-//! WP-0 writes the types and the grammar ([`RunId`], [`classify_installer_exit`],
-//! [`InstallerExit::leaves_old_files`], [`nsis_exit`]); WP-H the rules.
-
-#![allow(unused_variables, dead_code)] // Skeleton (M5b)
+//! WP-0 wrote the types and the grammar ([`RunId`], [`classify_installer_exit`],
+//! [`InstallerExit::leaves_old_files`], [`nsis_exit`]); WP-H the rules ([`decide_outcome`],
+//! [`classify_run`], [`interrupted_result`], the JSON of the two records).
 
 use std::fmt::Write as _;
 
 use mklm_core::{BootId, Liveness, ProcessIdentity, Timestamp};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::Version;
 use crate::manifest::Arch;
 use crate::refusal::UpdateRefusal;
-use crate::state::{StateError, skeleton};
+use crate::state::StateError;
 use crate::version::MAX_VERSION_PART;
+
+/// `schema` of [`RunRecord`] and [`UpdateResult`].
+pub const RECORD_SCHEMA: u32 = 1;
 
 /// `<major>.<minor>.<patch>-<16 lower-case hex digits>`, each number 0..=65535 without a
 /// leading zero. Folder name and record key of one update.
@@ -143,13 +146,44 @@ pub struct RunRecord {
 }
 
 impl RunRecord {
+    /// Compact JSON (design m5b H.5).
     pub fn to_json(&self) -> String {
-        String::new() // Skeleton (M5b): WP-H
+        to_json(self)
     }
 
+    /// Strict: unknown fields are refused (only the helper writes it, with the same build). A
+    /// `schema` other than 1 is [`StateError::Schema`], checked before the rest is parsed.
     pub fn from_json(text: &str) -> Result<RunRecord, StateError> {
-        Err(skeleton()) // Skeleton (M5b): WP-H
+        from_json(text)
     }
+}
+
+/// The JSON of a record. Serializing these types cannot fail (no maps with non-string keys, no
+/// non-finite numbers); an empty string would only be a programming error, and reads back as
+/// malformed.
+fn to_json<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+/// Checks `schema` first, so that a record of a newer schema is reported as such rather than as
+/// malformed, then parses the whole record.
+fn from_json<T: DeserializeOwned>(text: &str) -> Result<T, StateError> {
+    #[derive(Deserialize)]
+    struct SchemaPeek {
+        schema: Option<u64>,
+    }
+    let peek: SchemaPeek =
+        serde_json::from_str(text).map_err(|error| StateError::Malformed(error.to_string()))?;
+    match peek.schema {
+        None => return Err(StateError::Malformed("schema is missing".to_string())),
+        Some(schema) if schema != u64::from(RECORD_SCHEMA) => {
+            return Err(StateError::Schema(
+                u32::try_from(schema).unwrap_or(u32::MAX),
+            ));
+        }
+        Some(_) => {}
+    }
+    serde_json::from_str(text).map_err(|error| StateError::Malformed(error.to_string()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -237,8 +271,27 @@ impl InstallState {
     }
 
     /// The version part of the build ID when all three exist and are equal.
+    ///
+    /// A build ID is `<CARGO_PKG_VERSION>+<hash>` (apps/build_id.rs); the version is the part
+    /// before the first `+`, which must be a SemVer version (a development pre-release such as
+    /// `0.2.0-dev.1` included). Anything else is not consistent.
     pub fn consistent_version(&self) -> Option<Version> {
-        None // Skeleton (M5b): WP-H
+        let (Some(gui), Some(cli), Some(helper)) = (&self.gui, &self.cli, &self.helper) else {
+            return None;
+        };
+        if gui != cli || gui != helper {
+            return None;
+        }
+        let (version, hash) = gui.split_once('+')?;
+        if hash.is_empty() {
+            return None;
+        }
+        Version::parse(version).ok()
+    }
+
+    /// True when all three executables carry the same build ID.
+    pub fn is_consistent(&self) -> bool {
+        self.consistent_version().is_some()
     }
 }
 
@@ -339,16 +392,28 @@ pub struct UpdateResult {
 }
 
 impl UpdateResult {
+    /// Compact JSON (design m5b H.5).
     pub fn to_json(&self) -> String {
-        String::new() // Skeleton (M5b): WP-H
+        to_json(self)
     }
 
+    /// Strict like [`RunRecord::from_json`].
     pub fn from_json(text: &str) -> Result<UpdateResult, StateError> {
-        Err(skeleton()) // Skeleton (M5b): WP-H
+        from_json(text)
     }
 }
 
 /// The table of design m5b D.13.
+///
+/// - `timed_out` (the installer did not end within `INSTALLER_WAIT`) → `Failed(InstallerTimedOut)`;
+/// - the three installed build IDs agree on `to` → `Installed`, whatever the exit code;
+/// - they agree on `from` → `NotInstalled(InstallerRefused)` for the codes after which NSIS
+///   replaced nothing (`InstallerExit::leaves_old_files`), else `NotInstalled(InstallerExit)`;
+/// - they agree on another version → `Failed(UnexpectedVersion)`;
+/// - they do not agree (or one is missing) → `Failed(Inconsistent)`.
+///
+/// `exit` is `None` only when the exit code could not be read; with the old files in place that
+/// is reported as `InstallerExit { code: u32::MAX }` (no NSIS code is that large).
 pub fn decide_outcome(
     from: &Version,
     to: &Version,
@@ -356,7 +421,28 @@ pub fn decide_outcome(
     timed_out: bool,
     after: &InstallState,
 ) -> UpdateOutcome {
-    UpdateOutcome::Failed(FailedReason::Inconsistent) // Skeleton (M5b): WP-H
+    if timed_out {
+        return UpdateOutcome::Failed(FailedReason::InstallerTimedOut);
+    }
+    let Some(found) = after.consistent_version() else {
+        return UpdateOutcome::Failed(FailedReason::Inconsistent);
+    };
+    if found == *to {
+        return UpdateOutcome::Installed;
+    }
+    if found == *from {
+        let code = exit.unwrap_or(u32::MAX);
+        let classified = classify_installer_exit(code);
+        let reason = if exit.is_some() && classified.leaves_old_files() {
+            NotInstalledReason::InstallerRefused { exit: classified }
+        } else {
+            NotInstalledReason::InstallerExit { code }
+        };
+        return UpdateOutcome::NotInstalled(reason);
+    }
+    UpdateOutcome::Failed(FailedReason::UnexpectedVersion {
+        found: found.to_string(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,12 +456,41 @@ pub enum RunView {
 /// alive in this boot — `stager` up to `staged`, `runner` for `ready` and `waiting`, `runner` OR
 /// `installer` for `installing` and `finishing` (RELIABILITY-4); otherwise (boot changed, owners
 /// dead or unknown) `Interrupted`. `Done` or no record → `Idle`.
+///
+/// Only [`Liveness::Alive`] counts as alive: a liveness that could not be read makes the record
+/// `Interrupted`, as the design says, and whoever acts on that (the helper, under the write lock)
+/// cannot race a live H2 that holds the lock (from `waiting` on) or one that H1 still waits for.
 pub fn classify_run(
     run: Option<&RunRecord>,
     current_boot: BootId,
     liveness: &dyn Fn(&ProcessIdentity) -> Liveness,
 ) -> RunView {
-    RunView::Idle // Skeleton (M5b): WP-H
+    let Some(record) = run else {
+        return RunView::Idle;
+    };
+    if record.phase == RunPhase::Done {
+        return RunView::Idle;
+    }
+    let alive = |process: Option<&ProcessIdentity>| {
+        process.is_some_and(|process| liveness(process) == Liveness::Alive)
+    };
+    let owner_alive = record.boot_id == current_boot
+        && match record.phase {
+            RunPhase::Staging | RunPhase::Staged => alive(Some(&record.stager)),
+            RunPhase::Ready | RunPhase::Waiting => alive(record.runner.as_ref()),
+            RunPhase::Installing | RunPhase::Finishing => {
+                alive(record.runner.as_ref()) || alive(record.installer.as_ref())
+            }
+            RunPhase::Done => false,
+        };
+    if owner_alive {
+        RunView::InProgress {
+            phase: record.phase,
+            to_version: record.to_version.clone(),
+        }
+    } else {
+        RunView::Interrupted(record.clone())
+    }
 }
 
 /// The `LastResult` for an interrupted record (`UpdateOutcome::Interrupted`, the installed
@@ -386,7 +501,7 @@ pub fn interrupted_result(
     after: &InstallState,
 ) -> UpdateResult {
     UpdateResult {
-        schema: 1,
+        schema: RECORD_SCHEMA,
         run_id: record.run_id.clone(),
         from_version: record.from_version.clone(),
         to_version: record.to_version.clone(),
@@ -396,7 +511,9 @@ pub fn interrupted_result(
             phase: record.phase,
         },
         installer_exit: None,
-        installed_version: None, // Skeleton (M5b): WP-H (`after.consistent_version()`)
+        installed_version: after
+            .consistent_version()
+            .map(|version| version.to_string()),
         gui_relaunch_attempted: false,
     }
 }
@@ -664,5 +781,365 @@ mod tests {
         assert!(READY_WAIT < HANDOFF_WAIT);
         assert!(INSTALLER_WAIT < INSTALLER_WAIT_MAX);
         assert!(INSTANCE_QUIT_WAIT < INSTANCES_TOTAL);
+    }
+
+    // ---- WP-H: the rules ----
+
+    const BOOT: BootId = BootId(0x0b6d_3c2a_9e1f_4d5a_8c7b_6a5f_4e3d_2c1b);
+    const OTHER_BOOT: BootId = BootId(0x1111_2222_3333_4444_5555_6666_7777_8888);
+
+    fn process(pid: u32) -> ProcessIdentity {
+        ProcessIdentity {
+            pid,
+            creation_time: 134_041_234_000_000_000 + u64::from(pid),
+        }
+    }
+
+    const CALLER: u32 = 8532;
+    const STAGER: u32 = 9120;
+    const RUNNER: u32 = 9344;
+    const INSTALLER: u32 = 9512;
+
+    fn record(phase: RunPhase) -> RunRecord {
+        let from_ready = !matches!(phase, RunPhase::Staging | RunPhase::Staged);
+        let installing = matches!(
+            phase,
+            RunPhase::Installing | RunPhase::Finishing | RunPhase::Done
+        );
+        RunRecord {
+            schema: 1,
+            run_id: RunId::parse(RUN).unwrap(),
+            from_version: "0.2.0".to_string(),
+            to_version: "0.2.1".to_string(),
+            arch: Arch::X64,
+            phase,
+            boot_id: BOOT,
+            started_at: Timestamp(1_792_022_460_000),
+            phase_at: Timestamp(1_792_022_485_000),
+            caller: Some(process(CALLER)),
+            caller_session: Some(1),
+            stager: process(STAGER),
+            runner: from_ready.then(|| process(RUNNER)),
+            installer: installing.then(|| process(INSTALLER)),
+        }
+    }
+
+    fn build_ids(gui: Option<&str>, cli: Option<&str>, helper: Option<&str>) -> InstallState {
+        InstallState::from_build_ids([
+            gui.map(str::to_string),
+            cli.map(str::to_string),
+            helper.map(str::to_string),
+        ])
+    }
+
+    fn all(id: &str) -> InstallState {
+        build_ids(Some(id), Some(id), Some(id))
+    }
+
+    const OLD: &str = "0.2.0+0123456789abcdef";
+    const NEW: &str = "0.2.1+fedcba9876543210";
+
+    #[test]
+    fn consistent_versions() {
+        assert_eq!(all(NEW).consistent_version(), Some(Version::new(0, 2, 1)));
+        assert!(all(NEW).is_consistent());
+        assert_eq!(
+            all("0.2.0-dev.1+abc").consistent_version(),
+            Some(Version::parse("0.2.0-dev.1").unwrap())
+        );
+        for state in [
+            InstallState::default(),
+            build_ids(Some(NEW), Some(NEW), None),
+            build_ids(None, Some(NEW), Some(NEW)),
+            build_ids(Some(NEW), Some(OLD), Some(NEW)),
+            build_ids(Some(NEW), Some(NEW), Some("0.2.1+fedcba9876543211")),
+            all("0.2.1"),
+            all("0.2.1+"),
+            all("v0.2.1+abc"),
+            all("0.2+abc"),
+            all(""),
+        ] {
+            assert_eq!(state.consistent_version(), None, "{state:?}");
+            assert!(!state.is_consistent());
+        }
+    }
+
+    /// Design m5b D.13, every row, and every NSIS exit code of D.9.1 (26 and 27 included).
+    #[test]
+    fn outcome_table() {
+        let from = Version::new(0, 2, 0);
+        let to = Version::new(0, 2, 1);
+        let decide = |exit: Option<u32>, timed_out: bool, after: &InstallState| {
+            decide_outcome(&from, &to, exit, timed_out, after)
+        };
+        // Timed out: whatever the files say.
+        for after in [all(NEW), all(OLD), InstallState::default()] {
+            assert_eq!(
+                decide(None, true, &after),
+                UpdateOutcome::Failed(FailedReason::InstallerTimedOut)
+            );
+        }
+        // The new version everywhere: installed, even with a non-zero exit code.
+        for exit in [Some(0), Some(1), Some(2), Some(26), Some(3010), None] {
+            assert_eq!(decide(exit, false, &all(NEW)), UpdateOutcome::Installed);
+        }
+        // The old version everywhere: refused by the installer, or another exit.
+        for (code, exit) in [
+            (20, InstallerExit::OsTooOld),
+            (21, InstallerExit::WrongArch),
+            (22, InstallerExit::HelperRunning),
+            (23, InstallerExit::CliRunning),
+            (24, InstallerExit::GuiRunning),
+            (26, InstallerExit::FilesInUse),
+            (27, InstallerExit::FileWrite),
+        ] {
+            assert_eq!(
+                decide(Some(code), false, &all(OLD)),
+                UpdateOutcome::NotInstalled(NotInstalledReason::InstallerRefused { exit }),
+                "{code}"
+            );
+        }
+        for code in [0, 1, 2, 25, 28, 3010] {
+            assert_eq!(
+                decide(Some(code), false, &all(OLD)),
+                UpdateOutcome::NotInstalled(NotInstalledReason::InstallerExit { code }),
+                "{code}"
+            );
+        }
+        assert_eq!(
+            decide(None, false, &all(OLD)),
+            UpdateOutcome::NotInstalled(NotInstalledReason::InstallerExit { code: u32::MAX })
+        );
+        // Another version everywhere.
+        assert_eq!(
+            decide(Some(0), false, &all("0.3.0+abc")),
+            UpdateOutcome::Failed(FailedReason::UnexpectedVersion {
+                found: "0.3.0".to_string()
+            })
+        );
+        // Not consistent.
+        for after in [
+            build_ids(Some(NEW), Some(OLD), Some(NEW)),
+            build_ids(Some(NEW), None, Some(NEW)),
+            InstallState::default(),
+        ] {
+            assert_eq!(
+                decide(Some(0), false, &after),
+                UpdateOutcome::Failed(FailedReason::Inconsistent),
+                "{after:?}"
+            );
+        }
+    }
+
+    /// Every phase × boot change × liveness of the stager, the runner and the installer
+    /// (design m5b D.12, RELIABILITY-4).
+    #[test]
+    fn run_classification() {
+        use RunPhase::*;
+        assert_eq!(
+            classify_run(None, BOOT, &|_| Liveness::Alive),
+            RunView::Idle
+        );
+        assert_eq!(
+            classify_run(Some(&record(Done)), BOOT, &|_| Liveness::Alive),
+            RunView::Idle
+        );
+        let livenesses = [Liveness::Alive, Liveness::Dead, Liveness::Unknown];
+        for phase in [Staging, Staged, Ready, Waiting, Installing, Finishing] {
+            let run = record(phase);
+            for stager in livenesses {
+                for runner in livenesses {
+                    for installer in livenesses {
+                        let liveness = |process: &ProcessIdentity| match process.pid {
+                            STAGER => stager,
+                            RUNNER => runner,
+                            INSTALLER => installer,
+                            // The caller never decides anything.
+                            _ => Liveness::Alive,
+                        };
+                        let owner_alive = match phase {
+                            Staging | Staged => stager == Liveness::Alive,
+                            Ready | Waiting => runner == Liveness::Alive,
+                            _ => runner == Liveness::Alive || installer == Liveness::Alive,
+                        };
+                        let expected = if owner_alive {
+                            RunView::InProgress {
+                                phase,
+                                to_version: "0.2.1".to_string(),
+                            }
+                        } else {
+                            RunView::Interrupted(run.clone())
+                        };
+                        let label = format!("{phase:?} {stager:?} {runner:?} {installer:?}");
+                        assert_eq!(
+                            classify_run(Some(&run), BOOT, &liveness),
+                            expected,
+                            "{label}"
+                        );
+                        // Another boot: whatever runs now is not that update.
+                        assert_eq!(
+                            classify_run(Some(&run), OTHER_BOOT, &liveness),
+                            RunView::Interrupted(run.clone()),
+                            "{label}"
+                        );
+                    }
+                }
+            }
+        }
+        // H2 died while the installer still runs: still in progress (RELIABILITY-4).
+        let installing = record(Installing);
+        let only_installer = |process: &ProcessIdentity| {
+            if process.pid == INSTALLER {
+                Liveness::Alive
+            } else {
+                Liveness::Dead
+            }
+        };
+        assert!(matches!(
+            classify_run(Some(&installing), BOOT, &only_installer),
+            RunView::InProgress {
+                phase: Installing,
+                ..
+            }
+        ));
+        // A `ready` record without a runner (never written that way) has no live owner.
+        let mut orphan = record(Ready);
+        orphan.runner = None;
+        assert_eq!(
+            classify_run(Some(&orphan), BOOT, &|_| Liveness::Alive),
+            RunView::Interrupted(orphan.clone())
+        );
+    }
+
+    #[test]
+    fn interrupted_results() {
+        let run = record(RunPhase::Installing);
+        let now = Timestamp(1_792_022_490_000);
+        let result = interrupted_result(&run, now, &all(NEW));
+        assert_eq!(
+            result,
+            UpdateResult {
+                schema: 1,
+                run_id: run.run_id.clone(),
+                from_version: "0.2.0".to_string(),
+                to_version: "0.2.1".to_string(),
+                arch: Arch::X64,
+                finished_at: now,
+                outcome: UpdateOutcome::Interrupted {
+                    phase: RunPhase::Installing
+                },
+                installer_exit: None,
+                installed_version: Some("0.2.1".to_string()),
+                gui_relaunch_attempted: false,
+            }
+        );
+        assert_eq!(
+            interrupted_result(&run, now, &all(OLD)).installed_version,
+            Some("0.2.0".to_string())
+        );
+        assert_eq!(
+            interrupted_result(&run, now, &build_ids(Some(NEW), Some(OLD), Some(NEW)))
+                .installed_version,
+            None
+        );
+        assert_eq!(
+            UpdateResult::from_json(&result.to_json()),
+            Ok(result.clone())
+        );
+    }
+
+    /// `to_json` / `from_json`: the shapes of design m5b H.5, the schema check before anything
+    /// else, and strictness.
+    #[test]
+    fn record_json() {
+        let run = record(RunPhase::Installing);
+        let json = run.to_json();
+        assert_eq!(
+            json,
+            r#"{"schema":1,"run_id":"0.2.1-3f9a0c2b7d1e4a65","from_version":"0.2.0","to_version":"0.2.1","arch":"x64","phase":"installing","boot_id":"0b6d3c2a-9e1f-4d5a-8c7b-6a5f4e3d2c1b","started_at":1792022460000,"phase_at":1792022485000,"caller":{"pid":8532,"creation_time":134041234000008532},"caller_session":1,"stager":{"pid":9120,"creation_time":134041234000009120},"runner":{"pid":9344,"creation_time":134041234000009344},"installer":{"pid":9512,"creation_time":134041234000009512}}"#
+        );
+        assert_eq!(RunRecord::from_json(&json), Ok(run.clone()));
+        for phase in [
+            RunPhase::Staging,
+            RunPhase::Staged,
+            RunPhase::Ready,
+            RunPhase::Waiting,
+            RunPhase::Finishing,
+            RunPhase::Done,
+        ] {
+            let run = record(phase);
+            assert_eq!(RunRecord::from_json(&run.to_json()), Ok(run));
+        }
+        assert_eq!(
+            RunRecord::from_json(&json.replace("\"schema\":1", "\"schema\":2")),
+            Err(StateError::Schema(2))
+        );
+        // A newer schema with fields this build does not know is still a schema error.
+        assert_eq!(
+            RunRecord::from_json(r#"{"schema":7,"new":true}"#),
+            Err(StateError::Schema(7))
+        );
+        for bad in [
+            String::new(),
+            "null".to_string(),
+            "{".to_string(),
+            r#"{"run_id":"0.2.1-3f9a0c2b7d1e4a65"}"#.to_string(),
+            json.replace("\"schema\":1,", "\"schema\":1,\"extra\":0,"),
+            json.replace("installing", "unpacking"),
+            json.replace("0.2.1-3f9a0c2b7d1e4a65", "0.2.1-3F9A0C2B7D1E4A65"),
+            format!("{json}x"),
+        ] {
+            assert!(
+                matches!(RunRecord::from_json(&bad), Err(StateError::Malformed(_))),
+                "{bad}"
+            );
+        }
+
+        let result = UpdateResult {
+            schema: 1,
+            run_id: run.run_id.clone(),
+            from_version: "0.2.0".to_string(),
+            to_version: "0.2.1".to_string(),
+            arch: Arch::Arm64,
+            finished_at: Timestamp(1_792_022_490_000),
+            outcome: UpdateOutcome::NotInstalled(NotInstalledReason::ProgramsStillRunning {
+                programs: vec![ProgramKind::Cli, ProgramKind::Helper],
+                holders: vec![FileHolder {
+                    pid: 7120,
+                    session_id: 2,
+                    name: "mklm-cli.exe".to_string(),
+                }],
+            }),
+            installer_exit: None,
+            installed_version: Some("0.2.0".to_string()),
+            gui_relaunch_attempted: true,
+        };
+        let json = result.to_json();
+        assert_eq!(
+            json,
+            r#"{"schema":1,"run_id":"0.2.1-3f9a0c2b7d1e4a65","from_version":"0.2.0","to_version":"0.2.1","arch":"arm64","finished_at":1792022490000,"outcome":{"kind":"not-installed","detail":{"reason":"programs-still-running","programs":["cli","helper"],"holders":[{"pid":7120,"session_id":2,"name":"mklm-cli.exe"}]}},"installer_exit":null,"installed_version":"0.2.0","gui_relaunch_attempted":true}"#
+        );
+        assert_eq!(UpdateResult::from_json(&json), Ok(result));
+        // The H.5 examples read through `from_json` too.
+        let installed = r#"{"schema":1,"run_id":"0.2.1-3f9a0c2b7d1e4a65","from_version":"0.2.0","to_version":"0.2.1","arch":"x64","finished_at":1792022490000,"outcome":{"kind":"installed"},"installer_exit":0,"installed_version":"0.2.1","gui_relaunch_attempted":true}"#;
+        let parsed = UpdateResult::from_json(installed).unwrap();
+        assert_eq!(parsed.outcome, UpdateOutcome::Installed);
+        assert_eq!(parsed.to_json(), installed);
+        let timed_out = UpdateOutcome::Failed(FailedReason::InstallerTimedOut);
+        assert_eq!(
+            serde_json::to_string(&timed_out).unwrap(),
+            r#"{"kind":"failed","detail":{"reason":"installer-timed-out"}}"#
+        );
+        assert_eq!(
+            UpdateResult::from_json(&installed.replace("\"schema\":1", "\"schema\":0")),
+            Err(StateError::Schema(0))
+        );
+        assert!(matches!(
+            UpdateResult::from_json(&installed.replace(
+                "\"gui_relaunch_attempted\":true",
+                "\"gui_relaunch_attempted\":true,\"x\":1"
+            )),
+            Err(StateError::Malformed(_))
+        ));
     }
 }

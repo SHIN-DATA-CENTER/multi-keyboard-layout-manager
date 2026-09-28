@@ -1,0 +1,81 @@
+name: Installer
+
+# The installer's smoke test on a throwaway runner for every change that can affect it (design m5b
+# D.9.3, F.5): an NSIS regression is found before a tag is pushed, not by release.yml.
+
+on:
+  pull_request:
+    paths:
+      - 'installer/**'
+      - 'apps/**'
+      - 'Cargo.lock'
+      - '.github/workflows/installer.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'installer/**'
+      - 'apps/**'
+      - 'Cargo.lock'
+      - '.github/workflows/installer.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: build and smoke-test the installers
+    # Pinned: the installers refuse Windows before build 26100 (design m5b D.9.3).
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      # The same pinned zip as release.yml (design m5b G.6; SECURITY-1).
+      - name: NSIS 3.12 (the official zip, pinned by SHA-256)
+        shell: pwsh
+        env:
+          NSIS_ZIP_URL: https://downloads.sourceforge.net/project/nsis/NSIS%203/3.12/nsis-3.12.zip
+          NSIS_ZIP_SHA256: 56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'nsis-3.12.zip'
+          Invoke-WebRequest -Uri $env:NSIS_ZIP_URL -OutFile $zip -UserAgent 'Wget/1.21.4' -MaximumRetryCount 3 -RetryIntervalSec 15
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:NSIS_ZIP_SHA256) { throw "nsis-3.12.zip has SHA-256 $hash, expected $env:NSIS_ZIP_SHA256." }
+          Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP
+          $makensis = Join-Path $env:RUNNER_TEMP 'nsis-3.12\makensis.exe'
+          if (-not (Test-Path $makensis)) { throw "$makensis is missing from the zip." }
+          "MAKENSIS=$makensis" >> $env:GITHUB_ENV
+
+      - name: NSIS script rules (design m5b D.9.3)
+        shell: powershell
+        run: |
+          ./installer/check-nsi.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Build the x64 installer
+        shell: pwsh
+        run: ./installer/build-installer.ps1 -Arch x64 -Makensis $env:MAKENSIS
+
+      # Only for the refusal on x64 (exit code 21).
+      - name: Build the ARM64 installer
+        shell: pwsh
+        run: ./installer/build-installer.ps1 -Arch arm64 -Makensis $env:MAKENSIS
+
+      - name: Smoke test (design m5b D.9.3)
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $x64 = Get-ChildItem dist -Filter 'MKLM-Setup-*-x64.exe' | Select-Object -First 1
+          $arm64 = Get-ChildItem dist -Filter 'MKLM-Setup-*-arm64.exe' | Select-Object -First 1
+          ./installer/smoke-test.ps1 -OnThrowawayMachine -Repository $env:GITHUB_REPOSITORY -Installer $x64.FullName -Arm64Installer $arm64.FullName
+          if ($LASTEXITCODE -ne 0) { exit 1 }

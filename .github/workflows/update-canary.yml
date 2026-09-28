@@ -1,0 +1,50 @@
+name: Update canary
+
+# The published update, as every installed MKLM sees it (design m5b G.6; OPS-UX-TEST-3): after
+# each publication, every week, and by hand. A failure mails the maintainer (GitHub's notification
+# for failed workflows):
+# - latest.json is missing, its signature does not verify, its tag does not match, or it expires
+#   within 60 days (the canary warns 60 days before the 180-day validity ends, user decision J-3);
+# - an installer's size or SHA-256 differs from the manifest;
+# - the distributed latest.json is older than the newest published stable-shaped tag
+#   (--newest-published: the "latest" mark was moved or removed; RED-TEAM-1);
+# - the production fetch path (redirects, tag extraction, TLS) no longer works (F.8).
+#
+# Scheduled workflows of a public repository stop after 60 days without activity: keep the
+# calendar reminder of docs/maintainer/release-signing.ja.md.
+
+on:
+  release:
+    types: [published]
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    name: the published update
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      # No secrets of its own: gh reads the public releases with the automatic token.
+      - name: The published manifest, its signature and installers (design m5b G.6)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask verify --remote --installers --min-days-left 60 --newest-published
+
+      - name: The production fetch path (design m5b F.8)
+        run: cargo xtask fetch-smoke

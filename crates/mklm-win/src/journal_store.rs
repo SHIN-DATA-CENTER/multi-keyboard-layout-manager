@@ -59,7 +59,8 @@ fn hkey(key: &Key) -> HKEY {
 }
 
 /// Opens an existing key under `HKEY_LOCAL_MACHINE` in the 64-bit view; `Ok(None)` when missing.
-fn open_existing(path: &str, access: REG_SAM_FLAGS) -> Result<Option<Key>, Error> {
+/// Also the unelevated read of the update records (`crate::update_store`, design m5b D.6).
+pub(crate) fn open_existing(path: &str, access: REG_SAM_FLAGS) -> Result<Option<Key>, Error> {
     let wide = to_wide(path);
     let mut key = HKEY::default();
     // SAFETY: `wide` is NUL-terminated and outlives the call; `key` is a valid out pointer.
@@ -260,8 +261,8 @@ impl JournalStore {
 /// Creates or opens `SHIN DATA CENTER`, `MKLM` and `MKLM\<name>` (`path`, relative to
 /// `HKEY_LOCAL_MACHINE`) with [`JOURNAL_KEY_SDDL`], checking the owner and DACL of each level before
 /// anything is created under it and of the returned key, like [`JournalStore::open_or_create`].
-/// For the machine-wide settings (`crate::machine_settings`), which live beside the journal under
-/// the same protection.
+/// For the machine-wide settings (`crate::machine_settings`) and the update records
+/// (`crate::update_store`), which live beside the journal under the same protection.
 pub(crate) fn open_or_create_product_subkey(
     name: &str,
     path: &str,
@@ -289,8 +290,9 @@ pub(crate) fn raw_key(key: &Key) -> HKEY {
     hkey(key)
 }
 
-/// Owner and DACL of one journal key; `path` is relative to `HKEY_LOCAL_MACHINE`.
-fn check_key(key: &Key, path: &str) -> Result<(), Error> {
+/// Owner and DACL of one journal key; `path` is relative to `HKEY_LOCAL_MACHINE`. Also checked
+/// before every write of the update records (`crate::update_store`).
+pub(crate) fn check_key(key: &Key, path: &str) -> Result<(), Error> {
     let mut sd = key_security(hkey(key))?;
     check_descriptor(sd.as_ptr(), KEY_POLICY).map_err(|reason| Error::Insecure {
         path: label(path),
