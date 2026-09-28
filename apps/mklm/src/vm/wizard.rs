@@ -190,8 +190,11 @@ pub fn wizard_keyboards(input: &KeyboardsInput<'_>) -> Vec<WizardKeyboard> {
         if input.settings.is_hidden(&id) {
             continue;
         }
-        let read_only =
-            kb.transport == Transport::Virtual || matches!(kb.driver, KeyboardDriver::Other(_));
+        // The Remote Desktop keyboard (plan 3.2): read-only, and no layout is named for it.
+        let remote = kb.is_remote_desktop();
+        let read_only = remote
+            || kb.transport == Transport::Virtual
+            || matches!(kb.driver, KeyboardDriver::Other(_));
         let default = ka
             .after_restart
             .as_ref()
@@ -206,7 +209,9 @@ pub fn wizard_keyboards(input: &KeyboardsInput<'_>) -> Vec<WizardKeyboard> {
         if crate::vm::keyboards::is_receiver(kb) {
             notes.push(i18n::badge(BadgeKind::Receiver, lang).1);
         }
-        if read_only {
+        if remote {
+            notes.push(i18n::badge(BadgeKind::RemoteDesktop, lang).1);
+        } else if read_only {
             notes.push(i18n::badge(BadgeKind::ReadOnly, lang).1);
         }
         let deletable = !read_only
@@ -253,7 +258,11 @@ pub fn wizard_keyboards(input: &KeyboardsInput<'_>) -> Vec<WizardKeyboard> {
                 .collect(),
             target: kb.instance_id.clone(),
             name: group.display_name.clone(),
-            current: text::types_now(ka.current.as_ref().map(|layout| &layout.table), lang),
+            current: if remote {
+                i18n::remote_current(lang)
+            } else {
+                text::types_now(ka.current.as_ref().map(|layout| &layout.table), lang)
+            },
             can_choose: !read_only,
             default,
             choice: if read_only { None } else { chosen.or(default) },

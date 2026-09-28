@@ -113,6 +113,40 @@ fn the_connected_keyboards_default_to_how_they_are_set() {
 }
 
 #[test]
+fn the_remote_desktop_keyboard_is_shown_but_never_planned() {
+    let mut snapshot = fixtures::dev_machine();
+    snapshot.keyboards.push(fixtures::rdp_keyboard());
+    snapshot.os.remote_session = true;
+    snapshot.os.client_keyboard_type = Some(KeyboardType::JIS);
+    let rows = rows_of(&snapshot, &[], &[], &[], Lang::Ja);
+    let rdp = rows
+        .iter()
+        .find(|row| row.target == fixtures::rdp_keyboard().instance_id)
+        .unwrap();
+    assert!(!rdp.can_choose);
+    assert_eq!((rdp.default, rdp.choice), (None, None));
+    assert_eq!(rdp.current, "接続元の PC からの入力");
+    assert!(
+        rdp.note
+            .starts_with("リモート デスクトップ: 接続元の PC から届くキー入力です。"),
+        "{rdp:?}"
+    );
+    plain_japanese(&rdp.note);
+    // A choice for its row is ignored: nothing to do.
+    let choices = vec![(rdp.id.clone(), Layout::Us)];
+    let rows = rows_of(&snapshot, &choices, &[], &[], Lang::Ja);
+    assert!(plan_rows(&rows).iter().all(|row| row.target != rdp.target));
+    assert_eq!(plan_of(&snapshot, &[], None), WizardPlan::NothingToDo);
+    let english = rows_of(&snapshot, &[], &[], &[], Lang::En);
+    assert!(english.iter().any(|row| {
+        row.current == "Input from the client PC"
+            && row
+                .note
+                .starts_with("Remote Desktop: keys sent by the PC you connect from.")
+    }));
+}
+
+#[test]
 fn a_change_that_waits_is_not_undone_by_the_default() {
     // The Keychron is stored as JIS but still types US: the default is the stored layout, so
     // leaving it as it is sends nothing.

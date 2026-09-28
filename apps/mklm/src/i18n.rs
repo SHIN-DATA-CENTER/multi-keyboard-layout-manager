@@ -603,6 +603,40 @@ pub fn transport(transport: Transport, lang: Lang) -> String {
     }
 }
 
+/// The transport of the Remote Desktop keyboard (`KeyboardDevice::is_remote_desktop`): to the
+/// user it is the keys the Remote Desktop client sends, not a "virtual" device.
+pub fn remote_transport(lang: Lang) -> String {
+    pick(lang, "リモート デスクトップ", "Remote Desktop")
+}
+
+/// "現在の動作" of the Remote Desktop keyboard. No layout is named: the session types with the key
+/// table it started with, which MKLM cannot read (docs/research/rdp-keyboard.md).
+pub fn remote_current(lang: Lang) -> String {
+    pick(lang, "接続元の PC からの入力", "Input from the client PC")
+}
+
+/// What the Remote Desktop client reported about its keyboard (`OsInfo::client_keyboard_type`),
+/// said as the client's report only, because the session may type with another table; `None`
+/// for a type this has no name for.
+pub fn remote_client_report(reported: KeyboardType, lang: Lang) -> Option<String> {
+    let keyboard = match (reported.ty, reported.subtype) {
+        (7, 2) => pick(lang, "日本語キーボード (JIS)", "a Japanese keyboard (JIS)"),
+        (7, _) => pick(lang, "日本語キーボード", "a Japanese keyboard"),
+        (4, _) => pick(
+            lang,
+            "英語キーボード (101/102 キー)",
+            "an English keyboard (101/102 keys)",
+        ),
+        _ => return None,
+    };
+    Some(match lang {
+        Lang::Ja => {
+            format!("接続元の報告: {keyboard}。このセッションのキーの割り当てと同じとは限りません")
+        }
+        Lang::En => format!("The client reports {keyboard}; this session's key table may differ"),
+    })
+}
+
 /// The badges of a keyboard row (plan 3.2; design m3 B.2, E.3): `(label, screen-reader text)`.
 /// "Not verified by typing" is no badge: it is said once, on the "標準に従う" choice (review U17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -611,8 +645,11 @@ pub enum BadgeKind {
     NoKeyPress,
     /// A receiver: every keyboard paired with it gets the same layout.
     Receiver,
-    /// RDP or a virtual keyboard: shown, never changed.
+    /// A virtual keyboard or one of another driver: shown, never changed.
     ReadOnly,
+    /// The Remote Desktop keyboard of a session (plan 3.2): read-only like [`BadgeKind::ReadOnly`],
+    /// which it replaces on its row, and says where its keys come from.
+    RemoteDesktop,
     NotConnected,
     Internal,
     /// Hidden by the user (shown only with "show hidden").
@@ -643,6 +680,12 @@ pub fn badge(kind: BadgeKind, lang: Lang) -> (String, String) {
             "読み取り専用: リモート デスクトップや仮想のキーボードは変更できません",
             "Read-only",
             "Read-only: remote desktop and virtual keyboards cannot be changed",
+        ),
+        BadgeKind::RemoteDesktop => (
+            "リモート デスクトップ",
+            "リモート デスクトップ: 接続元の PC から届くキー入力です。キーの割り当てはセッションが始まったとき（サインインしたとき）に決まり、MKLM では変更できません",
+            "Remote Desktop",
+            "Remote Desktop: keys sent by the PC you connect from. Their key table is fixed when the session starts (at sign-in); MKLM cannot change it",
         ),
         BadgeKind::NotConnected => (
             "未接続",

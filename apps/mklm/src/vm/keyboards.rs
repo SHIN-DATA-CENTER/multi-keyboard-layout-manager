@@ -55,7 +55,9 @@ pub struct KeyboardRow {
     /// that typed): the row menu offers "表示する" instead of "非表示にする".
     pub hidden: bool,
     pub can_assign: bool,
-    /// Why "変更…" is disabled (design m3 E.2): shown on the row and read with it.
+    /// Why "変更…" is disabled (design m3 E.2): shown on the row and read with it. On the Remote
+    /// Desktop keyboard's row (never changeable), what its client reported instead
+    /// (`i18n::remote_client_report`), when it reported a type MKLM can name.
     pub blocked_note: String,
     /// The accessible label of the row's "変更…" button ("Keychron Receiver の配列を変更").
     pub assign_label: String,
@@ -147,8 +149,12 @@ pub fn keyboard_rows(
             .copied()
             .find(|(kb, _)| kb.present)
             .unwrap_or(members[0]);
-        let read_only =
-            kb.transport == Transport::Virtual || matches!(kb.driver, KeyboardDriver::Other(_));
+        // The keys the Remote Desktop client sends (plan 3.2: read-only). Its row names no
+        // layout: the session types with the table it started with, which MKLM cannot read.
+        let remote = kb.is_remote_desktop();
+        let read_only = remote
+            || kb.transport == Transport::Virtual
+            || matches!(kb.driver, KeyboardDriver::Other(_));
         let tables: Vec<_> = members
             .iter()
             .filter_map(|(_, ka)| ka.after_restart.as_ref().map(|l| &l.table))
@@ -194,15 +200,21 @@ pub fn keyboard_rows(
                 }
             })
             .unwrap_or_default();
-        let (current, current_tone) = current_state(ka, kb.present, lang);
+        let (current, current_tone) = if remote && kb.present {
+            (i18n::remote_current(lang), Tone::Neutral)
+        } else {
+            current_state(ka, kb.present, lang)
+        };
         let physical_note = physical_note(options.settings, &members, ka, lang);
         let mut badges = Vec::new();
         let mut badge = |kind, tone| badges.push(super::Badge::new(kind, tone, lang));
         if highlighted {
             badge(BadgeKind::JustPressed, Tone::Info);
         }
-        // Never on the PC's own keyboard (review U17).
+        // Never on the PC's own keyboard (review U17), nor on the Remote Desktop keyboard, whose
+        // key presses Raw Input does not name.
         if !group.is_internal
+            && !remote
             && !members
                 .iter()
                 .any(|(kb, _)| options.settings.was_seen(&kb.instance_id))
@@ -212,10 +224,13 @@ pub fn keyboard_rows(
         if is_receiver(kb) {
             badge(BadgeKind::Receiver, Tone::Info);
         }
-        if group.is_internal {
+        // Windows puts the Remote Desktop keyboard in the built-in container; it is not built in.
+        if group.is_internal && !remote {
             badge(BadgeKind::Internal, Tone::Neutral);
         }
-        if read_only {
+        if remote {
+            badge(BadgeKind::RemoteDesktop, Tone::Neutral);
+        } else if read_only {
             badge(BadgeKind::ReadOnly, Tone::Neutral);
         }
         if !present {
@@ -232,10 +247,21 @@ pub fn keyboard_rows(
             .zip(kb.product_id)
             .map(|(v, p)| format!("{v:04X}:{p:04X}"))
             .unwrap_or_default();
-        let transport = i18n::transport(kb.transport, lang);
+        let transport = if remote {
+            i18n::remote_transport(lang)
+        } else {
+            i18n::transport(kb.transport, lang)
+        };
         let can_assign = !read_only && options.blocked_reason.is_none();
         let blocked_note = match options.blocked_reason {
             Some(reason) if !read_only => reason.to_string(),
+            // The caption of the Remote Desktop keyboard's row (which "変更…" never is): what the
+            // client reported, as its report only.
+            _ if remote && kb.present && snapshot.os.remote_session => snapshot
+                .os
+                .client_keyboard_type
+                .and_then(|reported| i18n::remote_client_report(reported, lang))
+                .unwrap_or_default(),
             _ => String::new(),
         };
         // One sentence for the screen reader, in the order the row shows it (design m3 E.2).
@@ -664,6 +690,145 @@ mod tests {
             english.contains("physical: ⚠ It is a US keyboard but types JIS"),
             "{english}"
         );
+    }
+
+    /// The development machine seen from a Remote Desktop session whose client reported `client`.
+    fn remote_session(client: Option<mklm_core::KeyboardType>) -> SystemSnapshot {
+        let mut snapshot = fixtures::dev_machine();
+        snapshot.keyboards.push(fixtures::rdp_keyboard());
+        snapshot.os.remote_session = true;
+        snapshot.os.client_keyboard_type = client;
+        snapshot
+    }
+
+    fn rdp_row(snapshot: &SystemSnapshot, blocked_reason: Option<&str>, lang: Lang) -> KeyboardRow {
+        let settings = Settings::default();
+        keyboard_rows(
+            snapshot,
+            &assess(snapshot),
+            &ListOptions {
+                settings: &settings,
+                highlighted: None,
+                blocked_reason,
+                apply_now: &[],
+                restart: &RestartWaits::default(),
+                lang,
+            },
+        )
+        .into_iter()
+        .find(|row| row.members == vec![fixtures::rdp_keyboard().instance_id])
+        .expect("the Remote Desktop keyboard's row")
+    }
+
+    const RDP_NAME: &str = "リモート デスクトップ キーボード デバイス";
+
+    #[test]
+    fn the_remote_desktop_keyboard_in_a_remote_session() {
+        let snapshot = remote_session(Some(mklm_core::KeyboardType::JIS));
+        let row = rdp_row(&snapshot, None, Lang::Ja);
+        // No layout is named (the client's 7/2 is not what the session types with), no "内蔵"
+        // or "キー入力なし", and "リモート デスクトップ" replaces "読み取り専用".
+        assert_eq!(
+            row.snapshot_text(),
+            "リモート デスクトップ キーボード デバイス [リモート デスクトップ ] assigned=— pending= \
+             current=接続元の PC からの入力 (Neutral) badges=リモート デスクトップ assign=false\n  \
+             blocked: 接続元の報告: 日本語キーボード (JIS)。このセッションのキーの割り当てと同じとは限りません\n"
+        );
+        assert!(!row.can_assign && !row.apply_now);
+        assert_eq!(row.id, fixtures::rdp_keyboard().instance_id);
+        assert!(
+            row.accessible_summary
+                .contains("リモート デスクトップ: 接続元の PC から届くキー入力です。"),
+            "{row:?}"
+        );
+        for text in [row.snapshot_text(), row.accessible_summary.clone()] {
+            assert_eq!(
+                crate::vm::unexpected_latin(
+                    &text,
+                    &[
+                        RDP_NAME, "assigned", "pending", "current", "Neutral", "badges", "assign",
+                        "false", "blocked"
+                    ]
+                ),
+                Vec::<String>::new(),
+                "{text}"
+            );
+        }
+
+        let english = rdp_row(&snapshot, None, Lang::En);
+        assert_eq!(english.transport, "Remote Desktop");
+        assert_eq!(english.current, "Input from the client PC");
+        assert_eq!(
+            english.blocked_note,
+            "The client reports a Japanese keyboard (JIS); this session's key table may differ"
+        );
+        assert_eq!(
+            english
+                .badges
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Remote Desktop"]
+        );
+
+        // A block does not replace the report: the row is never changeable anyway.
+        let blocked =
+            i18n::cannot_change_now(Some(mklm_core::Attention::WaitingForReboot), Lang::Ja);
+        let row = rdp_row(&snapshot, Some(&blocked), Lang::Ja);
+        assert!(row.blocked_note.starts_with("接続元の報告: "), "{row:?}");
+        assert!(!row.can_assign);
+    }
+
+    #[test]
+    fn the_remote_desktop_keyboard_without_a_report() {
+        // Nothing reported, or a type without a name here: no caption.
+        for client in [None, Some(mklm_core::KeyboardType::HID_UNKNOWN)] {
+            let row = rdp_row(&remote_session(client), None, Lang::Ja);
+            assert_eq!(row.blocked_note, "", "{client:?}");
+            assert_eq!(row.current, "接続元の PC からの入力");
+        }
+        // Outside a remote session nothing the client said is shown.
+        let mut console = remote_session(Some(mklm_core::KeyboardType::JIS));
+        console.os.remote_session = false;
+        assert_eq!(rdp_row(&console, None, Lang::Ja).blocked_note, "");
+        // The keyboard of a disconnected session is listed only on request, as not connected.
+        let mut gone = remote_session(Some(mklm_core::KeyboardType::JIS));
+        let rdp = gone.keyboards.last_mut().unwrap();
+        rdp.present = false;
+        rdp.dev_node_status = None;
+        let mut settings = Settings::default();
+        let assessment = assess(&gone);
+        let list = |settings: &Settings| {
+            keyboard_rows(
+                &gone,
+                &assessment,
+                &ListOptions {
+                    settings,
+                    highlighted: None,
+                    blocked_reason: None,
+                    apply_now: &[],
+                    restart: &RestartWaits::default(),
+                    lang: Lang::Ja,
+                },
+            )
+        };
+        assert!(list(&settings).iter().all(|row| row.name != RDP_NAME));
+        settings.keyboards.show_hidden = true;
+        let rows = list(&settings);
+        let row = rows.iter().find(|row| row.name == RDP_NAME).unwrap();
+        assert_eq!(row.current, "未接続");
+        assert_eq!(
+            row.badges
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["リモート デスクトップ", "未接続"]
+        );
+        assert_eq!(row.blocked_note, "");
+        // Other rows are as before.
+        let text: String = rows.iter().map(SnapshotText::snapshot_text).collect();
+        assert!(text.contains("badges=内蔵 assign=true"), "{text}");
+        assert_eq!(text.matches("リモート デスクトップ").count(), 3, "{text}");
     }
 
     #[test]
