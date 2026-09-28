@@ -121,6 +121,19 @@ fn snapshot_is_well_formed() {
     }
     assert!(snap.os.build > 0);
     assert!(!snap.os.native_arch.is_empty());
+    // What a Remote Desktop client reported is read only in a remote session.
+    if !snap.os.remote_session {
+        assert_eq!(snap.os.client_keyboard_type, None);
+    }
+    // Every Remote Desktop keyboard is virtual (read-only).
+    for kb in snap.keyboards.iter().filter(|kb| kb.is_remote_desktop()) {
+        assert_eq!(
+            kb.transport,
+            mklm_core::Transport::Virtual,
+            "{}",
+            kb.instance_id
+        );
+    }
 
     // The core evaluation must accept whatever the live system looks like.
     let assessment = assess(snap);

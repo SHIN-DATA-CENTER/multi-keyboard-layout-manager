@@ -837,6 +837,7 @@ mod tests {
                 ubr: Some(9550),
                 native_arch: "x64".into(),
                 remote_session: false,
+                client_keyboard_type: None,
             },
         }
     }

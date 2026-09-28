@@ -205,6 +205,14 @@ pub struct OsInfo {
     pub native_arch: String,
     /// True when the current process runs in a Remote Desktop session.
     pub remote_session: bool,
+    /// The keyboard type the Remote Desktop client reported (`GetKeyboardType` in the session,
+    /// e.g. 7/2 from a Japanese client); `None` outside a remote session or when Windows reports
+    /// none. It is what the client said, NOT the table the session types with: a session keeps
+    /// the table it started with, which may be another one (a session signed in at the console,
+    /// or before a pending restart; `docs/research/rdp-keyboard.md`). Never show it as the layout
+    /// being typed.
+    #[serde(default)]
+    pub client_keyboard_type: Option<KeyboardType>,
 }
 
 /// Everything MKLM reads from the system in one pass.

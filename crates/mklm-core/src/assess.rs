@@ -455,6 +455,29 @@ mod tests {
             value["global"]["override_keyboard_type"],
             serde_json::Value::Null
         );
+
+        // What a Remote Desktop client reported: added later, so documents without it still read.
+        let mut remote = snapshot.clone();
+        remote.os.remote_session = true;
+        remote.os.client_keyboard_type = Some(KeyboardType::JIS);
+        let value = serde_json::to_value(&remote).unwrap();
+        assert_eq!(
+            value["os"]["client_keyboard_type"],
+            serde_json::json!({ "type": 7, "subtype": 2 })
+        );
+        assert_eq!(
+            serde_json::from_value::<SystemSnapshot>(value).unwrap(),
+            remote
+        );
+        let mut old = serde_json::to_value(&snapshot).unwrap();
+        old["os"]
+            .as_object_mut()
+            .unwrap()
+            .remove("client_keyboard_type");
+        assert_eq!(
+            serde_json::from_value::<SystemSnapshot>(old).unwrap(),
+            snapshot
+        );
     }
 
     #[test]
