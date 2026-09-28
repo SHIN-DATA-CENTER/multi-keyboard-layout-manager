@@ -201,7 +201,7 @@ GUI の回復の質問（`RecoveryConfirmDialog`）:「新しい配列を試し�
 | UI（メイン） | 1 | Slint のイベント ループ。`AppState`、ビュー モデル、Slint のオブジェクト（ウィンドウ、トレイ）、`slint::Timer`、隠しシェル ウィンドウのウィンドウ プロシージャ、winit の `device_event` | — |
 | セッション ワーカー（`mklm-session`） | 要求ごとに 1（同時に 1 つまで） | `run_once::run_request`: helper の起動（UAC を待つ）、パイプの中継、同意を得た回復、RunOnce の規則 | `slint::invoke_from_event_loop` で、セッション ID の付いた `AppMsg::{SessionNotice, SessionEvent, RecoveryQuestion, SessionEnded}`。決定と回復の答えは `mpsc` チャネル、取り消しは `SessionShared` |
 | I/O ワーカー（`mklm-io`） | 1（常駐） | `IoTask`: 列挙とジャーナル（`Read`）、計画用の列挙（`PrepareChange`、WP-U3）、設定の保存、起動時と「後で決める」の RunOnce の規則、設定ページを開く、PC の再起動（`restart_pc`、WP-U4） | `invoke_from_event_loop` で `AppMsg::SystemRead` など。連続した `Read` は 1 回にまとめる |
-| 多重起動のパイプ（`mklm-instance`） | 1（WP-W1） | `activate` / `quit` を待つ（1 接続 1 秒まで） | `invoke_from_event_loop` |
+| 多重起動のパイプ（`mklm-instance`） | 1（WP-W1） | `activate` / `quit` / `quit-if-idle`（M5b）を待つ（1 接続 1 秒まで） | `invoke_from_event_loop` |
 | WinRT のスレッド プール | OS | `UISettings.ColorValuesChanged`、`TextScaleFactorChanged` | `invoke_from_event_loop` |
 | CfgMgr32 のスレッド プール | OS | `CM_Register_Notification`（キーボードの到着と取り外し、WP-W1） | `invoke_from_event_loop`、UI 側で 750 ms にまとめてから `Read` |
 
@@ -957,7 +957,7 @@ UI                           I/O ワーカー                 セッション �
 
 - ミューテックス `Local\SHINDATACENTER.MKLM.Instance.<利用者の SID>`（`CreateMutexW`）。`ERROR_ALREADY_EXISTS` なら 2 つ目。`ERROR_ACCESS_DENIED`（ほかの利用者が制限的な DACL で先に作った）は、ログに書いて 1 つ目として起動を続ける（乗っ取られた名前で MKLM を止めない）。`Local\` はセッションごと。計画 2.2 が禁じる `Global\` のミューテックスは書き込みのロックの話で、これには当たらない。
 - 1 つ目はパイプ `\\.\pipe\SHINDATACENTER.MKLM.Instance.<セッション ID>.<SID>` を作る。`FILE_FLAG_FIRST_PIPE_INSTANCE`、`PIPE_REJECT_REMOTE_CLIENTS`、DACL は計画どおり `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;<SID>)`（`instance_pipe_sddl`）。作成が `ERROR_ACCESS_DENIED` か `ERROR_PIPE_BUSY`（名前が取られている）で失敗したら、ログに書いてパイプなしで起動を続ける。
-- 受け付けるのは 1 接続につき 1 つのコマンドだけ: `activate\n` か `quit\n`（最大 16 バイト）。接続から 1 秒（`INSTANCE_READ_TIMEOUT`）以内に届かなければ `DisconnectNamedPipe` する（つないだまま黙るクライアントで受け付けが止まらないように）。返事は `ok\n` か `busy\n`。それ以外は切断する。データは何も運ばない。
+- 受け付けるのは 1 接続につき 1 つのコマンドだけ: `activate\n`、`quit\n`、`quit-if-idle\n`（最大 16 バイト。`quit-if-idle` は M5b の更新の helper だけが送る。m5b D.8、E.4.1）。接続から 1 秒（`INSTANCE_READ_TIMEOUT`）以内に届かなければ `DisconnectNamedPipe` する（つないだまま黙るクライアントで受け付けが止まらないように）。返事は `ok\n` か `busy\n`。それ以外は切断する。データは何も運ばない。
 - 2 つ目: 接続（`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`。最大 5 秒再試行。サインイン時は Run と RunOnce が同時に起動し、ミューテックスの直後にパイプができるため。1 つ目は、コマンドを UI スレッドに渡せるようになった時点（Slint のバックエンドを選んだ直後、ウィンドウ、トレイ、ウォッチャーより前）でパイプを作って受け付けを始める。届いたコマンドはイベント ループが動くまで Slint のキューで待ち、パイプのスレッドはその分も見込んで 4 秒まで返事を待つ）→ サーバーを確かめる（`ServerIdentity`、`is_our_instance`）:
   - `GetNamedPipeServerSessionId` が自分のセッションと同じ。
   - `GetNamedPipeServerProcessId` → `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` → `OpenProcessToken` のユーザー SID が自分と同じ。
@@ -966,6 +966,7 @@ UI                           I/O ワーカー                 セッション �
   すべて一致したときだけ `AllowSetForegroundWindow(その PID)` → `activate`（`--quit` なら `quit`）→ 終了コード 0 で終わる。一致しなければ何も送らず、ログに書いて自分が 1 つ目として動く。M5 の昇格した送り手（更新）にも同じ確認を必須にする。
 - 1 つ目は `activate` で、ウィンドウを表示し、`focus_window` で前面に出し（計画 3.9）、`Read` する。**ページは変えない**（A8）: `--tray` のインスタンスが出した再起動後の確認や、作業中の変更ページを置き換えないため。再起動後の確認や回復の画面に移るかどうかは、次の `SystemRead` で `post_reboot_due` などから決める（B.9）。`--post-reboot` の情報は運ばない。
 - `quit`: セッションがなければ終了して `ok`。セッション中は `busy` を返し、F.5 の手順で終わり次第終了する。
+- `quit-if-idle`（M5b で追加。m5b E.4.1）: セッションがなく、「後で終了」も問いかけのオーバーレイ（終了の確認、再接続待ち、回復の確認など）もないときだけ、HKCU の RunOnce（`--after-update`）を登録して終了し、`ok`。それ以外は**何も変えずに** `busy`（取り消しも「後で終了」も確認の画面も立てない）。受け取りから 4 秒を過ぎて UI スレッドに届いたものは何もしない。
 
 ### F.2 コマンドライン
 
@@ -1015,7 +1016,7 @@ UI                           I/O ワーカー                 セッション �
 - **正直な限界**: サインアウトやシャットダウンでは、helper（ウィンドウのない windows サブシステムのプロセス）も同じセッション終了で終了させられうる。そのため、パイプの切断で helper が戻す動作（C8）は、この場面では保証されない。WP-E3 で helper が `SetProcessShutdownParameters(0x100, SHUTDOWN_NORETRY)` と自分の `WM_QUERYENDSESSION` の処理を持ち、カウントダウンを自分で戻すようにする（A.5）。それでも間に合わなければ、確定していない配列が次のサインイン画面で有効になりうる。最後の砦は次回起動時の回復（RunOnce で必ず出る）である。
 - 終了の順序: トレイを消す → ウォッチャーを止める → `APP` を空にする。I/O ワーカーの未処理の保存は、終了前に最大 1 秒待つ（WP-U6）。RunOnce の規則はセッション ワーカーが `SessionEnded` の前に終えているので、終了が追い越すことはない（A3）。
 - ワーカーがパニックしても、ガードが `SessionEnded` を送るので、終了の要求が止まったままにならない（A11）。
-- **M5 の更新**（A12）: 更新の helper は、元の GUI のセッションの中で動く。helper は複製の準備ができたら、そのセッションに専用の最後のメッセージ（更新の準備ができた）を送ってセッションを閉じ、GUI はそれを受けてセッションを終え、そのまま終了する（計画 4.2 の 6「GUI はパイプの指示で終了する」）。helper は GUI の PID の終了を待ってから msiexec を実行する。多重起動のパイプの `quit` はセッション中は `busy` を返すので、更新には使わない（互いに待ち合って止まるため）。`quit` はインストーラーとアンインストーラーの `--quit` 専用。
+- **M5 の更新**（A12）: 更新の helper は、元の GUI のセッションの中で動く。helper は複製の準備ができたら、そのセッションに専用の最後のメッセージ（更新の準備ができた）を送ってセッションを閉じ、GUI はそれを受けてセッションを終え、そのまま終了する（計画 4.2 の 6「GUI はパイプの指示で終了する」）。helper は GUI の PID の終了を待ってから msiexec を実行する。多重起動のパイプの `quit` はセッション中は `busy` を返すので、更新には使わない（互いに待ち合って止まるため）。`quit` はインストーラーとアンインストーラーの `--quit` 専用。M5b（NSIS。m5b D.7、D.8）では、更新を実行する helper がほかのセッションの GUI を終わらせるのに、副作用のない `quit-if-idle`（F.1）だけを使う。`quit` は `busy` を返す前に取り消しと「後で終了」を立てるため（m5b のレビューの RELIABILITY-1、OPS-UX-TEST-4）。
 
 ### F.6 起動時の検査とエラー表示
 
@@ -1311,7 +1312,7 @@ M3 設計の初版と骨組みに対する 2 つのレビュー（U: 日本語�
 | A9 | `control.exe` をパスなしで開くと、作業フォルダーの同名のファイルが実行されうる | 採用 | `GetSystemDirectoryW` から作った絶対パスと、作業フォルダー System32 で開く（`open_settings_page` 実装済み。A.5） |
 | A10 | 入力方式のタイマーがトレイでも動き、非表示でも描画する | 採用 | `ShowWindow` / `HideWindow` でタイマーを開始・停止、非表示の間は描画しない（実装済み）。T-LONG-2 に CPU 時間（A.4） |
 | A11 | ワーカーがパニックすると `SessionEnded` が届かず、終了できない | 採用 | ワーカーに終了を必ず送るガード（`EndGuard`）。パニックでも `Lost { "the session worker panicked" }` を送り、終わりの合図も立てる（実装済み。A.4） |
-| A12 | M5 の更新で helper が GUI に `quit` を送ると、互いに待って止まる | 採用 | 更新の helper は元のセッションに専用の最後のメッセージを送って閉じ、GUI はそれで終了し、helper は GUI の PID の終了を待つ（計画 4.2 の 6 に合わせた）。`quit` は `--quit` 専用と明記（F.5） |
+| A12 | M5 の更新で helper が GUI に `quit` を送ると、互いに待って止まる | 採用 | 更新の helper は元のセッションに専用の最後のメッセージを送って閉じ、GUI はそれで終了し、helper は GUI の PID の終了を待つ（計画 4.2 の 6 に合わせた）。`quit` は `--quit` 専用と明記（F.5）。M5b のレビューで、ほかのセッションの GUI 用に副作用のない `quit-if-idle` を足した（F.1、m5b D.8） |
 
 ### 実装レビュー（段階 1 の統合後、b739746）への対応
 
