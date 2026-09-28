@@ -279,8 +279,12 @@ fn warn_os(os: &mklm_core::OsInfo) {
     }
     if os.remote_session {
         eprintln!(
-            "warning: this is a Remote Desktop session; the remote client's keyboard layout \
-             applies to the whole session."
+            "note: this is a Remote Desktop session. Keys typed here come from the Remote Desktop \
+             keyboard. Its key table is fixed when the session starts and may not follow the \
+             client's keyboard (for example in a session first signed in at the console, or \
+             before a pending restart); a change that waits for a restart reaches it only after \
+             the restart and a new sign-in. MKLM's per-keyboard layouts apply to the keyboards \
+             attached to this PC."
         );
     }
 }
