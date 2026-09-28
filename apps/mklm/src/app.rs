@@ -115,6 +115,9 @@ struct Controller {
     settle_timer: slint::Timer,
     /// The restart, post-reboot, conflict, history and recovery pages (WP-U4, WP-U5).
     journal_ui: JournalUi,
+    /// An automated check (`--exit-after`): it only reads and never writes the user's HKCU, so
+    /// the RunOnce rule is skipped also when the post-reboot check asks for it.
+    automated: bool,
 }
 
 impl std::fmt::Debug for Controller {
@@ -228,6 +231,9 @@ impl Controller {
                 if let Some(worker) = self.session.borrow().as_ref() {
                     worker.answer_recovery(yes);
                 }
+            }
+            Effect::RunOnceRule if self.automated => {
+                log::info("automated check: the RunOnce rule is skipped");
             }
             Effect::RunOnceRule => self.io.send(IoTask::RunOnceRule),
             Effect::ShowWindow => {
@@ -963,6 +969,7 @@ pub fn run(args: Args) -> ExitCode {
         layout_timer: slint::Timer::default(),
         settle_timer: slint::Timer::default(),
         journal_ui: JournalUi::new(&window),
+        automated: args.exit_after.is_some(),
     });
     APP.with(|app| *app.borrow_mut() = Some(controller.clone()));
     window.set_keyboards(ModelRc::from(controller.keyboards.clone()));

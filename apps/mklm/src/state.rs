@@ -3253,6 +3253,17 @@ mod tests {
         assert!(!changing.identify);
     }
 
+    #[test]
+    fn a_journal_page_opened_without_navigating_ends_identifying() {
+        // The tray's undo leaves the main screen, where the capture field lives.
+        let mut state = AppState::default();
+        update(&mut state, AppMsg::ToggleIdentify);
+        assert!(state.identify);
+        update(&mut state, AppMsg::Journal(JournalMsg::OpenUndo));
+        assert_eq!(state.page, Page::Recovery);
+        assert!(!state.identify);
+    }
+
     // --- The process (design m3 F; WP-U6) ---
 
     #[test]

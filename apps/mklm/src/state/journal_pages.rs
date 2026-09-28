@@ -29,7 +29,8 @@ use mklm_core::{
 use mklm_ipc::{Request, ResolveConflictRequest, RestoreBaselineRequest};
 
 use super::{
-    AppMsg, AppState, Effect, OverlayKind, Page, SessionPhase, SessionTarget, display_name, update,
+    AppMsg, AppState, Effect, OverlayKind, Page, SessionPhase, SessionTarget, display_name,
+    stop_identifying, update,
 };
 use crate::i18n::Lang;
 use crate::settings::PromptedEntry;
@@ -57,8 +58,8 @@ pub struct JournalPages {
     pub run_once_problem: Option<bool>,
     /// "復旧用ファイルのフォルダーを開く" failed.
     pub folder_failed: bool,
-    /// The first `SystemRead` of this process was looked at (design m3 F.2: `--tray` still shows
-    /// the window when the journal needs the user).
+    /// The first `SystemRead` of this process that got the journal was looked at (design m3 F.2:
+    /// `--tray` still shows the window when the journal needs the user).
     pub startup_checked: bool,
 }
 
@@ -665,6 +666,8 @@ fn open_recovery(state: &mut AppState, mode: RecoveryMode, revert: Option<OpId>)
         method: None,
     };
     preset_method(state);
+    // Identifying ends with the main screen (its capture field lives there).
+    stop_identifying(state);
     state.page = Page::Recovery;
     vec![Effect::Read, Effect::Render]
 }
@@ -675,6 +678,7 @@ fn open_post_reboot(state: &mut AppState, op_id: Option<OpId>) -> Vec<Effect> {
         post.typed.clear();
     }
     post.op_id = op_id;
+    stop_identifying(state);
     state.page = Page::PostReboot;
     state.draft = None;
     state.key_test = KeyTest::default();
@@ -1055,8 +1059,14 @@ fn show(state: &mut AppState, effects: &mut Vec<Effect>) {
 /// hidden window when the first read after start finds something the user must decide (design m3
 /// F.2: `--tray` with a check, a recovery or a conflict).
 pub fn after_read(state: &mut AppState) -> Vec<Effect> {
-    let first = !state.journal_pages.startup_checked;
-    state.journal_pages.startup_checked = true;
+    // Only a read that got the journal decides; one without it leaves the decision to the next
+    // (as `state::reveal_at_start` does).
+    let journal_read = state
+        .read
+        .as_ref()
+        .is_some_and(|read| read.journal.is_some());
+    let first = journal_read && !state.journal_pages.startup_checked;
+    state.journal_pages.startup_checked |= journal_read;
     let mut effects = Vec::new();
     let Some((boot, summary)) = state
         .read
@@ -1127,6 +1137,7 @@ pub fn after_read(state: &mut AppState) -> Vec<Effect> {
                 boot: boot_text.clone(),
             }));
             effects.push(Effect::SaveSettings(Box::new(state.settings.clone())));
+            stop_identifying(state);
             state.page = Page::Recovery;
             state.journal_pages.recovery = RecoveryState::default();
             preset_method(state);
