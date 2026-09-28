@@ -4,9 +4,11 @@
 //! itself (`mklm_win::session::autostart_state`), "restore on uninstall" is machine-wide in HKLM
 //! (`mklm_win::machine_settings`), and the journal is the only record of keyboard changes.
 //!
-//! Reading never fails the start: a missing file gives the defaults; an unreadable one gives the
-//! defaults too (WP-U6: keep it as `settings.toml.bad` before the next save). Saving writes a
-//! temporary file and renames it over the old one (on the I/O worker, design m3 A.4).
+//! Reading never fails the start ([`load_or_default`]): a missing file gives the defaults; an
+//! unreadable one gives the defaults too, and the next save first moves it aside as
+//! `settings.toml.bad` ([`SettingsStore`]), so that nothing the user had is overwritten unseen.
+//! Saving writes a temporary file and renames it over the old one (on the I/O worker, design m3
+//! A.4, F.4).
 
 use std::fs;
 use std::io;
@@ -19,6 +21,12 @@ use crate::theme::ThemeMode;
 
 /// The file name inside the settings directory.
 pub const SETTINGS_FILE: &str = "settings.toml";
+
+/// Where an unreadable `settings.toml` is kept (replacing an older one).
+pub const BAD_SETTINGS_FILE: &str = "settings.toml.bad";
+
+/// The confirmation times the helper accepts (design m3 B.14, WP-E3): 20 s, or 60 s.
+pub const COUNTDOWN_CHOICES: [u32; 2] = [20, 60];
 
 /// The current schema; a newer file is read as far as it goes (unknown keys are ignored) and not
 /// overwritten with an older schema number.
@@ -144,12 +152,25 @@ pub struct PromptedEntry {
 
 impl Settings {
     /// Parses a settings document; `Err` for a document that is not valid TOML of this shape.
+    /// Values out of range are brought back to their defaults ([`Settings::sanitized`]).
     pub fn from_toml(text: &str) -> Result<Self, String> {
-        toml::from_str(text).map_err(|error| error.to_string())
+        toml::from_str::<Self>(text)
+            .map(Self::sanitized)
+            .map_err(|error| error.to_string())
     }
 
-    pub fn to_toml(&self) -> String {
-        toml::to_string_pretty(self).unwrap_or_default()
+    /// The document to save; `Err` when it cannot be serialized (nothing is written then).
+    pub fn to_toml(&self) -> Result<String, String> {
+        toml::to_string_pretty(self).map_err(|error| error.to_string())
+    }
+
+    /// `self` with every value in its allowed range: a confirmation time other than 20 or 60
+    /// seconds (the only ones the helper accepts) becomes 20.
+    pub fn sanitized(mut self) -> Self {
+        if !COUNTDOWN_CHOICES.contains(&self.change.countdown_seconds) {
+            self.change.countdown_seconds = ChangeSettings::default().countdown_seconds;
+        }
+        self
     }
 
     /// Reads `dir\settings.toml`. `Ok(None)` when there is none; `Err` with the reason when it is
@@ -164,10 +185,11 @@ impl Settings {
 
     /// Writes `dir\settings.toml` through a temporary file and a rename (creates `dir`).
     pub fn save(&self, dir: &Path) -> io::Result<()> {
+        let text = self.to_toml().map_err(io::Error::other)?;
         fs::create_dir_all(dir)?;
         let target = dir.join(SETTINGS_FILE);
         let temporary: PathBuf = dir.join(format!("{SETTINGS_FILE}.tmp"));
-        fs::write(&temporary, self.to_toml())?;
+        fs::write(&temporary, text)?;
         fs::rename(&temporary, &target)
     }
 
@@ -223,6 +245,52 @@ impl Settings {
     }
 }
 
+/// The settings to start with (design m3 F.4): the file's, or the defaults when there is none or
+/// it is unreadable. `Err` carries the reason for the log; the file must then be kept aside
+/// before the next save (`SettingsStore::new(dir, true)`).
+pub fn load_or_default(dir: &Path) -> (Settings, Result<(), String>) {
+    match Settings::load(dir) {
+        Ok(settings) => (settings.unwrap_or_default(), Ok(())),
+        Err(error) => (Settings::default(), Err(error)),
+    }
+}
+
+/// Saves the settings into one folder (on the I/O worker). After an unreadable start
+/// (`keep_bad`), the first save moves the old file to [`BAD_SETTINGS_FILE`] before writing, so
+/// that the user's file is never overwritten unseen (design m3 F.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsStore {
+    dir: PathBuf,
+    keep_bad: bool,
+}
+
+impl SettingsStore {
+    pub fn new(dir: PathBuf, keep_bad: bool) -> Self {
+        Self { dir, keep_bad }
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Writes `settings`. When the unreadable file cannot be moved aside, nothing is written and
+    /// the next save tries again.
+    pub fn save(&mut self, settings: &Settings) -> io::Result<()> {
+        if self.keep_bad {
+            match fs::rename(
+                self.dir.join(SETTINGS_FILE),
+                self.dir.join(BAD_SETTINGS_FILE),
+            ) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            self.keep_bad = false;
+        }
+        settings.save(&self.dir)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,7 +305,7 @@ mod tests {
             },
             ..Settings::default()
         };
-        let text = settings.to_toml();
+        let text = settings.to_toml().unwrap();
         assert_eq!(Settings::from_toml(&text).unwrap(), settings);
         assert!(
             Settings::from_toml(&text)
@@ -249,6 +317,91 @@ mod tests {
         assert_eq!(partial.theme, ThemeMode::Light);
         assert_eq!(partial.language, LangChoice::System);
         assert!(Settings::from_toml("theme = 3").is_err());
+    }
+
+    #[test]
+    fn only_the_confirmation_times_the_helper_accepts_are_kept() {
+        for (seconds, kept) in [(20, 20), (60, 60), (45, 20), (0, 20), (600, 20)] {
+            let text = format!("[change]\ncountdown_seconds = {seconds}\n");
+            assert_eq!(
+                Settings::from_toml(&text).unwrap().change.countdown_seconds,
+                kept
+            );
+        }
+    }
+
+    /// A scratch settings folder under the temporary directory, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos());
+            let dir = std::env::temp_dir().join(format!(
+                "mklm-settings-test-{tag}-{}-{nanos}",
+                std::process::id()
+            ));
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn an_unreadable_file_is_kept_aside_on_the_next_save() {
+        let scratch = Scratch::new("bad");
+        fs::create_dir_all(&scratch.0).unwrap();
+        let garbage = "theme = [not settings\n";
+        fs::write(scratch.0.join(SETTINGS_FILE), garbage).unwrap();
+        // The start goes on with the defaults and remembers to keep the file.
+        let (settings, loaded) = load_or_default(&scratch.0);
+        assert_eq!(settings, Settings::default());
+        assert!(loaded.is_err());
+        let mut store = SettingsStore::new(scratch.0.clone(), loaded.is_err());
+        let mut changed = settings.clone();
+        changed.tray.close_notice_shown = true;
+        store.save(&changed).unwrap();
+        assert_eq!(
+            fs::read_to_string(scratch.0.join(BAD_SETTINGS_FILE)).unwrap(),
+            garbage
+        );
+        assert_eq!(Settings::load(&scratch.0), Ok(Some(changed.clone())));
+        // Only once: later saves leave settings.toml.bad as it is.
+        changed.theme = ThemeMode::Dark;
+        store.save(&changed).unwrap();
+        assert_eq!(
+            fs::read_to_string(scratch.0.join(BAD_SETTINGS_FILE)).unwrap(),
+            garbage
+        );
+        assert_eq!(Settings::load(&scratch.0), Ok(Some(changed)));
+        assert!(!scratch.0.join(format!("{SETTINGS_FILE}.tmp")).exists());
+    }
+
+    #[test]
+    fn a_readable_or_missing_file_is_never_kept_aside() {
+        let scratch = Scratch::new("good");
+        let (settings, loaded) = load_or_default(&scratch.0);
+        assert_eq!(
+            (settings.clone(), loaded.clone()),
+            (Settings::default(), Ok(()))
+        );
+        let mut store = SettingsStore::new(scratch.0.clone(), loaded.is_err());
+        assert_eq!(store.dir(), scratch.0.as_path());
+        store.save(&settings).unwrap();
+        store.save(&settings).unwrap();
+        assert!(!scratch.0.join(BAD_SETTINGS_FILE).exists());
+        assert_eq!(load_or_default(&scratch.0), (settings, Ok(())));
+        // Nothing to move aside is not an error either.
+        let empty = Scratch::new("empty");
+        SettingsStore::new(empty.0.clone(), true)
+            .save(&Settings::default())
+            .unwrap();
+        assert!(!empty.0.join(BAD_SETTINGS_FILE).exists());
     }
 
     #[test]
@@ -269,7 +422,7 @@ mod tests {
             ..detected.clone()
         }));
         assert_eq!(settings.physical(&id.to_lowercase()), Some(&detected));
-        let text = settings.to_toml();
+        let text = settings.to_toml().unwrap();
         assert_eq!(Settings::from_toml(&text).unwrap(), settings);
         assert_eq!(settings.change.countdown_seconds, 20);
     }

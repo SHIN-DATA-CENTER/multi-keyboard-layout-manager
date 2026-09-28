@@ -1,15 +1,21 @@
 //! The I/O worker (design m3 A.4): one long-lived thread for every blocking call that is not a
 //! helper session — enumerating keyboards (hundreds of milliseconds), reading the journal, saving
-//! settings, the RunOnce rule, opening a settings page or the recovery files folder, restarting
-//! the PC (design m3 B.8, B.11), and the preparation of a change (`PrepareChange`, design m3
-//! B.5). Tasks run in order; repeated reads that queue up are merged,
+//! settings, the RunOnce rule, the autostart value, opening a settings page or the recovery files
+//! folder, restarting the PC (design m3 B.8, B.11), and the preparation of a change
+//! (`PrepareChange`, design m3 B.5). Tasks run in order; repeated reads that queue up are merged,
 //! and of several queued preparations only the last runs (the page dropped the others). Results
 //! go back with `slint::invoke_from_event_loop`.
+//!
+//! Writes (settings, the RunOnce rule, the autostart value) are counted from the moment they are
+//! queued until they are done, so that quitting — and the end of the Windows session — can wait a
+//! bounded time for them ([`wait_for_writes`], design m3 F.5). The count is a static outside any
+//! `RefCell`, like the session's cancel flag: the end-of-session handler reads it from inside the
+//! shell window's procedure.
 
-use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mklm_client::gate::{Gate, blocker};
 use mklm_client::inventory::{InventoryError, read_inventory};
@@ -17,7 +23,9 @@ use mklm_client::startup::summarize;
 use mklm_win::ui::SettingsPage;
 
 use crate::app::post;
-use crate::settings::Settings;
+use crate::autostart::{self, AutostartTask};
+use crate::log;
+use crate::settings::{Settings, SettingsStore};
 use crate::state::{AppMsg, JournalMsg, PrepareFailure, PreparedChange, SystemRead};
 
 /// A job for the I/O worker.
@@ -34,18 +42,62 @@ pub enum IoTask {
         token: u64,
         gate: Gate,
     },
-    SaveSettings {
-        settings: Box<Settings>,
-        dir: PathBuf,
-    },
+    /// Save settings.toml through the worker's [`SettingsStore`] (skipped without a settings
+    /// folder; after an unreadable start the old file is kept as settings.toml.bad first).
+    SaveSettings(Box<Settings>),
     /// `mklm_client::run_once::apply_run_once_rule(PostRebootCommand::Gui)`.
     RunOnceRule,
+    /// Read or change the autostart value (`autostart::run`), answered by
+    /// `AppMsg::AutostartRead`.
+    Autostart(AutostartTask),
     OpenSettingsPage(SettingsPage),
     /// The RunOnce rule, then `mklm_win::session::restart_pc` (design m3 B.8): the rule first, so
     /// that the check after the restart opens by itself.
     RestartPc,
     /// `%ProgramData%\SHIN DATA CENTER\MKLM\Recovery` in Explorer (design m3 B.11).
     OpenRecoveryFolder,
+}
+
+impl IoTask {
+    /// Tasks a quit waits for (bounded): they write the user's files or registry values.
+    fn writes(&self) -> bool {
+        match self {
+            // The restart writes the RunOnce rule first.
+            IoTask::SaveSettings(_) | IoTask::RunOnceRule | IoTask::RestartPc => true,
+            IoTask::Autostart(task) => *task != AutostartTask::Read,
+            IoTask::Read
+            | IoTask::ReadForResult
+            | IoTask::PrepareChange { .. }
+            | IoTask::OpenSettingsPage(_)
+            | IoTask::OpenRecoveryFolder => false,
+        }
+    }
+}
+
+/// Writes queued or running.
+static PENDING_WRITES: Mutex<usize> = Mutex::new(0);
+static WRITES_DONE: Condvar = Condvar::new();
+
+fn add_pending_write(delta: isize) {
+    let mut pending = PENDING_WRITES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    *pending = pending.saturating_add_signed(delta);
+    if *pending == 0 {
+        WRITES_DONE.notify_all();
+    }
+}
+
+/// Waits up to `limit` for the queued writes; true when none is left (design m3 F.5: 1 s before
+/// quitting).
+pub fn wait_for_writes(limit: Duration) -> bool {
+    let pending = PENDING_WRITES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let (pending, _) = WRITES_DONE
+        .wait_timeout_while(pending, limit, |pending| *pending > 0)
+        .unwrap_or_else(PoisonError::into_inner);
+    *pending == 0
 }
 
 /// The UI thread's handle on the worker.
@@ -55,20 +107,28 @@ pub struct IoWorker {
 }
 
 impl IoWorker {
-    pub fn start() -> std::io::Result<Self> {
+    /// Starts the worker; `store` saves the settings (`None`: no settings folder, nothing is
+    /// saved).
+    pub fn start(store: Option<SettingsStore>) -> std::io::Result<Self> {
         let (tasks, receiver) = mpsc::channel();
         thread::Builder::new()
             .name("mklm-io".into())
-            .spawn(move || run(receiver))?;
+            .spawn(move || run(receiver, store))?;
         Ok(Self { tasks })
     }
 
     pub fn send(&self, task: IoTask) {
-        let _ = self.tasks.send(task);
+        let writes = task.writes();
+        if writes {
+            add_pending_write(1);
+        }
+        if self.tasks.send(task).is_err() && writes {
+            add_pending_write(-1);
+        }
     }
 }
 
-fn run(tasks: Receiver<IoTask>) {
+fn run(tasks: Receiver<IoTask>, mut store: Option<SettingsStore>) {
     while let Ok(first) = tasks.recv() {
         // Merge reads that queued up behind each other. The batch is taken after every task in
         // it was queued, so its one read is newer than any of them.
@@ -81,6 +141,7 @@ fn run(tasks: Receiver<IoTask>) {
         let mut result_read = false;
         for (index, task) in batch.into_iter().enumerate() {
             result_read |= matches!(task, IoTask::ReadForResult);
+            let writes = task.writes();
             match task {
                 IoTask::Read | IoTask::ReadForResult => {
                     if !read_done {
@@ -98,19 +159,32 @@ fn run(tasks: Receiver<IoTask>) {
                         prepared: Box::new(prepared),
                     });
                 }
-                IoTask::SaveSettings { settings, dir } => {
-                    // WP-U6: report a failure to the UI (a banner) instead of dropping it.
-                    let _ = settings.save(&dir);
+                IoTask::SaveSettings(settings) => {
+                    if let Some(store) = &mut store
+                        && let Err(error) = store.save(&settings)
+                    {
+                        // Kept in memory; the next change saves again.
+                        log::warn(format!(
+                            "saving the settings in {} failed: {error}",
+                            store.dir().display()
+                        ));
+                    }
                 }
                 IoTask::RunOnceRule => {
                     // The pages warn when the check after the restart could not be registered.
                     let outcome = mklm_client::run_once::apply_run_once_rule(
                         mklm_client::run_once::PostRebootCommand::Gui,
                     );
+                    log_run_once(&outcome);
                     post(AppMsg::Journal(JournalMsg::RunOnceDone(outcome)));
                 }
+                IoTask::Autostart(task) => {
+                    post(AppMsg::AutostartRead(Box::new(autostart::run(task))));
+                }
                 IoTask::OpenSettingsPage(page) => {
-                    let _ = mklm_win::ui::open_settings_page(page);
+                    if let Err(error) = mklm_win::ui::open_settings_page(page) {
+                        log::warn(format!("opening {page:?} failed: {error}"));
+                    }
                 }
                 IoTask::RestartPc => restart_pc(),
                 IoTask::OpenRecoveryFolder => {
@@ -118,6 +192,9 @@ fn run(tasks: Receiver<IoTask>) {
                         post(AppMsg::Journal(JournalMsg::RecoveryFolderFailed));
                     }
                 }
+            }
+            if writes {
+                add_pending_write(-1);
             }
         }
         if result_read {
@@ -152,11 +229,24 @@ fn restart_pc() {
     }
     let outcome =
         mklm_client::run_once::apply_run_once_rule(mklm_client::run_once::PostRebootCommand::Gui);
+    log_run_once(&outcome);
     post(AppMsg::Journal(JournalMsg::RunOnceDone(outcome)));
     if let Err(error) = mklm_win::session::restart_pc() {
+        log::warn(format!("restarting the PC failed: {error}"));
         post(AppMsg::Journal(JournalMsg::RestartFailed(
             error.to_string(),
         )));
+    }
+}
+
+/// Logs what the post-reboot RunOnce rule did (design m3 F.8); `TellUser` cannot happen
+/// unelevated.
+fn log_run_once(
+    outcome: &Result<mklm_client::run_once::RunOnceOutcome, mklm_client::run_once::RunOnceError>,
+) {
+    match outcome {
+        Ok(done) => log::info(format!("post-reboot RunOnce rule: {done:?}")),
+        Err(error) => log::warn(format!("post-reboot RunOnce rule failed: {error}")),
     }
 }
 
@@ -224,4 +314,45 @@ pub fn prepare_change(gate: Gate) -> Result<PreparedChange, PrepareFailure> {
         journal,
         blocker,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_writes_are_waited_for() {
+        assert!(IoTask::SaveSettings(Box::default()).writes());
+        assert!(IoTask::RunOnceRule.writes());
+        assert!(IoTask::Autostart(AutostartTask::Repair).writes());
+        assert!(IoTask::Autostart(AutostartTask::Set(false)).writes());
+        assert!(!IoTask::Autostart(AutostartTask::Read).writes());
+        assert!(!IoTask::Read.writes());
+        assert!(!IoTask::ReadForResult.writes());
+        assert!(
+            !IoTask::PrepareChange {
+                token: 0,
+                gate: Gate::Restore
+            }
+            .writes()
+        );
+        assert!(!IoTask::OpenSettingsPage(SettingsPage::Taskbar).writes());
+    }
+
+    #[test]
+    fn the_wait_for_writes_is_bounded() {
+        // (The only test that touches the process-wide count.)
+        assert!(wait_for_writes(Duration::ZERO));
+        add_pending_write(1);
+        let started = Instant::now();
+        assert!(!wait_for_writes(Duration::from_millis(100)));
+        assert!(started.elapsed() >= Duration::from_millis(90));
+        let finisher = thread::spawn(|| {
+            thread::sleep(Duration::from_millis(50));
+            add_pending_write(-1);
+        });
+        assert!(wait_for_writes(Duration::from_secs(10)));
+        finisher.join().unwrap();
+        assert!(wait_for_writes(Duration::ZERO));
+    }
 }

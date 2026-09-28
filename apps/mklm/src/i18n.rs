@@ -1916,6 +1916,117 @@ pub fn block_reason(reason: &BlockReason, what: &str, lang: Lang) -> String {
     }
 }
 
+/// The tray icon's tooltip (design m3 B.16): "MKLM", with the most important journal attention
+/// (the banner's, `vm::status::PRIORITY`) when there is one. `post_reboot`: the attention is the
+/// post-reboot check; `unreadable`: the journal has entries this build cannot read.
+pub fn tray_tooltip(
+    attention: Option<Attention>,
+    post_reboot: bool,
+    unreadable: bool,
+    lang: Lang,
+) -> String {
+    let detail = if unreadable {
+        Some(pick(
+            lang,
+            "記録（ジャーナル）を読めません。MKLM を更新してください",
+            "The journal cannot be read; update MKLM",
+        ))
+    } else if post_reboot && attention == Some(Attention::Recover) {
+        Some(pick(
+            lang,
+            "PC の再起動後の確認が必要です",
+            "Check the keyboards after the restart",
+        ))
+    } else {
+        attention.and_then(|attention| self::attention(attention, lang))
+    };
+    match detail {
+        Some(detail) => format!("MKLM — {detail}"),
+        None => "MKLM".to_string(),
+    }
+}
+
+/// Why the sign-in start switch has a note (design m3 B.14, F.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutostartNote {
+    /// Task Manager (or Settings > Apps > Startup) turned it off; MKLM never turns it back on.
+    DisabledByUser,
+    /// The Run value could not be read.
+    Unreadable,
+    /// The last change could not be written.
+    WriteFailed,
+}
+
+/// The note next to the sign-in start switch.
+pub fn autostart_note(note: AutostartNote, lang: Lang) -> String {
+    match note {
+        AutostartNote::DisabledByUser => pick(
+            lang,
+            "Windows のスタートアップ設定で無効になっています。タスク マネージャーの「スタートアップ アプリ」で有効にできます",
+            "Turned off in Windows' startup settings. You can turn it on under Startup apps in Task Manager",
+        ),
+        AutostartNote::Unreadable => pick(
+            lang,
+            "自動起動の設定を読み取れませんでした",
+            "The sign-in start setting could not be read",
+        ),
+        AutostartNote::WriteFailed => pick(
+            lang,
+            "自動起動の設定を変更できませんでした",
+            "The sign-in start setting could not be changed",
+        ),
+    }
+}
+
+/// A problem that stops MKLM before or instead of its window (design m3 F.6). Shown in a message
+/// box: release builds have no console.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupError {
+    /// Older than Windows 11 24H2 (plan 4.1).
+    WindowsTooOld { build: u32 },
+    /// The Windows version could not be read.
+    WindowsUnknown,
+    /// The window system, the window or a worker thread could not start.
+    CannotStart,
+    /// The event loop failed while MKLM ran.
+    Stopped,
+}
+
+/// The message box for `error`: `(title, text)`. `detail` is the English diagnostic, shown under
+/// "technical details".
+pub fn startup_error(error: StartupError, detail: &str, lang: Lang) -> (String, String) {
+    let title = pick(lang, "MKLM を起動できません", "MKLM cannot start");
+    let text = match (error, lang) {
+        (StartupError::WindowsTooOld { build }, Lang::Ja) => format!(
+            "MKLM には Windows 11 24H2 以降が必要です。この PC の Windows はビルド {build} です。Windows を更新してから、もう一度起動してください。"
+        ),
+        (StartupError::WindowsTooOld { build }, Lang::En) => format!(
+            "MKLM needs Windows 11 24H2 or later. This PC runs Windows build {build}. Update Windows with Windows Update, then start MKLM again."
+        ),
+        (StartupError::WindowsUnknown, _) => pick(
+            lang,
+            "Windows の版を確認できませんでした。PC を再起動してから、もう一度起動してください。",
+            "The Windows version could not be read. Restart the PC, then start MKLM again.",
+        ),
+        (StartupError::CannotStart, _) => pick(
+            lang,
+            "MKLM の画面を表示できませんでした。PC を再起動してから、もう一度起動してください。",
+            "MKLM could not open its window. Restart the PC, then start MKLM again.",
+        ),
+        (StartupError::Stopped, _) => pick(
+            lang,
+            "MKLM が予期せず終了しました。キーボードの設定を変更している途中だった場合は、次に MKLM を起動したときに回復を案内します。",
+            "MKLM stopped unexpectedly. If a keyboard change was in progress, MKLM offers the recovery the next time it starts.",
+        ),
+    };
+    let details = pick(lang, "技術的な詳細", "Technical details");
+    let title = match error {
+        StartupError::Stopped => pick(lang, "MKLM が終了しました", "MKLM stopped"),
+        _ => title,
+    };
+    (title, format!("{text}\n\n{details}: {detail}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1946,6 +2057,68 @@ mod tests {
             Lang::Ja,
         );
         assert!(after.contains("リセット後"), "{after}");
+    }
+
+    #[test]
+    fn process_texts() {
+        // Japanese output: only device names and allowlisted Latin words (design m3 H.1).
+        let keychron = "Keychron Receiver";
+        let mut japanese = vec![
+            tray_tooltip(Some(Attention::WaitingForReboot), false, false, Lang::Ja),
+            tray_tooltip(Some(Attention::Recover), true, false, Lang::Ja),
+            tray_tooltip(None, false, true, Lang::Ja),
+        ];
+        for note in [
+            AutostartNote::DisabledByUser,
+            AutostartNote::Unreadable,
+            AutostartNote::WriteFailed,
+        ] {
+            japanese.push(autostart_note(note, Lang::Ja));
+            assert!(!autostart_note(note, Lang::En).is_empty());
+        }
+        for error in [
+            StartupError::WindowsTooOld { build: 22631 },
+            StartupError::WindowsUnknown,
+            StartupError::CannotStart,
+            StartupError::Stopped,
+        ] {
+            let (title, text) = startup_error(error, "", Lang::Ja);
+            japanese.push(title);
+            japanese.push(text);
+        }
+        // "24H2" names a Windows release, like a device name.
+        let names = [keychron, "24H2"];
+        for text in &japanese {
+            assert!(
+                crate::vm::unexpected_latin(text, &names).is_empty(),
+                "{text}: {:?}",
+                crate::vm::unexpected_latin(text, &names)
+            );
+        }
+        // The tooltip is the banner's attention.
+        assert_eq!(tray_tooltip(None, false, false, Lang::Ja), "MKLM");
+        assert_eq!(
+            tray_tooltip(Some(Attention::WaitingForReboot), false, false, Lang::Ja),
+            "MKLM — PC の再起動を待っている変更があります"
+        );
+        assert_eq!(
+            tray_tooltip(Some(Attention::None), false, false, Lang::En),
+            "MKLM"
+        );
+        // The English diagnostic is kept under "technical details".
+        let (title, text) = startup_error(
+            StartupError::WindowsTooOld { build: 22631 },
+            "build 22631 < 26100",
+            Lang::En,
+        );
+        assert_eq!(title, "MKLM cannot start");
+        assert!(text.contains("22631") && text.ends_with("Technical details: build 22631 < 26100"));
+        assert_eq!(
+            autostart_note(AutostartNote::DisabledByUser, Lang::Ja)
+                .split('。')
+                .next(),
+            Some("Windows のスタートアップ設定で無効になっています")
+        );
     }
 
     #[test]

@@ -11,14 +11,18 @@
 //! onto the UI thread with `slint::invoke_from_event_loop` ([`watchers`]).
 //!
 //! Pure modules (tested without a window): [`args`], [`theme`], [`i18n`], [`settings`],
-//! [`state`], [`detect`] and the view-models in [`vm`].
+//! [`state`], [`detect`], [`autostart`] (its decisions; the registry is touched on Windows
+//! only) and the view-models in [`vm`]. [`log`] writes a file of its own; the decisions of
+//! `single_instance` are tested too.
 
 #![deny(unsafe_code)]
 
 pub mod args;
+pub mod autostart;
 pub mod detect;
 pub mod i18n;
 pub mod icon;
+pub mod log;
 pub mod settings;
 pub mod state;
 pub mod theme;
@@ -26,8 +30,6 @@ pub mod vm;
 
 #[cfg(windows)]
 pub mod app;
-#[cfg(windows)]
-pub mod autostart;
 #[cfg(windows)]
 pub mod input_capture;
 #[cfg(windows)]

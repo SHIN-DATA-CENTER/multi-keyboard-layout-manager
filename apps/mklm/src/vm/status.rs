@@ -44,8 +44,8 @@ pub enum BannerTarget {
     ApplyNow,
 }
 
-/// Attentions in the order the banner picks them.
-const PRIORITY: [Attention; 6] = [
+/// Attentions in the order the banner (and the tray's tooltip) picks them.
+pub const PRIORITY: [Attention; 6] = [
     Attention::Recover,
     Attention::Conflict,
     Attention::AwaitingUser,

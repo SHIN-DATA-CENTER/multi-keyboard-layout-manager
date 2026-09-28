@@ -39,6 +39,13 @@ pub struct SessionShared {
     /// helper answered): at the end of the Windows session the post-reboot RunOnce value is
     /// registered unconditionally, so that the next sign-in shows the recovery.
     pub journaled: AtomicBool,
+    /// The relay waits for a reconnect and the user's keep or revert: the end of the Windows
+    /// session does not wait for it (the change stays waiting, design m3 F.5).
+    pub reconnect: AtomicBool,
+    /// A helper is being launched (the UAC prompt may be up) and has not connected yet: the end
+    /// of the Windows session does not wait for it either — the cancel flag keeps a helper that
+    /// starts later from being served, and nothing is written (design m3 F.5 "UAC 待ち").
+    pub launching: AtomicBool,
     /// Set after the request and the RunOnce rule are done.
     done: Mutex<bool>,
     finished: Condvar,
@@ -80,10 +87,20 @@ pub fn cancel_current_session() -> bool {
     })
 }
 
-/// `WM_ENDSESSION`: wait up to `limit` for the running session to end (design m3 F.5: 3 s).
-pub fn wait_for_current_session(limit: Duration) {
-    if let Some(shared) = current() {
-        shared.wait_done(limit);
+/// `WM_ENDSESSION`: wait up to `limit` for the running session to end (design m3 F.5: 3 s during
+/// a countdown or a write). A reconnect wait is not waited for (the relay leaves it at once and
+/// the change stays waiting for the user), nor is a helper that has not connected yet (the UAC
+/// prompt). True when no session is left running.
+pub fn wait_for_current_session(limit: Duration) -> bool {
+    match current() {
+        None => true,
+        Some(shared)
+            if shared.reconnect.load(Ordering::SeqCst)
+                || shared.launching.load(Ordering::SeqCst) =>
+        {
+            shared.wait_done(Duration::ZERO)
+        }
+        Some(shared) => shared.wait_done(limit),
     }
 }
 
@@ -107,7 +124,10 @@ impl SessionWorker {
     ) -> io::Result<Self> {
         let (decisions, decision_receiver) = mpsc::channel();
         let (recovery_answers, answer_receiver) = mpsc::channel();
-        let shared = Arc::new(SessionShared::default());
+        let shared = Arc::new(SessionShared {
+            launching: AtomicBool::new(true),
+            ..SessionShared::default()
+        });
         let worker_shared = shared.clone();
         let writes_without_plan = !mklm_client::session::plans_first(&request);
         if let Ok(mut current) = CURRENT.lock() {
@@ -258,6 +278,10 @@ impl Frontend for GuiFrontend {
         if view.planned || matches!(view.prompt, Prompt::Countdown { .. }) {
             self.shared.journaled.store(true, Ordering::SeqCst);
         }
+        self.shared.reconnect.store(
+            matches!(view.prompt, Prompt::Reconnect { .. }),
+            Ordering::SeqCst,
+        );
         if !matches!(event, Event::Heartbeat) {
             post(AppMsg::SessionEvent {
                 session: self.session,
@@ -281,6 +305,11 @@ impl Frontend for GuiFrontend {
     }
 
     fn notice(&mut self, notice: &Notice) -> io::Result<()> {
+        match notice {
+            Notice::Starting(_) => self.shared.launching.store(true, Ordering::SeqCst),
+            Notice::Connected(_) => self.shared.launching.store(false, Ordering::SeqCst),
+            Notice::HelperLost { .. } | Notice::RecoveringAfterLoss { .. } => {}
+        }
         // Requests that write without `Planned` (revert, undo, recover …) count as journaled
         // once a helper serves them; a recovery after a lost helper always does.
         if let Notice::Connected(kind) = notice
@@ -315,5 +344,46 @@ impl Frontend for GuiFrontend {
                 Err(RecvTimeoutError::Disconnected) => return Ok(false),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The end-of-session handlers (design m3 F.5): the flag is set directly, and the wait is
+    /// bounded — and skipped for a reconnect wait. (The only test that touches `CURRENT`.)
+    #[test]
+    fn the_end_of_the_windows_session() {
+        assert!(wait_for_current_session(Duration::from_secs(10)));
+        assert!(!cancel_current_session());
+        let shared = Arc::new(SessionShared::default());
+        *CURRENT.lock().unwrap() = Some(shared.clone());
+        // A countdown or a write: waited for, up to the limit.
+        let started = Instant::now();
+        assert!(!wait_for_current_session(Duration::from_millis(100)));
+        assert!(started.elapsed() >= Duration::from_millis(90));
+        // The cancel flag is set at once; RunOnce is registered only for a journaled operation.
+        assert!(!cancel_current_session());
+        assert!(shared.cancel.load(Ordering::SeqCst));
+        shared.journaled.store(true, Ordering::SeqCst);
+        assert!(cancel_current_session());
+        // A reconnect wait: not waited for (the change stays waiting).
+        shared.reconnect.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        assert!(!wait_for_current_session(Duration::from_secs(10)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // The UAC prompt (no helper connected yet): not waited for either.
+        shared.reconnect.store(false, Ordering::SeqCst);
+        shared.launching.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        assert!(!wait_for_current_session(Duration::from_secs(10)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Done: no wait.
+        shared.mark_done();
+        assert!(wait_for_current_session(Duration::from_secs(10)));
+        shared.launching.store(false, Ordering::SeqCst);
+        assert!(wait_for_current_session(Duration::from_secs(10)));
+        *CURRENT.lock().unwrap() = None;
     }
 }
