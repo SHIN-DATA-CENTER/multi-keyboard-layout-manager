@@ -1,0 +1,182 @@
+=== welcome
+heading: Step 1 of 4: Welcome
+body: MKLM tells Windows, keyboard by keyboard, whether it is a JIS or a US keyboard. This setup checks your input methods, lets you choose each keyboard's physical layout, and then makes the changes that are needed.
+item: The settings apply to every user of this PC.
+item: Each time a keyboard setting changes, Windows asks for administrator permission (MKLM is not code-signed yet, so the publisher shows as "Unknown").
+item: MKLM records the values before its first change; "Back to before MKLM" puts them back later.
+item: You can also finish without changing anything: choose "Set up later". The setup can be started again from Settings.
+button: (Next)
+can next: true
+
+=== input methods (development machine)
+heading: Step 2 of 4: Input methods
+body: Per-keyboard layouts apply only while the Japanese input method (Microsoft IME) is in use. With another input method, such as English (US), every keyboard types that method's layout.
+item: Your input methods: Japanese, English (US)
+item: Input methods of the sign-in screen: Japanese, English (US)
+warning: There are input methods other than Japanese (English (US)). To type English, turn the Japanese IME off (Alt+` or 半角/全角) instead of switching to English (US): with English (US) every keyboard types US.
+details: HKCU Preload: 00000411, 00000409
+details: HKU\.DEFAULT Preload: 00000411, 00000409
+details: GetKeyboardLayoutList: 04110411, 04090409
+button: (Next)
+can next: true
+
+=== input methods (English default and sign-in screen)
+heading: Step 2 of 4: Input methods
+body: Per-keyboard layouts apply only while the Japanese input method (Microsoft IME) is in use. With another input method, such as English (US), every keyboard types that method's layout.
+item: Your input methods: English (US), Japanese
+item: Input methods of the sign-in screen: English (US)
+warning: There are input methods other than Japanese (English (US)). To type English, turn the Japanese IME off (Alt+` or 半角/全角) instead of switching to English (US): with English (US) every keyboard types US.
+warning: Your default input method is English (US): every sign-in starts with it, and per-keyboard layouts do not apply until you switch to Japanese. Move Japanese to the top in Language settings.
+warning: The sign-in screen's input method is English (US): there every keyboard types US (mind the symbols in your password).
+note: To give the sign-in screen your input methods: open "Region (copy settings)", and on the Administrative tab choose "Copy settings", check "Welcome screen and system accounts" and confirm.
+details: HKCU Preload: 00000409, 00000411
+details: HKU\.DEFAULT Preload: 00000409
+details: GetKeyboardLayoutList: 04090409, 04110411
+button: (Next)
+can next: true
+
+=== keyboards (development machine, the Keychron's first answer key)
+heading: Step 3 of 4: Keyboard layouts
+body: Choose each connected keyboard's physical layout (at first, the layout it is set to now is chosen).
+keyboard: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [JIS] types JIS
+keyboard: Keychron Receiver [US] types US
+keyboard note: Receiver: every keyboard connected to it gets the same layout
+keyboard: VXE R1SE+ [JIS] types JIS
+detect: Next, press the key left of the right Shift on the same keyboard.
+button: (Next)
+can next: true
+
+=== keyboards (the Keychron found to be US, JIS chosen)
+heading: Step 3 of 4: Keyboard layouts
+body: Choose each connected keyboard's physical layout (at first, the layout it is set to now is chosen).
+keyboard: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [JIS] types JIS
+keyboard: Keychron Receiver [JIS] types US
+keyboard note: Receiver: every keyboard connected to it gets the same layout
+keyboard: VXE R1SE+ [JIS] types JIS
+detect verdict: ✓ Keychron Receiver is a US keyboard
+detect choose: Choose US
+button: (Next)
+can next: true
+
+=== keyboards (problem values, fixed mode)
+heading: Step 3 of 4: Keyboard layouts
+body: Choose each connected keyboard's physical layout (at first, the layout it is set to now is chosen).
+keyboard: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [JIS] types JIS
+problem: ⚠ Setting problem: there are values this keyboard's driver does not read (values for another kind of keyboard). They do no harm; you can also delete them.
+problem choice: delete
+keyboard: Keychron Receiver [JIS] types JIS
+keyboard note: Receiver: every keyboard connected to it gets the same layout
+problem: ⚠ Setting problem: in fixed mode the US values stored for this keyboard are not used. After the switch to per-keyboard mode they are (the choice below takes precedence).
+problem: ⚠ Setting problem: a part of this device that is not a keyboard (a mouse, say) has values no driver reads. They do no harm. MKLM does not change them; to remove them, follow the steps in the technical details.
+keyboard: VXE R1SE+ [JIS] types JIS
+detect: Not sure? Click the field below, then press the key left of Backspace on the keyboard in question.
+details: Values of ACPI\FUJ0309\4&320DB4C2&0: KeyboardTypeOverride, KeyboardSubtypeOverride
+details: Values of HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000: 0x4/0x0
+details: Non-keyboard part: HID\VID_3434&PID_D027&MI_01&COL03\8&2A1B&0&0002. In Device Manager, View → Devices by connection shows it under the same device as this keyboard.
+details: To delete them, run in a command prompt started as administrator (one line per value):
+details: reg delete "HKLM\SYSTEM\CurrentControlSet\Enum\HID\VID_3434&PID_D027&MI_01&COL03\8&2A1B&0&0002\Device Parameters" /v KeyboardTypeOverride /f
+details: Then unplug and replug the device, or restart the PC.
+button: (Next)
+can next: true
+
+=== summary (nothing to do)
+heading: Step 4 of 4: Summary
+body: No change is needed: every keyboard is set to the layout you chose.
+note: The PC's standard layout: JIS (not changed here in per-keyboard mode; keyboards without values type it)
+note: A US keyboard has no 半角/全角 key: turn Japanese input on and off with Alt+`.
+autostart: true
+button: Finish
+can next: true
+
+=== summary (per-keyboard changes)
+heading: Step 4 of 4: Summary
+body: These changes are made one after the other. Windows asks for administrator permission for each.
+item: Keychron Receiver to JIS
+item: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) to US
+note: The PC's standard layout: JIS (not changed here in per-keyboard mode; keyboards without values type it)
+note: The keyboards are changed one at a time (one change can be made at a time). On each page, check how the change takes effect and choose Change.
+note: A US keyboard has no 半角/全角 key: turn Japanese input on and off with Alt+`.
+button: Continue with Keychron Receiver…
+can next: true
+
+=== summary (fixed JIS, a new US keyboard: the migration)
+heading: Step 4 of 4: Summary
+body: These changes are made one after the other. Windows asks for administrator permission for each.
+item: Switch to per-keyboard mode (the PC's standard layout JIS). One PC restart is needed.
+item: Keychron Receiver to US (written with the switch)
+warning: Do not choose "Use connected keyboard layout" in the Windows Settings app before this switch: chosen first, it makes the built-in keyboard US.
+note: A US keyboard has no 半角/全角 key: turn Japanese input on and off with Alt+`.
+note: The write order: first the built-in (PS/2) keyboards keep their layout in their own values, then the assignments, then the PC-wide values. If it stops halfway, the built-in keyboard's layout does not change; MKLM offers the recovery at its next start.
+note: ⓘ This setting applies to every user of this PC.
+standard: ◉ JIS (recommended: the current JIS)
+standard: ○ US
+migration: sign-in help
+uac: Windows asks for permission next (the publisher shows as "Unknown"). Check that it names mklm-helper.exe, then choose Yes.
+details: ACPI\FUJ0309\4&320DB4C2&0 OverrideKeyboardType: 7 → 7
+details: ACPI\FUJ0309\4&320DB4C2&0 OverrideKeyboardSubtype: 2 → 2
+details: HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000 KeyboardTypeOverride: (none) → 4
+details: HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000 KeyboardSubtypeOverride: (none) → 0
+details: PC-wide OverrideKeyboardType: 7 → (none)
+details: PC-wide OverrideKeyboardSubtype: 2 → (none)
+button: Change (Windows asks next)
+can next: true
+
+=== summary (the migration could not be prepared)
+heading: Step 4 of 4: Summary
+body: These changes are made one after the other. Windows asks for administrator permission for each.
+item: Switch to per-keyboard mode (the PC's standard layout JIS). One PC restart is needed.
+item: Keychron Receiver to US (written with the switch)
+warning: Do not choose "Use connected keyboard layout" in the Windows Settings app before this switch: chosen first, it makes the built-in keyboard US.
+note: A US keyboard has no 半角/全角 key: turn Japanese input on and off with Alt+`.
+note: The write order: first the built-in (PS/2) keyboards keep their layout in their own values, then the assignments, then the PC-wide values. If it stops halfway, the built-in keyboard's layout does not change; MKLM offers the recovery at its next start.
+note: ⓘ This setting applies to every user of this PC.
+standard: ◉ JIS (recommended: the current JIS)
+standard: ○ US
+migration: sign-in help
+note (Warning): Windows did not report every keyboard completely, so no change is possible now. Refresh and try again.
+details: devnode X: no driver
+button: Change (Windows asks next)
+can next: false
+
+=== summary (a cleanup first)
+heading: Step 4 of 4: Summary
+body: These changes are made one after the other. Windows asks for administrator permission for each.
+item: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数): delete the values its driver does not read (then choose to keep or undo it)
+item: Switch to per-keyboard mode (the PC's standard layout JIS). One PC restart is needed.
+note: A US keyboard has no 半角/全角 key: turn Japanese input on and off with Alt+`.
+note: ⓘ This setting applies to every user of this PC.
+uac: Windows asks for permission next (the publisher shows as "Unknown"). Check that it names mklm-helper.exe, then choose Yes.
+button: Delete the values (Windows asks next)
+can next: true
+
+=== summary (the cleanup waits for keep or undo)
+heading: Step 4 of 4: Summary
+body: The values of 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) were deleted; the keyboard types as before. Keep this or undo it. Until you decide, no other keyboard can be changed.
+item: Keychron Receiver to JIS
+note: The PC's standard layout: JIS (not changed here in per-keyboard mode; keyboards without values type it)
+note: The keyboards are changed one at a time (one change can be made at a time). On each page, check how the change takes effect and choose Change.
+note: ⓘ This setting applies to every user of this PC.
+uac: Windows asks for permission next (the publisher shows as "Unknown"). Check that it names mklm-helper.exe, then choose Yes.
+secondary: Undo
+button: Keep (Windows asks next)
+can next: true
+
+=== summary (the rest is blocked by a restart)
+heading: Step 4 of 4: Summary
+body: These changes are left, but they cannot be made now.
+item: Keychron Receiver to JIS
+note: The PC's standard layout: JIS (not changed here in per-keyboard mode; keyboards without values type it)
+note: The keyboards are changed one at a time (one change can be made at a time). On each page, check how the change takes effect and choose Change.
+note: Cannot change now: a change waits for a PC restart. The rest can be changed later with "Change…" on the main screen.
+autostart: true
+button: Finish
+can next: true
+
+=== summary (done)
+heading: Step 4 of 4: Summary
+body: The setup has made its changes.
+note: The PC's standard layout: JIS (not changed here in per-keyboard mode; keyboards without values type it)
+autostart: true
+button: Finish
+can next: true
+

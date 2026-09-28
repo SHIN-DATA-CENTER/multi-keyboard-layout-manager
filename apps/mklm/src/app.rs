@@ -34,7 +34,7 @@ use crate::settings::{Settings, SettingsStore, load_or_default};
 use crate::single_instance::{self, Claim, InstanceService};
 use crate::state::{
     self, AppMsg, AppState, Effect, OverlayKind, Page, QuitAnswer, SessionId, SessionOutcome,
-    SessionPhase,
+    SessionPhase, WizardState,
 };
 use crate::theme::{ResolvedTheme, ThemeMode, is_dark_rgb};
 use crate::tray;
@@ -42,6 +42,7 @@ use crate::ui::{self, AppWindow, TrayIcon};
 use crate::vm::keyboards::{KeyboardRow, MainInput, main_screen};
 use crate::vm::{self, ListOp, keytest, list_ops};
 use crate::watchers::Watchers;
+use crate::wizard_ui::WizardUi;
 use crate::worker::{self, SessionWorker};
 use crate::{BUILD_ID, MIN_BUILD};
 
@@ -115,6 +116,8 @@ struct Controller {
     settle_timer: slint::Timer,
     /// The restart, post-reboot, conflict, history and recovery pages (WP-U4, WP-U5).
     journal_ui: JournalUi,
+    /// The first-run wizard (WP-U2).
+    wizard_ui: WizardUi,
     /// An automated check (`--exit-after`): it only reads and never writes the user's HKCU, so
     /// the RunOnce rule is skipped also when the post-reboot check asks for it.
     automated: bool,
@@ -212,6 +215,9 @@ impl Controller {
             }
             Effect::SaveSettings(settings) => self.io.send(IoTask::SaveSettings(settings)),
             Effect::Autostart(task) => self.io.send(IoTask::Autostart(task)),
+            Effect::ReadNonKeyboardValues(keyboards) => {
+                self.io.send(IoTask::ReadNonKeyboardValues(keyboards));
+            }
             Effect::StartSession {
                 session,
                 request,
@@ -461,6 +467,8 @@ impl Controller {
         // The restart, post-reboot, conflict, history and recovery pages (also without a read:
         // they say what is missing).
         self.journal_ui.render(&self.window, &state);
+        // The first-run wizard (its first step needs no read).
+        self.wizard_ui.render(&self.window, &state);
         let Some(read) = &state.read else {
             return;
         };
@@ -943,12 +951,20 @@ pub fn run(args: Args) -> ExitCode {
         matches!(args.start, StartMode::Tray | StartMode::PostReboot) && settings.wizard.completed;
     let mut journal_pages = crate::state::JournalPages::default();
     journal_pages.post_reboot.requested = args.start == StartMode::PostReboot;
+    // The first-run wizard opens until it is finished or skipped, `--tray` too (design m3 B.1).
+    let wizard = (!settings.wizard.completed).then(WizardState::default);
     let controller = Rc::new(Controller {
         window: window.clone_strong(),
         icon,
         tray: RefCell::new(None),
         state: RefCell::new(AppState {
             lang: Some(lang),
+            page: if wizard.is_some() {
+                Page::Wizard
+            } else {
+                Page::Main
+            },
+            wizard,
             settings,
             visible: !start_hidden,
             reveal_on_attention: start_hidden,
@@ -969,6 +985,7 @@ pub fn run(args: Args) -> ExitCode {
         layout_timer: slint::Timer::default(),
         settle_timer: slint::Timer::default(),
         journal_ui: JournalUi::new(&window),
+        wizard_ui: WizardUi::new(&window),
         automated: args.exit_after.is_some(),
     });
     APP.with(|app| *app.borrow_mut() = Some(controller.clone()));
@@ -1220,8 +1237,9 @@ fn wire_callbacks(window: &AppWindow) {
     wire_change_flow(window);
     // The restart, post-reboot, conflict, history and recovery pages.
     crate::journal_ui::wire(window);
-    // WP-U1, WP-U2, WP-U6 and WP-U7 wire the remaining callbacks (wizard, settings) through
-    // `state::update`.
+    // The first-run wizard, and Settings' "初回セットアップをもう一度行う" (WP-U2).
+    crate::wizard_ui::wire(window);
+    // WP-U7 wires the remaining settings callbacks through `state::update`.
 }
 
 /// The change flow's callbacks (design m3 B.3 to B.7, B.17; WP-U3).

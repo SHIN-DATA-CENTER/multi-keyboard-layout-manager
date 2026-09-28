@@ -1,0 +1,182 @@
+=== welcome
+heading: 手順 1 / 4: ようこそ
+body: MKLM は、つないでいるキーボードごとに、JIS 配列か US 配列かを Windows に設定します。このセットアップでは、入力方式を確かめ、キーボードごとに実物の配列を選び、必要な変更をまとめて行います。
+item: この設定は、この PC のすべてのユーザーに適用されます。
+item: キーボードの設定を変えるときは、そのたびに Windows が管理者の許可を求めます（MKLM はまだコード署名をしていないため、発行元は「不明」と表示されます）。
+item: MKLM は、初めて変える前の値を記録します。後から「MKLM 導入前に戻す」で元に戻せます。
+item: 何も変えずに終えることもできます。そのときは「後でセットアップする」を押してください。設定画面から、もう一度始められます。
+button: (Next)
+can next: true
+
+=== input methods (development machine)
+heading: 手順 2 / 4: 入力方式
+body: キーボードごとの配列は、日本語の入力方式（Microsoft IME）を使っている間だけ有効です。英語 (US) などほかの入力方式に切り替えると、すべてのキーボードがその入力方式の配列になります。
+item: あなたの入力方式: 日本語、英語 (US)
+item: サインイン画面の入力方式: 日本語、英語 (US)
+warning: 日本語以外の入力方式があります（英語 (US)）。英語を打つときも英語 (US) には切り替えず、日本語 IME をオフにしてください（Alt+` か「半角/全角」）。英語 (US) に切り替えると、すべてのキーボードが US 配列になります。
+details: HKCU Preload: 00000411, 00000409
+details: HKU\.DEFAULT Preload: 00000411, 00000409
+details: GetKeyboardLayoutList: 04110411, 04090409
+button: (Next)
+can next: true
+
+=== input methods (English default and sign-in screen)
+heading: 手順 2 / 4: 入力方式
+body: キーボードごとの配列は、日本語の入力方式（Microsoft IME）を使っている間だけ有効です。英語 (US) などほかの入力方式に切り替えると、すべてのキーボードがその入力方式の配列になります。
+item: あなたの入力方式: 英語 (US)、日本語
+item: サインイン画面の入力方式: 英語 (US)
+warning: 日本語以外の入力方式があります（英語 (US)）。英語を打つときも英語 (US) には切り替えず、日本語 IME をオフにしてください（Alt+` か「半角/全角」）。英語 (US) に切り替えると、すべてのキーボードが US 配列になります。
+warning: 既定の入力方式が 英語 (US) です。サインインのたびに 英語 (US) で始まるため、日本語に切り替えるまでキーボードごとの配列が効きません。［言語の設定］で日本語を一番上にしてください。
+warning: サインイン画面の入力方式が 英語 (US) です。サインイン画面では、すべてのキーボードが US 配列になります（パスワードの記号の位置に注意してください）。
+note: サインイン画面の入力方式を合わせるには: ［地域（設定のコピー）］を開き、［管理］タブの［設定のコピー］で「ようこそ画面とシステム アカウント」にチェックを付けて確定します。
+details: HKCU Preload: 00000409, 00000411
+details: HKU\.DEFAULT Preload: 00000409
+details: GetKeyboardLayoutList: 04090409, 04110411
+button: (Next)
+can next: true
+
+=== keyboards (development machine, the Keychron's first answer key)
+heading: 手順 3 / 4: キーボードの配列
+body: つないでいるキーボードごとに、実物の配列を選んでください（はじめは、いま設定されている配列が選ばれています）。
+keyboard: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [JIS] JIS として動作中
+keyboard: Keychron Receiver [US] US として動作中
+keyboard note: レシーバー: このレシーバーにつないだすべてのキーボードに同じ配列が適用されます
+keyboard: VXE R1SE+ [JIS] JIS として動作中
+detect: 次に、同じキーボードで右の Shift の左のキーを押してください。
+button: (Next)
+can next: true
+
+=== keyboards (the Keychron found to be US, JIS chosen)
+heading: 手順 3 / 4: キーボードの配列
+body: つないでいるキーボードごとに、実物の配列を選んでください（はじめは、いま設定されている配列が選ばれています）。
+keyboard: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [JIS] JIS として動作中
+keyboard: Keychron Receiver [JIS] US として動作中
+keyboard note: レシーバー: このレシーバーにつないだすべてのキーボードに同じ配列が適用されます
+keyboard: VXE R1SE+ [JIS] JIS として動作中
+detect verdict: ✓ Keychron Receiver は US 配列のキーボードです
+detect choose: US を選ぶ
+button: (Next)
+can next: true
+
+=== keyboards (problem values, fixed mode)
+heading: 手順 3 / 4: キーボードの配列
+body: つないでいるキーボードごとに、実物の配列を選んでください（はじめは、いま設定されている配列が選ばれています）。
+keyboard: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [JIS] JIS として動作中
+problem: ⚠ 設定に問題: このキーボードのドライバーが読まない値（別の種類のキーボード用の値）があります。害はありませんが、削除することもできます。
+problem choice: delete
+keyboard: Keychron Receiver [JIS] JIS として動作中
+keyboard note: レシーバー: このレシーバーにつないだすべてのキーボードに同じ配列が適用されます
+problem: ⚠ 設定に問題: 固定モードのため、このキーボードに保存されている US 配列の値は今は使われていません。キーボードごとモードへ移行すると使われます（下の選択が優先されます）。
+problem: ⚠ 設定に問題: このデバイスのキーボード以外の部分（マウスなど）に、どのドライバーも読まない値があります。害はありません。MKLM は変更しないので、消したいときは「技術的な詳細」の手順で手動で削除してください。
+keyboard: VXE R1SE+ [JIS] JIS として動作中
+detect: わからないときは、下の欄をクリックしてから、調べたいキーボードで Backspace の左のキーを押してください。
+details: ACPI\FUJ0309\4&320DB4C2&0 の値: KeyboardTypeOverride, KeyboardSubtypeOverride
+details: HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000 の値: 0x4/0x0
+details: キーボード以外の部分: HID\VID_3434&PID_D027&MI_01&COL03\8&2A1B&0&0002。デバイス マネージャーで［表示］→［デバイス (接続別)］を選ぶと、このキーボードと同じデバイスの下にあることを確かめられます。
+details: 削除するには、管理者として実行したコマンド プロンプトで次を実行します（値ごとに 1 行）:
+details: reg delete "HKLM\SYSTEM\CurrentControlSet\Enum\HID\VID_3434&PID_D027&MI_01&COL03\8&2A1B&0&0002\Device Parameters" /v KeyboardTypeOverride /f
+details: その後、デバイスを抜き差しするか、PC を再起動してください。
+button: (Next)
+can next: true
+
+=== summary (nothing to do)
+heading: 手順 4 / 4: まとめ
+body: 変更は不要です。どのキーボードも、選んだ配列のとおりに設定されています。
+note: PC の標準配列: JIS（キーボードごとモードでは、ここでは変えません。値のないキーボードがこの配列になります）
+note: US 配列には「半角/全角」キーがありません。日本語入力のオン/オフは Alt+` です。
+autostart: true
+button: 完了
+can next: true
+
+=== summary (per-keyboard changes)
+heading: 手順 4 / 4: まとめ
+body: 次の変更を、上から順に行います。変更のたびに、Windows が管理者の許可を求めます。
+item: Keychron Receiver を JIS に
+item: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) を US に
+note: PC の標準配列: JIS（キーボードごとモードでは、ここでは変えません。値のないキーボードがこの配列になります）
+note: キーボードごとに順に変更します（同時に行える変更は 1 つです）。それぞれの画面で切り替え方を確かめて「変更する」を押してください。
+note: US 配列には「半角/全角」キーがありません。日本語入力のオン/オフは Alt+` です。
+button: Keychron Receiver の変更へ進む…
+can next: true
+
+=== summary (fixed JIS, a new US keyboard: the migration)
+heading: 手順 4 / 4: まとめ
+body: 次の変更を、上から順に行います。変更のたびに、Windows が管理者の許可を求めます。
+item: キーボードごとモードへ移行します（PC の標準配列 JIS）。PC の再起動が 1 回必要です。
+item: Keychron Receiver を US に（移行と同時に書きます）
+warning: Windows の設定アプリの「接続済みキーボード レイアウトを使用する」は、この移行の前には選ばないでください。先に選ぶと、内蔵キーボードが US 配列になります。
+note: US 配列には「半角/全角」キーがありません。日本語入力のオン/オフは Alt+` です。
+note: 書き込みの順序: まず内蔵（PS/2）キーボードに今の配列を記録し、次に各キーボードの割り当て、最後に PC 全体の値を書きます。途中で止まっても、内蔵キーボードの配列は変わりません。MKLM が次に起動したときに回復を案内します。
+note: ⓘ この設定は、この PC のすべてのユーザーに適用されます。
+standard: ◉ JIS（おすすめ: 今の JIS）
+standard: ○ US
+migration: sign-in help
+uac: 次に Windows の確認画面が出ます（発行元は「不明」）。mklm-helper.exe であることを確かめて「はい」を押してください。
+details: ACPI\FUJ0309\4&320DB4C2&0 OverrideKeyboardType: 7 → 7
+details: ACPI\FUJ0309\4&320DB4C2&0 OverrideKeyboardSubtype: 2 → 2
+details: HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000 KeyboardTypeOverride: （なし） → 4
+details: HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000 KeyboardSubtypeOverride: （なし） → 0
+details: PC 全体 OverrideKeyboardType: 7 → （なし）
+details: PC 全体 OverrideKeyboardSubtype: 2 → （なし）
+button: 変更する（次に Windows の確認が出ます）
+can next: true
+
+=== summary (the migration could not be prepared)
+heading: 手順 4 / 4: まとめ
+body: 次の変更を、上から順に行います。変更のたびに、Windows が管理者の許可を求めます。
+item: キーボードごとモードへ移行します（PC の標準配列 JIS）。PC の再起動が 1 回必要です。
+item: Keychron Receiver を US に（移行と同時に書きます）
+warning: Windows の設定アプリの「接続済みキーボード レイアウトを使用する」は、この移行の前には選ばないでください。先に選ぶと、内蔵キーボードが US 配列になります。
+note: US 配列には「半角/全角」キーがありません。日本語入力のオン/オフは Alt+` です。
+note: 書き込みの順序: まず内蔵（PS/2）キーボードに今の配列を記録し、次に各キーボードの割り当て、最後に PC 全体の値を書きます。途中で止まっても、内蔵キーボードの配列は変わりません。MKLM が次に起動したときに回復を案内します。
+note: ⓘ この設定は、この PC のすべてのユーザーに適用されます。
+standard: ◉ JIS（おすすめ: 今の JIS）
+standard: ○ US
+migration: sign-in help
+note (Warning): Windows がキーボードの情報をすべて返さなかったため、今は変更できません。［最新の情報に更新］してからもう一度試してください。
+details: devnode X: no driver
+button: 変更する（次に Windows の確認が出ます）
+can next: false
+
+=== summary (a cleanup first)
+heading: 手順 4 / 4: まとめ
+body: 次の変更を、上から順に行います。変更のたびに、Windows が管理者の許可を求めます。
+item: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数): ドライバーが読まない値を削除（削除の後、このままにするか元に戻すかを選びます）
+item: キーボードごとモードへ移行します（PC の標準配列 JIS）。PC の再起動が 1 回必要です。
+note: US 配列には「半角/全角」キーがありません。日本語入力のオン/オフは Alt+` です。
+note: ⓘ この設定は、この PC のすべてのユーザーに適用されます。
+uac: 次に Windows の確認画面が出ます（発行元は「不明」）。mklm-helper.exe であることを確かめて「はい」を押してください。
+button: 値を削除する（次に Windows の確認が出ます）
+can next: true
+
+=== summary (the cleanup waits for keep or undo)
+heading: 手順 4 / 4: まとめ
+body: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) の値を削除しました。キーボードの動作は変わりません。このままにするか、元に戻すかを選んでください。決めるまで、ほかのキーボードの配列も変更できません。
+item: Keychron Receiver を JIS に
+note: PC の標準配列: JIS（キーボードごとモードでは、ここでは変えません。値のないキーボードがこの配列になります）
+note: キーボードごとに順に変更します（同時に行える変更は 1 つです）。それぞれの画面で切り替え方を確かめて「変更する」を押してください。
+note: ⓘ この設定は、この PC のすべてのユーザーに適用されます。
+uac: 次に Windows の確認画面が出ます（発行元は「不明」）。mklm-helper.exe であることを確かめて「はい」を押してください。
+secondary: 元に戻す
+button: このままにする（次に Windows の確認が出ます）
+can next: true
+
+=== summary (the rest is blocked by a restart)
+heading: 手順 4 / 4: まとめ
+body: 次の変更が残っていますが、今は行えません。
+item: Keychron Receiver を JIS に
+note: PC の標準配列: JIS（キーボードごとモードでは、ここでは変えません。値のないキーボードがこの配列になります）
+note: キーボードごとに順に変更します（同時に行える変更は 1 つです）。それぞれの画面で切り替え方を確かめて「変更する」を押してください。
+note: 今は変更できません: PC の再起動を待っている変更があります。残りの変更は、後でメイン画面の［変更…］から行えます。
+autostart: true
+button: 完了
+can next: true
+
+=== summary (done)
+heading: 手順 4 / 4: まとめ
+body: 設定が終わりました。
+note: PC の標準配列: JIS（キーボードごとモードでは、ここでは変えません。値のないキーボードがこの配列になります）
+autostart: true
+button: 完了
+can next: true
+

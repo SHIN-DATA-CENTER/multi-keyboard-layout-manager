@@ -298,12 +298,61 @@ export struct RecoveryPageVm {
 
 // One connected keyboard on the wizard's keyboards step (plan 3.1, design m3 B.1; review U3).
 export struct WizardKeyboardVm {
+    // The row ID the callbacks pass back (container ID or instance ID).
+    id: string,
     name: string,
+    // "JIS として動作中".
     current: string,
-    // 0 = JIS, 1 = US.
+    // "レシーバー: …", "読み取り専用: …".
+    note: string,
+    // JIS / US can be chosen (not a read-only keyboard).
+    can-choose: bool,
+    // -1 = none, 0 = JIS, 1 = US.
     choice: int,
+    // The problems of its values, in words; empty when none.
     problem: string,
     problem-deletable: bool,
     // 0 = keep (recommended), 1 = delete.
     problem-choice: int,
+}
+
+// The wizard page whatever its step (design m3 B.1): all but the keyboard rows.
+export struct WizardVm {
+    // 0 = welcome, 1 = input methods, 2 = keyboards, 3 = summary.
+    step: int,
+    // "手順 3 / 4: キーボードの配列" (review U16 e: the position in words).
+    heading: string,
+    body: string,
+    lines: [string],
+    warnings: [string],
+    notes: [string],
+    // Step 2: the buttons that open the language and keyboard settings.
+    settings-buttons: bool,
+    // Step 3: the in-place detection (design m3 B.3).
+    detect-instruction: string,
+    detect-feedback: string,
+    detect-feedback-tone: Tone,
+    detect-verdict: string,
+    // Selects the detected layout on its row ("US を選ぶ"); empty when none.
+    detect-choose-text: string,
+    // Step 4 of a migration: the PC's standard layout, the write order and the sign-in help.
+    standard-visible: bool,
+    standard-choices: [ChoiceVm],
+    migration: bool,
+    // Step 4 when finishing: the sign-in start switch (design m3 F.3).
+    autostart-visible: bool,
+    // "確認しています…".
+    busy: bool,
+    note: string,
+    note-tone: Tone,
+    // The line about the Windows prompt that follows (review U14).
+    uac-line: string,
+    // Technical details (value names, the manual steps), folded.
+    details: string,
+    back-visible: bool,
+    // "元に戻す" next to the primary button; empty when none.
+    secondary-text: string,
+    // The primary button; empty is "Next".
+    next-text: string,
+    can-next: bool,
 }

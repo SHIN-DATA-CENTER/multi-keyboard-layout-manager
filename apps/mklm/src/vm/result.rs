@@ -512,13 +512,14 @@ pub fn shown_result(state: &crate::state::AppState, lang: Lang) -> Option<Result
     } else {
         state.read.as_ref()
     };
-    Some(result_view(
-        &outcome.report,
-        &outcome.run_once,
-        &context,
-        after,
-        lang,
-    ))
+    let mut view = result_view(&outcome.report, &outcome.run_once, &context, after, lang);
+    // Over the wizard, the input method guide would end it with keyboards still to set: the note
+    // stays, and the wizard's last step repeats it (design m3 B.1, B.13).
+    if state.page == crate::state::Page::Wizard && view.next == Some(NextStep::ImeHelp) {
+        view.next = None;
+        view.next_step.clear();
+    }
+    Some(view)
 }
 
 impl SnapshotText for ResultView {

@@ -542,7 +542,13 @@ pub struct ChangeContext<'a> {
     pub lang: Lang,
 }
 
-fn plan_lines(snapshot: &SystemSnapshot, plan: &OperationPlan, lang: Lang) -> Vec<PlanLine> {
+/// The value lines of `plan` (technical details): key, name, the value now and after. Also the
+/// wizard's migration (design m3 B.1 step 4).
+pub(crate) fn plan_lines(
+    snapshot: &SystemSnapshot,
+    plan: &OperationPlan,
+    lang: Lang,
+) -> Vec<PlanLine> {
     let mut lines = Vec::new();
     for step in &plan.checked.steps {
         let key = match &step.target {

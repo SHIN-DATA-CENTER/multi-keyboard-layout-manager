@@ -199,9 +199,6 @@ msgstr "次へ"
 msgid "Not in effect yet: the PC has not restarted since the change. Restart it with Restart, not Shut down."
 msgstr "まだ反映されていません。変更の後に PC が再起動されていません。「シャットダウン」ではなく「再起動」してください。"
 
-msgid "Not sure? Press the key left of Backspace on that keyboard:"
-msgstr "わからないときは、そのキーボードで Backspace の左のキーを押してください:"
-
 msgid "Nothing is changed if you choose No."
 msgstr "「いいえ」を選んだ場合は、何も変更しません。"
 
@@ -325,17 +322,11 @@ msgstr "やり直す"
 msgid "Stop identifying"
 msgstr "特定をやめる"
 
-msgid "Stored value on {}"
-msgstr "{} に保存されている値"
-
 msgid "System"
 msgstr "システム"
 
 msgid "The PC's standard layout"
 msgstr "PC の標準配列"
-
-msgid "The PC's standard layout:"
-msgstr "PC の標準配列:"
 
 msgid "The next screen asks \"Do you want to allow this app from an unknown publisher to make changes to your device?\". MKLM is not code-signed yet, so the verified publisher shows as \"Unknown\". Check that mklm-helper.exe is shown in the middle of the screen, then choose Yes."
 msgstr "次の画面に「不明な発行元からのこのアプリがデバイスに変更を加えることを許可しますか?」と表示されます。MKLM はまだコード署名をしていないため、確認済みの発行元が「不明」になります。画面の中ほどに「mklm-helper.exe」と表示されていることを確かめてから「はい」を押してください。"
@@ -378,6 +369,9 @@ msgstr "この値をどうするか"
 
 msgid "What to do with the values changed outside MKLM"
 msgstr "MKLM 以外が変えた値をどうするか"
+
+msgid "What to do with the values of {}"
+msgstr "{} の値をどうするか"
 
 msgid "What {} becomes"
 msgstr "{} をどうするか"

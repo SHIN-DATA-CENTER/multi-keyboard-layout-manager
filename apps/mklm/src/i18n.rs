@@ -27,6 +27,9 @@ use crate::detect::{Step, Verdict};
 /// The restart, post-reboot, conflict, history and recovery pages (WP-U4, WP-U5).
 pub mod journal_pages;
 
+/// The first-run wizard (WP-U2).
+pub mod wizard;
+
 /// A language the GUI speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lang {
