@@ -51,3 +51,18 @@ pub struct ResolveParams {
     pub choices: Vec<ValueChoice>,
     pub apply: ApplyOptions,
 }
+
+/// "削除する" (design m3 A.5, WP-E1): values of one Keyboard-class devnode that its driver does
+/// not read (`mklm_core::check_cleanup`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupParams {
+    pub instance_id: String,
+    pub names: Vec<String>,
+}
+
+/// The machine-wide settings the helper saves (design m3 B.14, WP-E2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MachineSettingsParams {
+    /// "アンインストール時にキーボードの設定を元に戻す" (plan 3.13).
+    pub restore_on_uninstall: bool,
+}

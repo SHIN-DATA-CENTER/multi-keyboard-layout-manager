@@ -42,7 +42,8 @@ pub enum BackendError {
     #[error("{instance_id}: the device was removed")]
     DeviceRemoved { instance_id: String },
     /// The value name is not one MKLM writes on that key (`mklm_core::DEVICE_VALUE_NAMES`,
-    /// `GLOBAL_VALUE_NAMES`). Both implementations enforce it, like `mklm_win::regwrite` does.
+    /// `GLOBAL_VALUE_NAMES`, `MACHINE_SETTING_NAMES`). Both implementations enforce it, like
+    /// `mklm_win::regwrite` and `mklm_win::machine_settings` do.
     #[error("{name:?}: not a value MKLM may write here")]
     NameNotAllowed { name: String },
     #[error("{what}: access denied")]
@@ -100,4 +101,10 @@ pub trait RegistryBackend {
 
     /// `RegFlushKey` on the journal key (SOFTWARE hive).
     fn flush_journal(&mut self) -> Result<(), BackendError>;
+
+    /// Writes one `REG_DWORD` under `mklm_core::MACHINE_SETTINGS_KEY` and flushes it (SOFTWARE
+    /// hive), creating the key with the journal's protected DACL when missing (design m3 A.5,
+    /// WP-E2). Refuses names outside `mklm_core::MACHINE_SETTING_NAMES`
+    /// ([`BackendError::NameNotAllowed`]). Durable once it returns.
+    fn write_machine_setting(&mut self, name: &str, value: u32) -> Result<(), BackendError>;
 }

@@ -7,9 +7,9 @@ use std::path::PathBuf;
 
 use mklm_core::value_names::{HID_SUBTYPE, HID_TYPE, LAYER_DRIVER_JPN, PS2_SUBTYPE, PS2_TYPE};
 use mklm_core::{
-    AllowlistError, FailureReason, InvPs2Violation, KeyboardType, Layout, LayoutChoice,
-    LayoutTable, OpId, OpState, PendingAction, PlanError, PlanStep, PlannedWrite, RegValue,
-    RestoreScope, ValueOp, WriteTarget,
+    AllowlistError, FailureReason, InvPs2Violation, KeyboardType, LONG_COUNTDOWN_SECONDS, Layout,
+    LayoutChoice, LayoutTable, OpId, OpState, PendingAction, PlanError, PlanStep, PlannedWrite,
+    RegValue, RestoreScope, ValueOp, WriteTarget,
 };
 use mklm_ipc::{
     ApplyOptions, Assignment, CallerMessage, ConflictInfo, ConflictPolicy, Decision, ErrorCode,
@@ -75,6 +75,7 @@ fn apply_all() -> ApplyOptions {
     ApplyOptions {
         allow_live_reset: true,
         other_input_available: true,
+        ..ApplyOptions::default()
     }
 }
 
@@ -152,6 +153,16 @@ fn requests(op: &OpId) -> Vec<(&'static str, Request)> {
             apply: ApplyOptions::default(),
             expected: None,
         }),
+        // The GUI setting "確認の時間を長くする（60 秒）" (design m3 WP-E3).
+        SetLayout => Request::SetLayout(SetLayoutRequest {
+            instance_id: KEYCHRON.to_string(),
+            layout: LayoutChoice::Jis,
+            apply: ApplyOptions {
+                countdown_seconds: LONG_COUNTDOWN_SECONDS,
+                ..apply_all()
+            },
+            expected: None,
+        }),
         Migrate => Request::Migrate(MigrateRequest {
             standard: Layout::Jis,
             assignments: vec![
@@ -179,6 +190,7 @@ fn requests(op: &OpId) -> Vec<(&'static str, Request)> {
             apply: ApplyOptions {
                 allow_live_reset: true,
                 other_input_available: false,
+                ..ApplyOptions::default()
             },
         },
         Confirm => Request::Confirm { op_id: op.clone() },
@@ -220,6 +232,13 @@ fn requests(op: &OpId) -> Vec<(&'static str, Request)> {
             ],
             apply: apply_all(),
         }),
+        CleanupValues => Request::CleanupValues {
+            instance_id: INTERNAL_PS2.to_string(),
+            names: vec![HID_TYPE.to_string(), HID_SUBTYPE.to_string()],
+        },
+        SetMachineSettings => Request::SetMachineSettings {
+            restore_on_uninstall: false,
+        },
     )
 }
 
@@ -781,15 +800,15 @@ fn every_embedded_value_round_trips() {
     assert!(!vocabulary(&op).is_empty());
 }
 
-/// The frame of section E.6, byte for byte.
+/// The frame of section E.6 (protocol 2: `countdown_seconds` in `apply`), byte for byte.
 #[test]
 fn the_design_example_frame() {
-    let text = r#"{"v":1,"seq":2,"body":{"type":"request","data":{"kind":"set-layout","instance_id":"HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000","layout":"jis","apply":{"allow_live_reset":true,"other_input_available":true},"expected":null}}}"#;
+    let text = r#"{"v":2,"seq":2,"body":{"type":"request","data":{"kind":"set-layout","instance_id":"HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000","layout":"jis","apply":{"allow_live_reset":true,"other_input_available":true,"countdown_seconds":20},"expected":null}}}"#;
     let frame: Frame<CallerMessage> = serde_json::from_str(text).unwrap();
     assert_eq!(
         frame,
         Frame {
-            v: 1,
+            v: 2,
             seq: 2,
             body: CallerMessage::Request(Request::SetLayout(SetLayoutRequest {
                 instance_id: KEYCHRON.to_string(),
@@ -800,7 +819,7 @@ fn the_design_example_frame() {
         }
     );
     assert_eq!(serde_json::to_string(&frame).unwrap(), text);
-    if PROTOCOL_VERSION == 1 {
+    if PROTOCOL_VERSION == 2 {
         let mut bytes = u32::try_from(text.len()).unwrap().to_le_bytes().to_vec();
         bytes.extend_from_slice(text.as_bytes());
         let read: Frame<CallerMessage> = read_frame(&mut bytes.as_slice()).unwrap();
@@ -931,6 +950,11 @@ fn ipc_types_reject_unknown_fields() {
         r#"{"type":"request","data":{"kind":"migrate","standard":"jis","assignments":[{"instance_id":"x","layout":"us","extra":1}],"expected":null}}"#,
         r#"{"type":"request","data":{"kind":"recover","apply":{"allow_live_reset":false,"other_input_available":false},"silent":true}}"#,
         r#"{"type":"request","data":{"kind":"undo","apply":{"allow_live_reset":false,"other_input_available":false},"all":true}}"#,
+        r#"{"type":"request","data":{"kind":"cleanup-values","instance_id":"x","names":[],"force":true}}"#,
+        r#"{"type":"request","data":{"kind":"cleanup-values","instance_id":"x"}}"#,
+        r#"{"type":"request","data":{"kind":"set-machine-settings","restore_on_uninstall":true,"silent":true}}"#,
+        r#"{"type":"request","data":{"kind":"set-machine-settings"}}"#,
+        r#"{"type":"request","data":{"kind":"set-machine-settings","restore_on_uninstall":1}}"#,
     ];
     for json in rejected {
         assert!(
@@ -940,6 +964,66 @@ fn ipc_types_reject_unknown_fields() {
     }
     let hello = r#"{"type":"hello","data":{"protocol":1,"nonce_hex":"","helper_pid":1,"helper_version":"","build_id":"","elevated":true}}"#;
     assert!(serde_json::from_str::<HelperMessage>(hello).is_err());
+}
+
+/// Protocol 2 (design m3 A.5): the two new requests and the countdown length, as the GUI sends
+/// them. A request of protocol 1's shape (no `countdown_seconds`) reads with the default 20 s.
+#[test]
+fn protocol_2_requests_have_the_documented_shape() {
+    let cleanup = serde_json::to_value(CallerMessage::Request(Request::CleanupValues {
+        instance_id: INTERNAL_PS2.to_string(),
+        names: vec![HID_TYPE.to_string()],
+    }))
+    .unwrap();
+    assert_eq!(
+        cleanup,
+        serde_json::json!({
+            "type": "request",
+            "data": {
+                "kind": "cleanup-values",
+                "instance_id": INTERNAL_PS2,
+                "names": ["KeyboardTypeOverride"],
+            }
+        })
+    );
+    let settings = serde_json::to_value(CallerMessage::Request(Request::SetMachineSettings {
+        restore_on_uninstall: true,
+    }))
+    .unwrap();
+    assert_eq!(
+        settings,
+        serde_json::json!({
+            "type": "request",
+            "data": { "kind": "set-machine-settings", "restore_on_uninstall": true }
+        })
+    );
+    let long = serde_json::to_value(ApplyOptions {
+        countdown_seconds: LONG_COUNTDOWN_SECONDS,
+        ..apply_all()
+    })
+    .unwrap();
+    assert_eq!(
+        long,
+        serde_json::json!({
+            "allow_live_reset": true,
+            "other_input_available": true,
+            "countdown_seconds": 60,
+        })
+    );
+    let message: CallerMessage = serde_json::from_str(
+        r#"{"type":"request","data":{"kind":"recover","apply":{"allow_live_reset":true,"other_input_available":true}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        message,
+        CallerMessage::Request(Request::Recover { apply: apply_all() })
+    );
+    // The countdown length is carried as sent; the engine refuses anything but 20 and 60.
+    let odd: ApplyOptions = serde_json::from_str(
+        r#"{"allow_live_reset":true,"other_input_available":true,"countdown_seconds":5}"#,
+    )
+    .unwrap();
+    assert!(!odd.countdown_allowed());
 }
 
 // ---- The shape snapshot ----

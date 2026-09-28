@@ -64,6 +64,7 @@ impl ApplyMethod {
             ApplyMethod::Live => mklm_core::ApplyOptions {
                 allow_live_reset: true,
                 other_input_available: true,
+                ..mklm_core::ApplyOptions::default()
             },
             ApplyMethod::Restart => mklm_core::ApplyOptions::default(),
         }

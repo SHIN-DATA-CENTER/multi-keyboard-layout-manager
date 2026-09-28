@@ -1,4 +1,5 @@
-//! Test fixtures reproducing the development machine after M0 (see `docs/research/m0-results.md`).
+//! Test fixtures reproducing the development machine after M0 (see `docs/research/m0-results.md`),
+//! and the schema-1 journal it holds after the M2 real-machine tests (`testdata/journal/`).
 //!
 //! Compiled for this crate's tests and, with the `test-fixtures` feature, for other crates' tests
 //! (`mklm-engine` drives its fakes with them). Never enable the feature in a shipped binary.
@@ -164,6 +165,39 @@ pub fn input_methods() -> InputMethods {
         sign_in_preload: ids(&["00000411", "00000409"]),
         loaded_layouts: vec![0x0411_0411, 0x0409_0409],
     }
+}
+
+/// `(value name, JSON)` pairs of one journal sub-key, as `Journal::parse` takes them.
+pub type StoredDocuments = Vec<(String, String)>;
+
+/// Two operations and the two baselines as the development machine stores them after the M2
+/// real-machine tests (`HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Journal`, schema 1, copied from
+/// `mklm-cli journal --json`): the Keychron set to JIS, kept, reverted into a conflict and
+/// resolved by keeping the outside values (R6, `Failed`), then set to US and kept (`Confirmed`,
+/// the latest record of both values). `(value name, JSON)` of `Ops` and of `Baselines`, exactly
+/// as the store holds them (design m3 WP-E1: journal schema 2 must read them).
+pub fn schema_1_journal() -> (StoredDocuments, StoredDocuments) {
+    let ops = [
+        (
+            "371b1633-53a1-4819-8cd1-6f94f9e0cf25",
+            include_str!("../testdata/journal/schema-1/371b1633-53a1-4819-8cd1-6f94f9e0cf25.json"),
+        ),
+        (
+            "31f7f7bc-3939-403d-9290-ef1c17065d08",
+            include_str!("../testdata/journal/schema-1/31f7f7bc-3939-403d-9290-ef1c17065d08.json"),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, json)| (name.to_string(), json.trim().to_string()))
+    .collect();
+    let baselines: Vec<(String, serde_json::Value)> =
+        serde_json::from_str(include_str!("../testdata/journal/schema-1/baselines.json"))
+            .unwrap_or_default();
+    let baselines = baselines
+        .into_iter()
+        .map(|(name, json)| (name, json.to_string()))
+        .collect();
+    (ops, baselines)
 }
 
 /// The development machine as verified at the end of M0.

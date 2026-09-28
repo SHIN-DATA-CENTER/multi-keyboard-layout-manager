@@ -14,17 +14,53 @@ use crate::layout::{LayoutTable, PendingAction};
 use crate::model::KeyboardType;
 use crate::safety::InvPs2Violation;
 
-/// Whether a request may restart keyboards in place (plan 1.4). Every request that can end with a
-/// live reset carries it: set, revert, restore, conflict resolution, recover and undo
-/// (design review C9). The default (both false) never resets: the change then waits for a
-/// reconnect or a PC restart.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Length of the keep-or-revert countdown after a live reset (plan 3.5, design m2 D.2 a): the
+/// default, and what the CLI always uses.
+pub const DEFAULT_COUNTDOWN_SECONDS: u32 = 20;
+/// The longer countdown of the GUI setting "確認の時間を長くする（60 秒）" (design m3 B.14, K.16,
+/// WP-E3): time to listen to the screen reader, type and tab to the button.
+pub const LONG_COUNTDOWN_SECONDS: u32 = 60;
+/// The only countdown lengths the engine accepts; any other is refused (`PlanRejected`).
+pub const COUNTDOWN_SECONDS_CHOICES: [u32; 2] = [DEFAULT_COUNTDOWN_SECONDS, LONG_COUNTDOWN_SECONDS];
+
+fn default_countdown_seconds() -> u32 {
+    DEFAULT_COUNTDOWN_SECONDS
+}
+
+/// Whether a request may restart keyboards in place (plan 1.4), and how long the keep-or-revert
+/// countdown after such a reset runs. Every request that can end with a live reset carries it:
+/// set, revert, restore, conflict resolution, recover and undo (design review C9). The default
+/// (both false) never resets: the change then waits for a reconnect or a PC restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ApplyOptions {
     /// False: never reset a keyboard in place (CLI `--no-reset`).
     pub allow_live_reset: bool,
     /// The caller saw recent input from another keyboard, or the user confirmed another way to
     /// type. When false the target counts as the only usable keyboard (plan 1.4) and is not reset.
     pub other_input_available: bool,
+    /// Seconds of the countdown after a live reset: [`DEFAULT_COUNTDOWN_SECONDS`] or
+    /// [`LONG_COUNTDOWN_SECONDS`], nothing else ([`ApplyOptions::countdown_allowed`]; design m3
+    /// WP-E3). Missing on the wire means the default.
+    #[serde(default = "default_countdown_seconds")]
+    pub countdown_seconds: u32,
+}
+
+impl Default for ApplyOptions {
+    /// No reset, the default countdown.
+    fn default() -> Self {
+        Self {
+            allow_live_reset: false,
+            other_input_available: false,
+            countdown_seconds: DEFAULT_COUNTDOWN_SECONDS,
+        }
+    }
+}
+
+impl ApplyOptions {
+    /// True when [`ApplyOptions::countdown_seconds`] is one of [`COUNTDOWN_SECONDS_CHOICES`].
+    pub fn countdown_allowed(&self) -> bool {
+        COUNTDOWN_SECONDS_CHOICES.contains(&self.countdown_seconds)
+    }
 }
 
 /// What the user approved in the unelevated dry run. When the engine's own plan differs in any
@@ -317,16 +353,33 @@ mod tests {
     fn options_plans_and_choices() {
         for allow_live_reset in [false, true] {
             for other_input_available in [false, true] {
-                round_trip(&ApplyOptions {
-                    allow_live_reset,
-                    other_input_available,
-                });
+                for countdown_seconds in [20, 60, 7] {
+                    round_trip(&ApplyOptions {
+                        allow_live_reset,
+                        other_input_available,
+                        countdown_seconds,
+                    });
+                }
             }
         }
         assert_eq!(
             round_trip(&ApplyOptions::default()),
-            r#"{"allow_live_reset":false,"other_input_available":false}"#
+            r#"{"allow_live_reset":false,"other_input_available":false,"countdown_seconds":20}"#
         );
+        // Without the field (a caller of protocol 1's shape): the default countdown.
+        let old: ApplyOptions =
+            serde_json::from_str(r#"{"allow_live_reset":true,"other_input_available":true}"#)
+                .unwrap();
+        assert_eq!(old.countdown_seconds, DEFAULT_COUNTDOWN_SECONDS);
+        // Only 20 and 60 (design m3 WP-E3).
+        for (seconds, allowed) in [(20, true), (60, true), (0, false), (15, false), (61, false)] {
+            let options = ApplyOptions {
+                countdown_seconds: seconds,
+                ..ApplyOptions::default()
+            };
+            assert_eq!(options.countdown_allowed(), allowed, "{seconds}");
+        }
+        assert!(ApplyOptions::default().countdown_allowed());
         round_trip(&ExpectedPlan {
             steps: vec![step()],
             apply: Some(PendingAction::ResetKeyboard),

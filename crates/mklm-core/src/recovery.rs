@@ -203,7 +203,9 @@ pub fn decide_recovery_with_removed(
 /// What kind of operation an entry is, as far as recovery cares.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntryKind {
-    /// `SetLayout` and `Migrate`: rolled back or forward.
+    /// `SetLayout`, `Migrate` and `Cleanup`: rolled back or forward. A cleanup has no `apply`, so
+    /// once every value is deleted it rolls forward to `AwaitingConfirm` without a countdown,
+    /// where the user keeps or reverts it (design m3 A.5).
     Change,
     /// Interactive restore-to-baseline: completed forward, never confirmed by recovery.
     InteractiveRestore,
@@ -215,7 +217,9 @@ fn entry_kind(entry: &JournalEntry) -> EntryKind {
     match entry.kind {
         OpKind::RestoreBaseline { silent: true, .. } => EntryKind::SilentRestore,
         OpKind::RestoreBaseline { silent: false, .. } => EntryKind::InteractiveRestore,
-        OpKind::SetLayout { .. } | OpKind::Migrate { .. } => EntryKind::Change,
+        OpKind::SetLayout { .. } | OpKind::Migrate { .. } | OpKind::Cleanup { .. } => {
+            EntryKind::Change
+        }
     }
 }
 
@@ -500,6 +504,8 @@ const REACHED_WRITTEN: [OpState; 5] = [
 /// and the history line of the transition appended. The engine does not call it where it knows
 /// that no driver can have read the values, i.e. a roll-back right after `Written` and before any
 /// reset (design D.2 a step 1, `CallerDisconnected`: "apply_pending もない"). The rules in detail:
+/// - `None` for a cleanup ([`OpKind::Cleanup`]): it only deletes values no driver reads, and puts
+///   back only those, so no driver runs with anything but its stored values (design m3 A.5).
 /// - `None` when the last write phase happened in an earlier boot (`entry.boot_id` differs from
 ///   `current_boot`): every driver has read every value since; and `None` when the operation
 ///   never reached `Written` (no forward state in its history; recovery's roll-forward counts).
@@ -519,7 +525,7 @@ pub fn apply_pending_on_close(
     current_boot: BootId,
     reapplied: &[String],
 ) -> Option<ApplyPending> {
-    if entry.boot_id != current_boot {
+    if entry.boot_id != current_boot || matches!(entry.kind, OpKind::Cleanup { .. }) {
         return None;
     }
     let reached_written = REACHED_WRITTEN.contains(&entry.state)
@@ -710,6 +716,8 @@ mod tests {
     enum Kind {
         Set,
         Migrate,
+        /// Decided like a set (design m3 A.5): rolled back or forward, never completed.
+        Cleanup,
         InteractiveRestore,
         SilentRestore,
     }
@@ -741,7 +749,7 @@ mod tests {
         let elsewhere = has(Observation::Elsewhere);
         let all_intended_or_unchanged = !at_before && !elsewhere;
         let all_before_or_unchanged = !at_intended && !elsewhere;
-        let change = matches!(case.kind, Kind::Set | Kind::Migrate);
+        let change = matches!(case.kind, Kind::Set | Kind::Migrate | Kind::Cleanup);
         let silent = case.kind == Kind::SilentRestore;
         let inv = case.inv_ps2_broken.then(violation);
         let conflict = |pick: &dyn Fn(Observation) -> bool| RecoveryDecision::Conflict {
@@ -860,6 +868,7 @@ mod tests {
         let kind = match case.kind {
             Kind::Set => set_kind(KEYCHRON),
             Kind::Migrate => migrate_kind(),
+            Kind::Cleanup => cleanup_kind(PS2),
             Kind::InteractiveRestore => restore_kind(false),
             Kind::SilentRestore => restore_kind(true),
         };
@@ -889,6 +898,7 @@ mod tests {
         let kinds = [
             Kind::Set,
             Kind::Migrate,
+            Kind::Cleanup,
             Kind::InteractiveRestore,
             Kind::SilentRestore,
         ];
@@ -928,7 +938,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(count, 11 * 16 * 2 * 4 * 2 * 4 * 2 * 2);
+        assert_eq!(count, 11 * 16 * 2 * 4 * 2 * 5 * 2 * 2);
     }
 
     /// Spot checks of the table in the words of the design (C.7).
@@ -1439,6 +1449,72 @@ mod tests {
                 instance_ids: vec![],
                 since: now,
             })
+        );
+    }
+
+    /// A cleanup deletes values no driver reads (design m3 A.5): whatever state it closes in,
+    /// nothing waits to take effect, and none of its values waits for a restart.
+    #[test]
+    fn a_cleanup_leaves_nothing_pending() {
+        let now = boot(1);
+        let records = vec![
+            record(device(PS2), HID_TYPE, dword(7), RegValue::Absent),
+            record(device(PS2), HID_SUBTYPE, dword(2), RegValue::Absent),
+            record(device(KEYCHRON), PS2_TYPE, dword(7), RegValue::Absent),
+        ];
+        for state in [
+            OpState::Confirmed,
+            OpState::Reverted,
+            OpState::AwaitingConfirm,
+            OpState::Failed,
+        ] {
+            let mut e = entry(1, cleanup_kind(PS2), state, records.clone());
+            e.history.push(TransitionRecord {
+                from: Some(OpState::Planned),
+                to: OpState::Written,
+                at: Timestamp(0),
+                boot: now,
+                by: OWNER,
+                reason: "written".into(),
+                boot_time_hint: None,
+            });
+            assert_eq!(apply_pending_on_close(&e, now, &[]), None, "{state:?}");
+            assert!(!e.touches_boot_time_values(), "{state:?}");
+        }
+        // The same records in a set of the PS/2 keyboard would be listed (they are not boot-time,
+        // so the HID path applies): only the kind makes the difference.
+        let mut e = entry(1, set_kind(PS2), OpState::Confirmed, records);
+        e.apply = Some(PendingAction::RestartPc);
+        assert!(apply_pending_on_close(&e, now, &[]).is_some());
+        // A cleanup is decided like a set: fully written, it waits for the user.
+        let mut planned = entry(
+            1,
+            cleanup_kind(PS2),
+            OpState::Planned,
+            vec![record(device(PS2), HID_TYPE, dword(7), RegValue::Absent)],
+        );
+        planned.apply = None;
+        let ctx = RecoveryContext {
+            current_boot: now,
+            inv_ps2: None,
+        };
+        assert_eq!(
+            decide_recovery(&planned, &[RegValue::Absent], &ctx),
+            RecoveryDecision::RollForward {
+                to: OpState::AwaitingConfirm
+            }
+        );
+        assert_eq!(
+            decide_recovery(&planned, &[dword(7)], &ctx),
+            RecoveryDecision::MarkNothingWritten
+        );
+        assert_eq!(
+            attention(
+                &entry(1, cleanup_kind(PS2), OpState::AwaitingConfirm, Vec::new()),
+                now,
+                Liveness::Dead
+            ),
+            Attention::AwaitingUser
         );
     }
 

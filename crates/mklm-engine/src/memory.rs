@@ -24,8 +24,9 @@ use std::time::Duration;
 
 use mklm_core::{
     BootId, DEVICE_VALUE_NAMES, Decision, DeviceOverrides, Event, GLOBAL_VALUE_NAMES,
-    GlobalSettings, KeyboardDevice, KeyboardType, Liveness, OpId, ProcessIdentity, RecoveryAssets,
-    RegValue, STORE_VERSION, Timestamp, WriteTarget, predict_type, value_names,
+    GlobalSettings, KeyboardDevice, KeyboardType, Liveness, MACHINE_SETTING_NAMES, OpId,
+    ProcessIdentity, RecoveryAssets, RegValue, STORE_VERSION, Timestamp, WriteTarget, predict_type,
+    value_names,
 };
 
 use crate::backend::{BackendError, JournalDump, JournalSlot, RegistryBackend};
@@ -60,6 +61,12 @@ pub enum Mutation {
     Flush {
         hive: Hive,
     },
+    /// A machine-wide setting (`RegistryBackend::write_machine_setting`; logged with the
+    /// SOFTWARE-hive flush that the same call makes).
+    WriteSetting {
+        name: String,
+        value: u32,
+    },
 }
 
 impl Mutation {
@@ -67,7 +74,9 @@ impl Mutation {
     pub fn hive(&self) -> Hive {
         match self {
             Mutation::WriteValue { .. } => Hive::System,
-            Mutation::WriteJournal { .. } | Mutation::DeleteJournal { .. } => Hive::Software,
+            Mutation::WriteJournal { .. }
+            | Mutation::DeleteJournal { .. }
+            | Mutation::WriteSetting { .. } => Hive::Software,
             Mutation::Flush { hive } => *hive,
         }
     }
@@ -118,6 +127,8 @@ pub struct RegistryContents {
     pub store_version: Option<u32>,
     pub ops: BTreeMap<String, String>,
     pub baselines: BTreeMap<String, String>,
+    /// Values under `mklm_core::MACHINE_SETTINGS_KEY`.
+    pub settings: BTreeMap<String, u32>,
 }
 
 impl RegistryContents {
@@ -180,6 +191,11 @@ impl RegistryContents {
             Logged::Call(Mutation::DeleteJournal { slot }) => {
                 let (map, name) = self.slot_map(slot);
                 map.retain(|stored, _| !stored.eq_ignore_ascii_case(&name));
+            }
+            Logged::Call(Mutation::WriteSetting { name, value }) => {
+                self.settings
+                    .retain(|stored, _| !stored.eq_ignore_ascii_case(name));
+                self.settings.insert(name.clone(), *value);
             }
             Logged::Call(Mutation::Flush { .. }) => {}
         }
@@ -414,6 +430,17 @@ impl MemoryRegistry {
         self.state.borrow().current.value(target, name)
     }
 
+    /// A machine-wide setting as written (`None`: never written), bypassing faults.
+    pub fn machine_setting(&self, name: &str) -> Option<u32> {
+        self.state
+            .borrow()
+            .current
+            .settings
+            .iter()
+            .find(|(stored, _)| stored.eq_ignore_ascii_case(name))
+            .map(|(_, value)| *value)
+    }
+
     /// The device override values as a driver would read them now (`REG_DWORD` only).
     pub fn device_overrides(&self, instance_id: &str) -> DeviceOverrides {
         let state = self.state.borrow();
@@ -635,6 +662,28 @@ impl RegistryBackend for MemoryRegistry {
     fn flush_journal(&mut self) -> Result<(), BackendError> {
         let mut state = self.state.borrow_mut();
         state.begin_mutation()?;
+        state.log(Logged::Call(Mutation::Flush {
+            hive: Hive::Software,
+        }));
+        Ok(())
+    }
+
+    /// One mutating call that writes and flushes, like the real one.
+    fn write_machine_setting(&mut self, name: &str, value: u32) -> Result<(), BackendError> {
+        let mut state = self.state.borrow_mut();
+        state.begin_mutation()?;
+        let Some(name) = MACHINE_SETTING_NAMES
+            .iter()
+            .find(|allowed| allowed.eq_ignore_ascii_case(name))
+        else {
+            return Err(BackendError::NameNotAllowed {
+                name: name.to_string(),
+            });
+        };
+        state.log(Logged::Call(Mutation::WriteSetting {
+            name: (*name).to_string(),
+            value,
+        }));
         state.log(Logged::Call(Mutation::Flush {
             hive: Hive::Software,
         }));

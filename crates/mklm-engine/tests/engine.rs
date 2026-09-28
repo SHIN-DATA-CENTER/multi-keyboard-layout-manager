@@ -682,6 +682,7 @@ fn without_permission_to_reset_a_usb_change_waits_for_a_reconnect_or_a_restart()
     let no_reset = ApplyOptions {
         allow_live_reset: false,
         other_input_available: true,
+        ..ApplyOptions::default()
     };
     let result = World::ok(w.set(
         KEYCHRON,
@@ -696,6 +697,7 @@ fn without_permission_to_reset_a_usb_change_waits_for_a_reconnect_or_a_restart()
     let only_keyboard = ApplyOptions {
         allow_live_reset: true,
         other_input_available: false,
+        ..ApplyOptions::default()
     };
     let result = World::ok(w.set(
         KEYCHRON,

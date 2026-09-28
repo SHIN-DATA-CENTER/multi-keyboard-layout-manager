@@ -138,6 +138,19 @@ pub enum Request {
         apply: ApplyOptions,
     },
     ResolveConflict(ResolveConflictRequest),
+    /// "削除する" of the first-run wizard (design m3 A.5, WP-E1): delete `names` from one
+    /// Keyboard-class devnode, only names its driver does not read (`mklm_core::check_cleanup`).
+    /// Journaled like any change; ends in `AwaitingConfirm` without a countdown, where the user
+    /// keeps (`Confirm`) or reverts it.
+    CleanupValues {
+        instance_id: String,
+        names: Vec<String>,
+    },
+    /// Saves the machine-wide setting "restore the keyboards when MKLM is uninstalled" (plan 3.13,
+    /// design m3 B.14, WP-E2) under the write lock. Not journaled.
+    SetMachineSettings {
+        restore_on_uninstall: bool,
+    },
 }
 
 /// Assign a layout to one keyboard (and the other collections of its physical device).

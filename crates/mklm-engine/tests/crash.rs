@@ -86,12 +86,15 @@ fn is_mklm_value(target: &WriteTarget, name: &str) -> bool {
     names.iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
+/// Read at boot: the global values and i8042prt's names on its devnodes. The same names on a HID
+/// collection are read by no driver (what a cleanup deletes, design m3 A.5).
 fn is_boot_time(target: &WriteTarget, name: &str) -> bool {
     match target {
         WriteTarget::Global => true,
-        WriteTarget::Device { .. } => {
-            name.eq_ignore_ascii_case(value_names::PS2_TYPE)
-                || name.eq_ignore_ascii_case(value_names::PS2_SUBTYPE)
+        WriteTarget::Device { instance_id } => {
+            !instance_id.to_ascii_uppercase().starts_with(r"HID\")
+                && (name.eq_ignore_ascii_case(value_names::PS2_TYPE)
+                    || name.eq_ignore_ascii_case(value_names::PS2_SUBTYPE))
         }
     }
 }
@@ -694,6 +697,92 @@ fn crash_resolution_that_keeps_a_migration() {
 }
 
 // ------------------------------------------------------------------------------------------
+// CleanupValues (design m3 A.5, WP-E1): the same invariants I1-I7
+// ------------------------------------------------------------------------------------------
+
+/// The HID pair 7/2 on the built-in PS/2 keyboard, where i8042prt never reads it.
+fn ps2_with_hid_values() -> World {
+    let w = World::dev_machine();
+    w.registry
+        .seed(&device(PS2), value_names::HID_TYPE, dword(7));
+    w.registry
+        .seed(&device(PS2), value_names::HID_SUBTYPE, dword(2));
+    w
+}
+
+/// The PS/2 pair 7/2 on the Keychron, where kbdhid never reads it.
+fn keychron_with_ps2_values() -> World {
+    let w = World::dev_machine();
+    w.registry
+        .seed(&device(KEYCHRON), value_names::PS2_TYPE, dword(7));
+    w.registry
+        .seed(&device(KEYCHRON), value_names::PS2_SUBTYPE, dword(2));
+    w
+}
+
+const PS2_HID_PAIR: [&str; 2] = [value_names::HID_TYPE, value_names::HID_SUBTYPE];
+const KEYCHRON_PS2_PAIR: [&str; 2] = [value_names::PS2_TYPE, value_names::PS2_SUBTYPE];
+
+#[test]
+fn crash_cleanup() {
+    let w = ps2_with_hid_values();
+    run_scenario(&scenario("cleanup", w.fork(), &w, |w| {
+        w.cleanup(PS2, &PS2_HID_PAIR)
+    }));
+}
+
+#[test]
+fn crash_cleanup_then_keep() {
+    let w = keychron_with_ps2_values();
+    run_scenario(&scenario("cleanup, keep", w.fork(), &w, |w| {
+        let result = w.cleanup(KEYCHRON, &KEYCHRON_PS2_PAIR)?;
+        w.confirm(&op_of(&result))
+    }));
+}
+
+#[test]
+fn crash_cleanup_revert() {
+    let pristine = ps2_with_hid_values();
+    let mut w = pristine.fork();
+    let op = op_of(&World::ok(w.cleanup(PS2, &PS2_HID_PAIR)));
+    run_scenario(&scenario("cleanup revert", w, &pristine, move |w| {
+        w.revert(&op, LIVE)
+    }));
+}
+
+#[test]
+fn crash_restore_after_a_kept_cleanup() {
+    let pristine = keychron_with_ps2_values();
+    let mut w = pristine.fork();
+    let op = op_of(&World::ok(w.cleanup(KEYCHRON, &KEYCHRON_PS2_PAIR)));
+    World::ok(w.confirm(&op));
+    run_scenario(&scenario("restore after a cleanup", w, &pristine, |w| {
+        w.restore_all(RestoreMode::Interactive)
+    }));
+}
+
+#[test]
+fn a_denied_cleanup_target_ends_recovery_in_conflict_once() {
+    denied_recovery(
+        "cleanup",
+        ps2_with_hid_values(),
+        &|w: &mut World| w.cleanup(PS2, &PS2_HID_PAIR),
+        device(PS2),
+        false,
+    );
+}
+
+#[test]
+fn read_errors_never_leave_a_cleanup_in_flight() {
+    sweep_read_errors("cleanup", &ps2_with_hid_values(), &|w| {
+        w.cleanup(PS2, &PS2_HID_PAIR)
+    });
+    let mut open = ps2_with_hid_values();
+    let op = op_of(&World::ok(open.cleanup(PS2, &PS2_HID_PAIR)));
+    sweep_read_errors("cleanup revert", &open, &move |w| w.revert(&op, LIVE));
+}
+
+// ------------------------------------------------------------------------------------------
 // I7: a target that refuses every write (design review C3)
 // ------------------------------------------------------------------------------------------
 
@@ -876,6 +965,7 @@ fn recovery_with_permission_to_reset_leaves_nothing_pending() {
                 &ApplyOptions {
                     allow_live_reset: true,
                     other_input_available: true,
+                    ..ApplyOptions::default()
                 },
                 &mut ScriptedSink::default(),
             )

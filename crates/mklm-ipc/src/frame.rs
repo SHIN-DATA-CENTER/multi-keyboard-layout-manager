@@ -50,10 +50,13 @@ pub struct FrameHeader {
     pub seq: u64,
 }
 
-/// Only the version of a frame, for a peer whose envelope differs from [`FrameHeader`] too.
-#[derive(Deserialize)]
-struct VersionProbe {
-    v: u32,
+/// Only the version of a frame, for a peer whose envelope differs from [`FrameHeader`] too: the
+/// `v` member of a JSON object. Anything else (an array, whose first element serde would take for
+/// `v` in a derived struct, or a `v` that is not a `u32`) has no version to report.
+fn version_probe(body: &[u8]) -> Option<u32> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let v = value.as_object()?.get("v")?.as_u64()?;
+    u32::try_from(v).ok()
 }
 
 /// Framing failed. Every variant ends the session, except a [`FrameError::Timeout`] from a
@@ -263,14 +266,19 @@ fn encode_frame<T: Serialize>(frame: &Frame<T>) -> Result<Vec<u8>, FrameError> {
 /// Checks the version from the envelope alone, then parses the whole frame.
 fn decode_body<T: DeserializeOwned>(body: &[u8]) -> Result<Frame<T>, FrameError> {
     let json_error = |error: serde_json::Error| FrameError::Json(error.to_string());
+    // An envelope is a JSON object. serde would also read an array as a struct (`[1, 2]` as
+    // `v` 1, `seq` 2), which is no frame of any version.
+    if body.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
+        return Err(FrameError::Json("a frame is not a JSON object".to_string()));
+    }
     let header: FrameHeader = match serde_json::from_slice(body) {
         Ok(header) => header,
         Err(error) => {
             // A peer of another version may shape its envelope differently: report the version
             // if there is one to report.
-            return Err(match serde_json::from_slice::<VersionProbe>(body) {
-                Ok(probe) if probe.v != PROTOCOL_VERSION => FrameError::Version {
-                    found: probe.v,
+            return Err(match version_probe(body) {
+                Some(found) if found != PROTOCOL_VERSION => FrameError::Version {
+                    found,
                     expected: PROTOCOL_VERSION,
                 },
                 _ => json_error(error),

@@ -22,6 +22,8 @@ features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_Properties",
     "Win32_Globalization",
+    # `RegisterClassW` / `WNDCLASSW` of the helper's hidden session-end window (session_end.rs).
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",

@@ -26,12 +26,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mklm_core::{
     BASELINE_REG_FILE, BootId, DEVICE_VALUE_NAMES, GLOBAL_VALUE_NAMES, KeyboardDevice,
-    KeyboardType, Liveness, OpId, ProcessIdentity, README_FILE, RESTORE_CMD_FILE, RecoveryAssets,
-    RegValue, Timestamp, WriteTarget,
+    KeyboardType, Liveness, OpId, ProcessIdentity, README_FILE, RESTORE_CMD_FILE,
+    RESTORE_ON_UNINSTALL_VALUE, RecoveryAssets, RegValue, Timestamp, WriteTarget,
 };
 use mklm_win::devctl::{self, DeviceArrival, PendingRestart, RestartResult, TimedRestart};
 use mklm_win::global::I8042PRT_PARAMETERS;
 use mklm_win::journal_store::{self, JournalStore, JournalSubkey};
+use mklm_win::machine_settings;
 use mklm_win::protected_dir::{self, DataDir, FileLock, ProtectedDir};
 use mklm_win::regwrite::{self, ReadOnlyKey, WritableKey};
 use mklm_win::{Error as WinError, ReadIssue, ReadIssueKind, elevation, proc_identity, session};
@@ -79,6 +80,8 @@ const DROP_JOIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Label of the journal store in errors.
 const JOURNAL_SUBJECT: &str = r"HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Journal";
+/// Label of the machine-wide settings key in errors.
+const SETTINGS_SUBJECT: &str = r"HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Settings";
 /// Labels of the protected data directory and its files in errors.
 const BASE_DIR_SUBJECT: &str = r"%ProgramData%\SHIN DATA CENTER\MKLM";
 const LOCK_FILE_SUBJECT: &str = r"%ProgramData%\SHIN DATA CENTER\MKLM\mklm.lock";
@@ -210,6 +213,19 @@ impl RegistryBackend for WinRegistry {
 
     fn flush_journal(&mut self) -> Result<(), BackendError> {
         self.with_journal(JournalStore::flush)
+    }
+
+    fn write_machine_setting(&mut self, name: &str, value: u32) -> Result<(), BackendError> {
+        // Mapped explicitly, one setting at a time; `machine_settings` checks the name against
+        // its static list again (design review S9).
+        if name.eq_ignore_ascii_case(RESTORE_ON_UNINSTALL_VALUE) {
+            machine_settings::write_restore_on_uninstall(value != 0)
+                .map_err(|error| backend_error(SETTINGS_SUBJECT, error))
+        } else {
+            Err(BackendError::NameNotAllowed {
+                name: name.to_string(),
+            })
+        }
     }
 }
 
@@ -755,6 +771,17 @@ mod tests {
                     name: name.to_string()
                 }),
                 "{target:?} {name}"
+            );
+        }
+        // Machine settings: only `RestoreOnUninstall` (design m3 WP-E2), refused before the
+        // Settings key is opened.
+        for name in ["Start", "RestoreOnUninstall2", "InstallDir", ""] {
+            assert_eq!(
+                registry.write_machine_setting(name, 1),
+                Err(BackendError::NameNotAllowed {
+                    name: name.to_string()
+                }),
+                "{name}"
             );
         }
     }

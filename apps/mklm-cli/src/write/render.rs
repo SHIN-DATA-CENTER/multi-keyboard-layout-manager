@@ -122,6 +122,10 @@ pub fn kind_text(kind: &OpKind) -> String {
             let silent = if *silent { " (uninstall)" } else { "" };
             format!("restore the values from before MKLM: {scope}{silent}")
         }
+        OpKind::Cleanup { instance_id, names } => format!(
+            "delete values the driver does not read from {instance_id}: {}",
+            names.join(", ")
+        ),
     }
 }
 

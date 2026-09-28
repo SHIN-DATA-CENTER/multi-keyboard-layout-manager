@@ -350,6 +350,7 @@ mod tests {
     const RESET: ApplyOptions = ApplyOptions {
         allow_live_reset: true,
         other_input_available: true,
+        countdown_seconds: mklm_core::DEFAULT_COUNTDOWN_SECONDS,
     };
 
     #[test]

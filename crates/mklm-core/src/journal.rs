@@ -19,15 +19,30 @@ use crate::allowlist::{ValueOp, WriteTarget};
 use crate::layout::PendingAction;
 use crate::model::{Layout, value_names};
 
-/// Version of the [`JournalEntry`] JSON schema this build writes. Readers accept this version and
-/// migrate older ones; an entry with a newer version makes the journal unreadable (writes stop).
-pub const JOURNAL_SCHEMA_VERSION: u32 = 1;
+/// Newest [`JournalEntry`] JSON schema this build reads and writes. Readers accept every version up
+/// to this one and migrate older ones; an entry with a newer version makes the journal unreadable
+/// (writes stop).
+///
+/// Version 2 (design m3 A.5, K.13) adds [`OpKind::Cleanup`] and nothing else, so only a cleanup
+/// entry is written as 2 ([`OpKind::schema_version`]): a build from before M3 then reports it as
+/// [`JournalError::NewerSchema`] ("update MKLM") instead of as malformed, and keeps reading every
+/// other entry, which stays at [`JOURNAL_SCHEMA_V1`].
+pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
+/// The first [`JournalEntry`] schema (M2): every kind but [`OpKind::Cleanup`] is still written in it.
+pub const JOURNAL_SCHEMA_V1: u32 = 1;
 /// Version of the [`BaselineRecord`] JSON schema this build writes (same rules as
 /// [`JOURNAL_SCHEMA_VERSION`]; design C.10 counts it as one of the three store versions).
 pub const BASELINE_SCHEMA_VERSION: u32 = 1;
 
 /// MKLM's machine-wide key, relative to `HKEY_LOCAL_MACHINE`. Not an MSI component (plan 2.2).
 pub const MKLM_KEY: &str = r"SOFTWARE\SHIN DATA CENTER\MKLM";
+/// Machine-wide settings (plan 3.13; design m3 B.14, WP-E2), relative to `HKEY_LOCAL_MACHINE`.
+/// Readable by everyone, written only by the helper under the write lock
+/// (`Request::SetMachineSettings`). Its value names are [`crate::MACHINE_SETTING_NAMES`].
+pub const MACHINE_SETTINGS_KEY: &str = r"SOFTWARE\SHIN DATA CENTER\MKLM\Settings";
+/// `REG_DWORD` under [`MACHINE_SETTINGS_KEY`]: 1 restores the keyboards when MKLM is uninstalled
+/// (the MSI's custom action reads it, M5), 0 leaves them. Absent means 1 (the plan's default).
+pub const RESTORE_ON_UNINSTALL_VALUE: &str = "RestoreOnUninstall";
 /// Journal root, relative to `HKEY_LOCAL_MACHINE`. Holds [`STORE_VERSION_VALUE`].
 pub const JOURNAL_KEY: &str = r"SOFTWARE\SHIN DATA CENTER\MKLM\Journal";
 /// One `REG_SZ` per operation: value name = [`OpId`], data = [`JournalEntry`] JSON.
@@ -258,12 +273,26 @@ pub(crate) fn is_ps2_value_name(name: &str) -> bool {
         || name.eq_ignore_ascii_case(value_names::PS2_SUBTYPE)
 }
 
+/// True for the instance ID of a HID collection (`HID\...`). hidclass enumerates those, and
+/// i8042prt never serves one: it drives the 8042 controller's devnodes (`ACPI\...`).
+pub(crate) fn is_hid_instance_id(instance_id: &str) -> bool {
+    instance_id
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"HID\"))
+}
+
 /// True when a change of this value takes effect only at a PC restart: every global value, and the
 /// i8042prt values of a device (HID values use other names, see [`crate::DEVICE_VALUE_NAMES`]).
+///
+/// i8042prt names on a HID collection are not: no driver reads them there (the values
+/// `CleanupValues` deletes and a restore may put back, design m3 A.5), so they never wait for a
+/// restart. Any other devnode is counted with its i8042prt names, on the safe side.
 pub(crate) fn is_boot_time_value(target: &WriteTarget, name: &str) -> bool {
     match target {
         WriteTarget::Global => true,
-        WriteTarget::Device { .. } => is_ps2_value_name(name),
+        WriteTarget::Device { instance_id } => {
+            is_ps2_value_name(name) && !is_hid_instance_id(instance_id)
+        }
     }
 }
 
@@ -413,7 +442,7 @@ impl ValueRecord {
     }
 
     /// True when a change of this value takes effect only at a PC restart (a global value, or an
-    /// i8042prt device value).
+    /// i8042prt device value; not one on a HID collection, which no driver reads).
     pub fn is_boot_time(&self) -> bool {
         is_boot_time_value(&self.target, &self.name)
     }
@@ -483,6 +512,32 @@ pub enum OpKind {
         #[serde(default)]
         supersedes: Vec<OpId>,
     },
+    /// "削除する" of the first-run wizard (plan 3.1 step 2; design m3 A.5, WP-E1): delete values
+    /// that the keyboard's driver does not read (the other driver stack's type/subtype pair,
+    /// [`crate::cleanup_candidates`]) from one Keyboard-class devnode. Nothing changes for the
+    /// driver, so nothing has to take effect: after `Written` it waits in `AwaitingConfirm`
+    /// without a countdown for the user's keep or revert. Baselines are recorded as for every
+    /// change, so "restore to baseline" puts the values back. Written with journal schema 2
+    /// ([`OpKind::schema_version`]).
+    Cleanup {
+        instance_id: String,
+        /// The value names deleted, in the order written.
+        names: Vec<String>,
+    },
+}
+
+impl OpKind {
+    /// The [`JournalEntry`] schema an entry of this kind is written in: 2 for
+    /// [`OpKind::Cleanup`] (which older builds must refuse as newer), else 1 (so that older
+    /// builds keep reading them). See [`JOURNAL_SCHEMA_VERSION`].
+    pub fn schema_version(&self) -> u32 {
+        match self {
+            OpKind::Cleanup { .. } => JOURNAL_SCHEMA_VERSION,
+            OpKind::SetLayout { .. } | OpKind::Migrate { .. } | OpKind::RestoreBaseline { .. } => {
+                JOURNAL_SCHEMA_V1
+            }
+        }
+    }
 }
 
 /// State of an operation (plan 2.3).
@@ -818,23 +873,28 @@ impl JournalEntry {
         self.records.iter().any(ValueRecord::is_boot_time)
     }
 
-    /// Serializes with [`JOURNAL_SCHEMA_VERSION`] (an entry read from an older schema is written
+    /// Serializes with the schema of its kind ([`OpKind::schema_version`]: 2 for a cleanup, else 1),
+    /// whatever `schema_version` it was read with (an entry read from an older schema is written
     /// back in the current one, C.10). Fields keep their declaration order, as in design C.3.
     pub fn to_json(&self) -> Result<String, JournalError> {
-        if self.schema_version == JOURNAL_SCHEMA_VERSION {
+        let version = self.kind.schema_version();
+        if self.schema_version == version {
             return serde_json::to_string(self).map_err(malformed);
         }
         let current = JournalEntry {
-            schema_version: JOURNAL_SCHEMA_VERSION,
+            schema_version: version,
             ..self.clone()
         };
         serde_json::to_string(&current).map_err(malformed)
     }
 
-    /// Parses an entry, migrating older schema versions; a newer version is an error.
+    /// Parses an entry of any schema up to [`JOURNAL_SCHEMA_VERSION`]; a newer version is an
+    /// error ([`JournalError::NewerSchema`]).
     ///
-    /// Version 1 is the first one, so there is nothing to migrate yet: fields added since version 1
-    /// was introduced are `#[serde(default)]` and read as absent from older documents (C.10).
+    /// Nothing needs migrating: version 2 only adds [`OpKind::Cleanup`], so a version 1 document
+    /// (every entry of M2, as the development machine holds them) parses as it is, and fields added
+    /// since version 1 was introduced are `#[serde(default)]` and read as absent from older
+    /// documents (C.10).
     pub fn from_json(json: &str) -> Result<Self, JournalError> {
         check_schema(json, JOURNAL_SCHEMA_VERSION)?;
         serde_json::from_str(json).map_err(malformed)
@@ -1618,11 +1678,11 @@ mod tests {
         let json = e.to_json().unwrap();
         assert_eq!(JournalEntry::from_json(&json).unwrap(), e);
 
-        // An entry migrated from an older schema is written back in the current one.
+        // An entry is written back in its kind's schema, whatever it was read with.
         let mut older = e.clone();
         older.schema_version = 0;
         let rewritten = JournalEntry::from_json(&older.to_json().unwrap()).unwrap();
-        assert_eq!(rewritten.schema_version, JOURNAL_SCHEMA_VERSION);
+        assert_eq!(rewritten.schema_version, JOURNAL_SCHEMA_V1);
     }
 
     #[test]
@@ -1631,20 +1691,20 @@ mod tests {
         let json = e
             .to_json()
             .unwrap()
-            .replacen("\"schema_version\":1", "\"schema_version\":2", 1);
+            .replacen("\"schema_version\":1", "\"schema_version\":3", 1);
         assert_eq!(
             JournalEntry::from_json(&json),
             Err(JournalError::NewerSchema {
-                found: 2,
-                supported: 1
+                found: 3,
+                supported: 2
             })
         );
-        // Even when the rest no longer parses as version 1.
+        // Even when the rest no longer parses as version 2.
         assert_eq!(
-            JournalEntry::from_json(r#"{"schema_version": 3, "totally": "different"}"#),
+            JournalEntry::from_json(r#"{"schema_version": 4, "totally": "different"}"#),
             Err(JournalError::NewerSchema {
-                found: 3,
-                supported: 1
+                found: 4,
+                supported: 2
             })
         );
         for bad in [
@@ -1663,6 +1723,150 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// The schema-1 journal of the development machine (M2 real tests) reads as it is: nothing
+    /// unreadable, the entries and baselines as stored, and an entry written back stays in
+    /// schema 1 (design m3 WP-E1: only cleanup entries are 2).
+    #[test]
+    fn the_schema_1_journal_of_the_development_machine_reads() {
+        let (ops, baselines) = crate::fixtures::schema_1_journal();
+        assert_eq!((ops.len(), baselines.len()), (2, 2));
+        let journal = Journal::parse(&ops, &baselines);
+        assert!(journal.unreadable.is_empty(), "{:?}", journal.unreadable);
+        assert_eq!(journal.entries.len(), 2);
+        assert_eq!(journal.baselines.len(), 2);
+        let [failed, kept] = [&journal.entries[0], &journal.entries[1]];
+        assert_eq!((failed.seq, failed.state), (4, OpState::Failed));
+        assert_eq!(failed.failure, Some(FailureReason::ConflictKeptCurrent));
+        assert_eq!((kept.seq, kept.state), (5, OpState::Confirmed));
+        assert!(journal.entries.iter().all(|e| e.schema_version == 1));
+        assert!(journal.baselines.iter().all(|b| b.schema_version == 1));
+        let key = ValueKey {
+            target: device(KEYCHRON),
+            name: HID_TYPE.into(),
+        };
+        assert_eq!(journal.baseline(&key).unwrap().value, dword(4));
+        let (latest, latest_record) = journal.latest_record(&key).unwrap();
+        assert_eq!(latest.op_id, kept.op_id);
+        assert_eq!(latest_record.last_written, Some(dword(4)));
+        // Written back: still schema 1, the same document.
+        for (entry, (_, stored)) in journal.entries.iter().zip(&ops) {
+            let json = entry.to_json().unwrap();
+            assert!(json.starts_with("{\"schema_version\":1,"), "{json}");
+            assert_eq!(json, *stored);
+        }
+        for (baseline, (name, stored)) in journal.baselines.iter().zip(&baselines) {
+            assert_eq!(baseline.key.canonical(), *name);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&baseline.to_json().unwrap()).unwrap(),
+                serde_json::from_str::<serde_json::Value>(stored).unwrap()
+            );
+        }
+        // A cleanup added next to them is schema 2; the old entries are untouched.
+        let mut cleanup = entry(
+            6,
+            cleanup_kind(PS2),
+            OpState::AwaitingConfirm,
+            vec![record(device(PS2), HID_TYPE, dword(7), RegValue::Absent)],
+        );
+        cleanup.schema_version = JOURNAL_SCHEMA_V1;
+        let mut ops = ops.clone();
+        ops.push((cleanup.op_id.to_string(), cleanup.to_json().unwrap()));
+        let journal = Journal::parse(&ops, &baselines);
+        assert!(journal.unreadable.is_empty());
+        assert_eq!(journal.entries[2].schema_version, JOURNAL_SCHEMA_VERSION);
+    }
+
+    /// A cleanup entry is written as schema 2, which a build of M2 (schema 1) reports as newer
+    /// rather than as malformed (design m3 K.13, J.12): "update MKLM", and every write stops
+    /// there. Every other kind stays readable for it.
+    #[test]
+    fn cleanup_entries_are_schema_2_and_newer_for_an_m2_build() {
+        assert_eq!(JOURNAL_SCHEMA_VERSION, 2);
+        let kinds = [
+            set_kind(KEYCHRON),
+            migrate_kind(),
+            restore_kind(false),
+            cleanup_kind(PS2),
+        ];
+        for kind in kinds {
+            let cleanup = matches!(kind, OpKind::Cleanup { .. });
+            let e = entry(1, kind, OpState::Confirmed, Vec::new());
+            let json = e.to_json().unwrap();
+            let expected = if cleanup { 2 } else { 1 };
+            assert_eq!(e.kind.schema_version(), expected);
+            assert!(
+                json.starts_with(&format!("{{\"schema_version\":{expected},")),
+                "{json}"
+            );
+            assert_eq!(JournalEntry::from_json(&json).unwrap(), e);
+            // What the M2 build's reader (schema 1) makes of it.
+            let m2 = check_schema(&json, JOURNAL_SCHEMA_V1);
+            if cleanup {
+                assert_eq!(
+                    m2,
+                    Err(JournalError::NewerSchema {
+                        found: 2,
+                        supported: 1
+                    })
+                );
+            } else {
+                assert_eq!(m2, Ok(1));
+            }
+        }
+        // The kind and its fields on the wire of the journal.
+        let e = entry(
+            1,
+            cleanup_kind(PS2),
+            OpState::AwaitingConfirm,
+            vec![record(device(PS2), HID_TYPE, dword(7), RegValue::Absent)],
+        );
+        let value: serde_json::Value = serde_json::from_str(&e.to_json().unwrap()).unwrap();
+        assert_eq!(
+            value["kind"],
+            serde_json::json!({
+                "kind": "cleanup",
+                "instance_id": PS2,
+                "names": ["KeyboardTypeOverride", "KeyboardSubtypeOverride"],
+            })
+        );
+        // A cleanup stored as schema 1 (never written so) still reads, and is written back as 2.
+        let old = e
+            .to_json()
+            .unwrap()
+            .replacen("\"schema_version\":2", "\"schema_version\":1", 1);
+        let read = JournalEntry::from_json(&old).unwrap();
+        assert!(
+            read.to_json()
+                .unwrap()
+                .starts_with("{\"schema_version\":2,")
+        );
+    }
+
+    #[test]
+    fn values_no_driver_reads_are_not_boot_time_values() {
+        // The PS/2 names on a HID collection (a cleanup of the Keychron) and the HID names on the
+        // PS/2 keyboard are read by no driver; the PS/2 keyboard's own pin and the global values
+        // are read at boot.
+        assert!(!record(device(KEYCHRON), PS2_TYPE, dword(7), RegValue::Absent).is_boot_time());
+        assert!(
+            !record(
+                device(&KEYCHRON.to_ascii_lowercase()),
+                PS2_SUBTYPE,
+                dword(2),
+                RegValue::Absent
+            )
+            .is_boot_time()
+        );
+        assert!(!record(device(PS2), HID_TYPE, dword(7), RegValue::Absent).is_boot_time());
+        assert!(record(device(PS2), PS2_TYPE, dword(7), RegValue::Absent).is_boot_time());
+        assert!(record(WriteTarget::Global, LAYER_DRIVER_JPN, sz("a"), sz("b")).is_boot_time());
+        // Any other devnode keeps its PS/2 names counted, on the safe side.
+        assert!(record(device(r"ROOT\X\0000"), PS2_TYPE, dword(7), dword(4)).is_boot_time());
+        assert!(is_hid_instance_id(r"hid\x"));
+        assert!(!is_hid_instance_id("HID"));
+        assert!(!is_hid_instance_id(r"HIDX\1"));
     }
 
     fn baseline_record(target: WriteTarget, name: &str, value: RegValue) -> BaselineRecord {
@@ -1702,7 +1906,7 @@ mod tests {
         let newer = entry(3, migrate_kind(), OpState::Planned, Vec::new())
             .to_json()
             .unwrap()
-            .replacen("\"schema_version\":1", "\"schema_version\":2", 1);
+            .replacen("\"schema_version\":1", "\"schema_version\":3", 1);
         let misplaced = entry(4, migrate_kind(), OpState::Planned, Vec::new());
         let ops = vec![
             (good.op_id.to_string(), good.to_json().unwrap()),
@@ -1741,8 +1945,8 @@ mod tests {
         assert_eq!(
             journal.unreadable[0].error,
             JournalError::NewerSchema {
-                found: 2,
-                supported: 1
+                found: 3,
+                supported: 2
             }
         );
         assert!(

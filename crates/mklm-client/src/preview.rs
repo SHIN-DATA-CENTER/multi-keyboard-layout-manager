@@ -45,8 +45,8 @@ pub fn nothing_to_change(snapshot: &SystemSnapshot, plan: &OperationPlan) -> boo
 /// `other_input_available = false`, to tell the user what that answer means.
 pub fn no_other_input(options: &ApplyOptions) -> ApplyOptions {
     ApplyOptions {
-        allow_live_reset: options.allow_live_reset,
         other_input_available: false,
+        ..*options
     }
 }
 

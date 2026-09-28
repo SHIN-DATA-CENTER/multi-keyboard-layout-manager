@@ -2,8 +2,8 @@
 
 use crate::allowlist::WriteTarget;
 use crate::journal::{
-    BootId, JOURNAL_SCHEMA_VERSION, JournalEntry, LayoutChoice, OpId, OpKind, OpState,
-    ProcessIdentity, RegValue, RestoreScope, Timestamp, TransitionRecord, ValueKey, ValueRecord,
+    BootId, JournalEntry, LayoutChoice, OpId, OpKind, OpState, ProcessIdentity, RegValue,
+    RestoreScope, Timestamp, TransitionRecord, ValueKey, ValueRecord,
 };
 use crate::model::Layout;
 
@@ -78,6 +78,17 @@ pub fn migrate_kind() -> OpKind {
     }
 }
 
+/// A cleanup of the HID pair on `instance_id` (an i8042prt keyboard, design m3 A.5).
+pub fn cleanup_kind(instance_id: &str) -> OpKind {
+    OpKind::Cleanup {
+        instance_id: instance_id.to_string(),
+        names: vec![
+            crate::model::value_names::HID_TYPE.to_string(),
+            crate::model::value_names::HID_SUBTYPE.to_string(),
+        ],
+    }
+}
+
 pub fn restore_kind(silent: bool) -> OpKind {
     OpKind::RestoreBaseline {
         scope: RestoreScope::All,
@@ -90,7 +101,7 @@ pub fn restore_kind(silent: bool) -> OpKind {
 pub fn entry(seq: u64, kind: OpKind, state: OpState, records: Vec<ValueRecord>) -> JournalEntry {
     let at = Timestamp(1_790_500_000_000 + seq * 1_000);
     JournalEntry {
-        schema_version: JOURNAL_SCHEMA_VERSION,
+        schema_version: kind.schema_version(),
         op_id: op_id(u32::try_from(seq).unwrap()),
         seq,
         kind,
