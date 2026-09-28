@@ -109,7 +109,7 @@ fn write_list(
                 ka.display_name.clone(),
                 driver_name(&ka.driver).to_string(),
                 transport_short(kb, ka.transport).to_string(),
-                yes_no(ka.is_internal).to_string(),
+                internal_short(kb, ka.is_internal).to_string(),
                 vid_pid(kb),
                 type_text(ka.stored_type),
                 reported_text(ka),
@@ -294,7 +294,15 @@ fn write_keyboard(
         or_dash(kb.device_description.as_deref()),
     )?;
     item(out, "Container", or_dash(kb.container_id.as_deref()))?;
-    item(out, "Internal", yes_no(ka.is_internal))?;
+    item(
+        out,
+        "Internal",
+        if kb.is_remote_desktop() {
+            "no (Remote Desktop; Windows lists it in the built-in container)"
+        } else {
+            yes_no(ka.is_internal)
+        },
+    )?;
     item(out, "Connected", yes_no(kb.present))?;
     item(out, "Driver", driver_name(&kb.driver))?;
     if kb.is_remote_desktop() {
@@ -511,6 +519,12 @@ fn driver_name(driver: &KeyboardDriver) -> &str {
         KeyboardDriver::Other(service) if service.is_empty() => "(no driver)",
         KeyboardDriver::Other(service) => service,
     }
+}
+
+/// The `list` table's "Internal": "no" for the Remote Desktop keyboard, which Windows puts in the
+/// built-in container although it is not built in (as the GUI, which gives it no "内蔵" badge).
+fn internal_short(kb: &KeyboardDevice, is_internal: bool) -> &'static str {
+    yes_no(is_internal && !kb.is_remote_desktop())
 }
 
 /// Short name for the `list` table (the plan's UI terms: USB / BT / BLE / PS/2 / I2C), and
@@ -1027,12 +1041,19 @@ mod tests {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        // Read-only and no layout: the client's type is not what the session types with.
+        // Read-only and no layout: the client's type is not what the session types with. Not
+        // built in, although Windows puts it in the built-in container.
         assert!(row.starts_with("5 リモート"), "{text}");
         assert!(
-            row.ends_with(" terminpt Remote Desktop yes - - unknown - - -"),
+            row.ends_with(" terminpt Remote Desktop no - - unknown - - -"),
             "{text}"
         );
+        // The PC's own keyboard is still built in.
+        let ps2 = line_with(&text, " i8042prt ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(ps2.contains(" i8042prt PS/2 yes "), "{text}");
         assert!(line_with(&text, "Problems").ends_with("none"));
 
         let text = status(&snapshot, &assessment, true);
@@ -1041,6 +1062,14 @@ mod tests {
                 .ends_with("yes (client reports keyboard type 0x7/0x2)")
         );
         assert!(text.contains("    Transport        Remote Desktop (virtual)\n"));
+        assert!(text.contains(
+            "    Internal         no (Remote Desktop; Windows lists it in the built-in container)\n"
+        ));
+        assert_eq!(
+            text.matches("    Internal         yes\n").count(),
+            1,
+            "{text}"
+        );
         assert!(
             line_with(&text, "the Remote Desktop client sends")
                 .ends_with("session started; read-only")
