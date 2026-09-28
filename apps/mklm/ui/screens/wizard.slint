@@ -2,12 +2,13 @@
 // and sign-in screen), 3 the keyboards' layouts (JIS / US per connected keyboard, the in-place
 // detection, problem values on their row), 4 summary (nothing to do, one migration that carries
 // the assignments, or ordinary changes one at a time), then finish with the sign-in start switch.
-// Rust (src/state/wizard.rs, src/vm/wizard.rs) decides everything; this file lays it out.
+// Rust (src/state/wizard.rs, src/vm/wizard.rs) decides everything; this file lays it out. Every
+// control is off while a dialog is open over the page (`Modal`, design m3 E.1).
 
 import { Button, CheckBox, ComboBox } from "std-widgets.slint";
 import { KeyTestVm, Tone, WizardKeyboardVm, WizardVm } from "../structs.slint";
 import {
-    Banner, Body, Caption, DialogBody, DialogButtons, KeyTestArea, PageHeader, RadioList,
+    Banner, Body, Caption, DialogBody, DialogButtons, KeyTestArea, Modal, PageHeader, RadioList,
 } from "../widgets.slint";
 
 // A combo box that follows `value` also after the user picked from it (a pick replaces the
@@ -48,6 +49,7 @@ component WizardRow inherits VerticalLayout {
         if root.keyboard.can-choose: ValueComboBox {
             model: ["JIS", "US"];
             value: root.keyboard.choice;
+            enabled: !Modal.open;
             accessible-label: @tr("Layout of {}", root.keyboard.name);
             selected => {
                 root.choose(self.current-index);
@@ -64,6 +66,7 @@ component WizardRow inherits VerticalLayout {
         ValueComboBox {
             model: [@tr("Leave it (recommended)"), @tr("Delete it (the driver does not read it)")];
             value: root.keyboard.problem-choice;
+            enabled: !Modal.open;
             accessible-label: @tr("What to do with the values of {}", root.keyboard.name);
             selected => {
                 root.problem-choice(self.current-index);
@@ -122,6 +125,7 @@ export component WizardScreen inherits VerticalLayout {
             alignment: start;
             Button {
                 text: @tr("Language settings");
+                enabled: !Modal.open;
                 clicked => {
                     root.open-settings-page(0);
                 }
@@ -129,6 +133,7 @@ export component WizardScreen inherits VerticalLayout {
 
             Button {
                 text: @tr("Advanced keyboard settings");
+                enabled: !Modal.open;
                 clicked => {
                     root.open-settings-page(1);
                 }
@@ -136,6 +141,7 @@ export component WizardScreen inherits VerticalLayout {
 
             Button {
                 text: @tr("Region (copy settings)");
+                enabled: !Modal.open;
                 clicked => {
                     root.open-settings-page(3);
                 }
@@ -178,12 +184,14 @@ export component WizardScreen inherits VerticalLayout {
 
             if root.vm.detect-choose-text != "": Button {
                 text: root.vm.detect-choose-text;
+                enabled: !Modal.open;
                 clicked => {
                     root.use-detected();
                 }
             }
             Button {
                 text: @tr("Start again");
+                enabled: !Modal.open;
                 clicked => {
                     root.restart-detection();
                 }
@@ -213,6 +221,7 @@ export component WizardScreen inherits VerticalLayout {
         if root.vm.autostart-visible: CheckBox {
             text: @tr("Start MKLM on the taskbar (inside \"^\") when I sign in");
             checked <=> root.autostart;
+            enabled: !Modal.open;
             toggled => {
                 root.autostart-toggled(self.checked);
             }
@@ -220,6 +229,7 @@ export component WizardScreen inherits VerticalLayout {
         if root.vm.details != "": CheckBox {
             text: @tr("Show the technical details");
             checked <=> root.show-details;
+            enabled: !Modal.open;
         }
         if root.show-details && root.vm.details != "": Caption {
             text: root.vm.details;
@@ -234,6 +244,7 @@ export component WizardScreen inherits VerticalLayout {
         alignment: stretch;
         if root.vm.back-visible: Button {
             text: @tr("Back");
+            enabled: !Modal.open;
             clicked => {
                 root.back();
             }
@@ -244,6 +255,7 @@ export component WizardScreen inherits VerticalLayout {
 
         Button {
             text: @tr("Set up later");
+            enabled: !Modal.open;
             clicked => {
                 root.skip();
             }
@@ -251,6 +263,7 @@ export component WizardScreen inherits VerticalLayout {
 
         if root.vm.secondary-text != "": Button {
             text: root.vm.secondary-text;
+            enabled: !Modal.open;
             clicked => {
                 root.secondary();
             }
@@ -258,7 +271,7 @@ export component WizardScreen inherits VerticalLayout {
         Button {
             text: root.vm.next-text != "" ? root.vm.next-text : @tr("Next");
             primary: true;
-            enabled: root.vm.can-next;
+            enabled: root.vm.can-next && !Modal.open;
             clicked => {
                 root.next();
             }
