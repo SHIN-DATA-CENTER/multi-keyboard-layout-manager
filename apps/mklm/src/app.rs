@@ -2,28 +2,39 @@
 //! turns callbacks and worker messages into [`AppMsg`]s, runs [`state::update`] and carries out
 //! the [`Effect`]s. Nothing here blocks: reads go to the I/O worker ([`IoWorker`]), helper
 //! sessions to a session worker ([`SessionWorker`]).
+//!
+//! The process (design m3 F): start-up checks with a message box for what stops MKLM (F.6), the
+//! single instance (F.1, [`single_instance`]), settings with a `.bad` fallback (F.4), the log
+//! (F.8, [`log`]), closing, quitting and the end of the Windows session (F.5), and a bounded wait
+//! for the I/O worker's writes before the process ends.
 
 use std::cell::{Cell, RefCell};
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use mklm_client::launch::LaunchConfig;
 use mklm_client::orchestrator::{LaunchError, LaunchFailure, RequestEnd, RequestReport};
 use mklm_client::run_once::RunOnceError;
 use mklm_core::assess;
+use mklm_win::instance::{InstanceCommand, InstanceReply};
 use slint::winit_030::WinitWindowAccessor;
 use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::winit_030::winit::window::Theme as WinitTheme;
 use slint::{CloseRequestResponse, ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::args::{Args, StartMode};
-use crate::i18n::{Lang, LangChoice};
+use crate::autostart::{self, AutostartTask};
+use crate::i18n::{self, Lang, LangChoice, StartupError};
 use crate::input_capture::InputCapture;
-use crate::reader::{IoTask, IoWorker};
-use crate::settings::Settings;
+use crate::log;
+use crate::reader::{self, IoTask, IoWorker};
+use crate::settings::{Settings, SettingsStore, load_or_default};
+use crate::single_instance::{self, Claim, InstanceService};
 use crate::state::{
     self, AppMsg, AppState, Effect, OverlayKind, Page, QuitAnswer, SessionId, SessionOutcome,
+    SessionPhase,
 };
 use crate::theme::{ResolvedTheme, ThemeMode, is_dark_rgb};
 use crate::tray;
@@ -38,6 +49,10 @@ use crate::{BUILD_ID, MIN_BUILD};
 /// How long the end of the Windows session waits for a running helper session (design m3 F.5).
 const END_SESSION_WAIT: Duration = Duration::from_secs(3);
 
+/// How long quitting waits for the I/O worker's queued writes: settings, the RunOnce rule, the
+/// autostart value (design m3 F.5).
+const QUIT_IO_WAIT: Duration = Duration::from_secs(1);
+
 thread_local! {
     static APP: RefCell<Option<Rc<Controller>>> = const { RefCell::new(None) };
 }
@@ -45,8 +60,7 @@ thread_local! {
 /// Handles `msg` now (UI thread only). The controller is cloned out of the thread-local first,
 /// so no borrow is held while it runs.
 pub fn dispatch(msg: AppMsg) {
-    let app = APP.with(|app| app.borrow().clone());
-    if let Some(app) = app {
+    if let Some(app) = current_app() {
         app.handle(msg);
     }
 }
@@ -54,6 +68,28 @@ pub fn dispatch(msg: AppMsg) {
 /// Hands `msg` to the UI thread (any thread). Dropped when the event loop has ended.
 pub fn post(msg: AppMsg) {
     let _ = slint::invoke_from_event_loop(move || dispatch(msg));
+}
+
+/// The controller while the UI runs. Never panics on a borrow: the shell window's procedure may
+/// run while the thread-local is being set or cleared.
+fn current_app() -> Option<Rc<Controller>> {
+    APP.with(|app| app.try_borrow().ok().and_then(|app| app.clone()))
+}
+
+/// A command from a second MKLM process (UI thread; design m3 F.1): `activate` shows the window
+/// without changing the page (review A8), `quit` quits as the tray's "終了" does. The reply is
+/// `busy` while the quit has to wait for a connected helper session (design m3 F.5).
+fn instance_command(command: InstanceCommand) -> InstanceReply {
+    let quit_waits = current_app().is_some_and(|app| {
+        app.state
+            .try_borrow()
+            .is_ok_and(|state| matches!(state.session, SessionPhase::Running { .. }))
+    });
+    dispatch(match command {
+        InstanceCommand::Activate => AppMsg::Activate,
+        InstanceCommand::Quit => AppMsg::QuitRequested,
+    });
+    single_instance::reply_for(command, quit_waits)
 }
 
 /// Owns the window, the tray, the workers and the state (UI thread only).
@@ -65,7 +101,8 @@ struct Controller {
     io: IoWorker,
     session: RefCell<Option<SessionWorker>>,
     watchers: RefCell<Watchers>,
-    settings_dir: Option<std::path::PathBuf>,
+    /// The single-instance pipe's thread (design m3 F.1); `None` without the pipe.
+    instance: RefCell<Option<InstanceService>>,
     theme_mode: Cell<ThemeMode>,
     os_dark: Cell<Option<bool>>,
     /// The keyboard list's model, kept for the window's lifetime and updated row by row, so
@@ -85,12 +122,65 @@ impl std::fmt::Debug for Controller {
 
 impl Controller {
     fn handle(&self, msg: AppMsg) {
+        self.log_message(&msg);
         let effects = {
             let mut state = self.state.borrow_mut();
             state::update(&mut state, msg)
         };
         for effect in effects {
             self.run(effect);
+        }
+    }
+
+    /// Logs what the log keeps of `msg` (design m3 F.8): read problems, helper sessions,
+    /// quitting. Never key presses, the key test or the detection (plan 2.2): those messages are
+    /// not matched here, and no message is logged in its `Debug` form.
+    fn log_message(&self, msg: &AppMsg) {
+        let Ok(state) = self.state.try_borrow() else {
+            return;
+        };
+        let current = |session: SessionId| state.session.id() == Some(session);
+        match msg {
+            AppMsg::SystemRead(read)
+                if state.read.as_ref().map(|last| &last.warnings) != Some(&read.warnings) =>
+            {
+                for warning in &read.warnings {
+                    log::warn(format!("read: {warning}"));
+                }
+                if read.summary.unreadable > 0 {
+                    log::warn(format!(
+                        "read: {} journal entries are of a newer MKLM",
+                        read.summary.unreadable
+                    ));
+                }
+            }
+            AppMsg::SessionNotice { session, notice } if current(*session) => {
+                log::info(format!("session {session}: {}", log::notice_text(notice)));
+            }
+            AppMsg::RecoveryQuestion { session, countdown } if current(*session) => {
+                log::info(format!(
+                    "session {session}: asking whether to recover after the lost helper (countdown: {countdown})"
+                ));
+            }
+            AppMsg::AnswerRecovery(yes) if state.recovery_question.is_some() => {
+                log::info(format!(
+                    "the user chose to recover {}",
+                    if *yes { "now" } else { "later" }
+                ));
+            }
+            AppMsg::SessionEnded { session, outcome } if current(*session) => {
+                log::info(format!(
+                    "session {session} ended: {}",
+                    log::session_end_text(outcome)
+                ));
+            }
+            AppMsg::Activate => log::info("activated"),
+            AppMsg::QuitRequested => log::info("quit requested"),
+            AppMsg::QuitConfirmAnswered(answer) => {
+                log::info(format!("quit confirmation answered: {answer:?}"));
+            }
+            AppMsg::AutostartToggled(on) => log::info(format!("sign-in start switched: {on}")),
+            _ => {}
         }
     }
 
@@ -102,19 +192,13 @@ impl Controller {
                 self.io.send(IoTask::PrepareChange { token, gate });
             }
             Effect::CopyText(text) => {
-                // WP-W2: `copy_text_to_clipboard` (English diagnostics only, design m3 B.17).
+                // English diagnostics only, never keys (design m3 B.17).
                 if let Err(error) = mklm_win::ui::copy_text_to_clipboard(&text) {
-                    eprintln!("mklm: warning: copying the details failed: {error}");
+                    log::warn(format!("copying the details failed: {error}"));
                 }
             }
-            Effect::SaveSettings(settings) => {
-                if let Some(dir) = &self.settings_dir {
-                    self.io.send(IoTask::SaveSettings {
-                        settings,
-                        dir: dir.clone(),
-                    });
-                }
-            }
+            Effect::SaveSettings(settings) => self.io.send(IoTask::SaveSettings(settings)),
+            Effect::Autostart(task) => self.io.send(IoTask::Autostart(task)),
             Effect::StartSession {
                 session,
                 request,
@@ -145,9 +229,30 @@ impl Controller {
                 self.poll_input_language(false);
             }
             Effect::Quit => {
+                log::info("quitting");
                 let _ = slint::quit_event_loop();
             }
-            Effect::Render => self.render(),
+            Effect::Render => {
+                self.update_tray();
+                self.render();
+            }
+        }
+    }
+
+    /// The tray's tooltip and its "確認待ちの変更をすべて元に戻す…" item (design m3 B.16), also
+    /// while the window is hidden.
+    fn update_tray(&self) {
+        let Ok(state) = self.state.try_borrow() else {
+            return;
+        };
+        let summary = state.read.as_ref().map(|read| &read.summary);
+        let tray_state = tray::tray_state(
+            summary,
+            state::navigation_enabled(&state),
+            state.lang.unwrap_or(Lang::Ja),
+        );
+        if let Some(tray) = self.tray.borrow().as_ref() {
+            tray::update_tray(tray, &tray_state);
         }
     }
 
@@ -166,8 +271,15 @@ impl Controller {
             .as_ref()
             .is_some_and(|worker| !worker.finished())
         {
+            log::warn(format!(
+                "session {session}: not started, the previous session worker still runs"
+            ));
             return;
         }
+        log::info(format!(
+            "session {session}: starting {}",
+            log::request_kind(&request)
+        ));
         let started = LaunchConfig::current(BUILD_ID, self.hwnd())
             .map_err(|error| error.to_string())
             .and_then(|launch| {
@@ -315,6 +427,18 @@ impl Controller {
         self.window
             .set_navigation_enabled(state::navigation_enabled(&state));
         self.window.set_overlay(overlay(state.overlay));
+        // The sign-in start switch shows the Run value itself (design m3 F.3).
+        let switch = autostart::view(state.autostart.as_ref());
+        self.window.set_settings_autostart(switch.on);
+        self.window
+            .set_settings_autostart_available(switch.available);
+        self.window.set_settings_autostart_note(
+            switch
+                .note
+                .map(|note| i18n::autostart_note(note, lang))
+                .unwrap_or_default()
+                .into(),
+        );
         self.render_change(&state, lang);
         self.render_session(&state, lang);
         let Some(read) = &state.read else {
@@ -623,50 +747,105 @@ fn page(screen: ui::Screen) -> Page {
     }
 }
 
-/// Shows a start-up problem and returns the exit code. WP-W2 / WP-U6: `mklm_win::ui::error_dialog`
-/// (a message box), since the window may not exist yet and release builds have no console
-/// (design m3 F.6).
-fn fatal(message: &str) -> ExitCode {
-    eprintln!("mklm: {message}");
+/// Shows a problem that stops MKLM (design m3 F.6) and returns the exit code: logged, and shown
+/// in a message box in `lang` (`mklm_win::ui::error_dialog`), since the window may not exist and
+/// release builds have no console. `detail` is the English diagnostic. No message box for
+/// `--quit` (the installer may run unattended) or `--exit-after` (an automated check): nobody
+/// would close it.
+fn fatal(error: StartupError, detail: &str, lang: Lang) -> ExitCode {
+    log::error(detail);
+    if ERROR_DIALOGS.load(Ordering::Relaxed) {
+        let (title, text) = i18n::startup_error(error, detail, lang);
+        mklm_win::ui::error_dialog(&title, &text);
+    }
     ExitCode::FAILURE
 }
 
+/// Whether [`fatal`] shows its message box (set once at start-up).
+static ERROR_DIALOGS: AtomicBool = AtomicBool::new(true);
+
 /// Runs the GUI until it quits (design m3 F).
 pub fn run(args: Args) -> ExitCode {
-    if let Err(error) = mklm_win::restrict_dll_search() {
-        eprintln!("mklm: warning: DLL search could not be restricted: {error}");
+    // First, before anything loads a DLL (design m3 F.7). The GUI runs unelevated: a failure is
+    // only a warning (like the CLI, design m3 F.6), logged once the log is open.
+    let dll_search = mklm_win::restrict_dll_search();
+    ERROR_DIALOGS.store(
+        args.start != StartMode::Quit && args.exit_after.is_none(),
+        Ordering::Relaxed,
+    );
+    let log_dir = mklm_win::ui::user_log_dir();
+    log::init(log_dir.as_ref().ok().cloned());
+    log::info(format!(
+        "MKLM {} (build {BUILD_ID}) starting ({:?})",
+        env!("CARGO_PKG_VERSION"),
+        args.start
+    ));
+    if let Err(error) = &log_dir {
+        log::warn(format!("no log folder: {error}"));
+    }
+    // Until the settings are read, a problem is shown in the language of the command line or of
+    // Windows.
+    let early_lang = args
+        .lang
+        .unwrap_or(LangChoice::System)
+        .resolve(mklm_win::ui::user_default_ui_language());
+    if let Err(error) = dll_search {
+        log::warn(format!("the DLL search could not be restricted: {error}"));
     }
     for unknown in &args.unknown {
-        eprintln!("mklm: ignoring the argument {unknown:?}");
+        log::warn(format!("ignoring the argument {unknown:?}"));
     }
     match mklm_win::read_os_info(&mut Vec::new()) {
         Ok(os) if os.build < MIN_BUILD => {
-            return fatal(&format!(
-                "MKLM needs Windows 11 24H2 (build {MIN_BUILD}) or later; this PC runs build {}",
-                os.build
-            ));
+            return fatal(
+                StartupError::WindowsTooOld { build: os.build },
+                &format!(
+                    "MKLM needs Windows 11 24H2 (build {MIN_BUILD}) or later; this PC runs build {}",
+                    os.build
+                ),
+                early_lang,
+            );
         }
         Ok(_) => {}
-        Err(error) => return fatal(&format!("reading the Windows version failed: {error}")),
+        Err(error) => {
+            return fatal(
+                StartupError::WindowsUnknown,
+                &format!("reading the Windows version failed: {error}"),
+                early_lang,
+            );
+        }
     }
-    if args.start == StartMode::Quit {
-        // WP-W1: `mklm_win::instance::send_to_instance(Quit)`.
-        eprintln!("mklm: --quit is not implemented yet (WP-W1)");
-        return ExitCode::SUCCESS;
-    }
-    // WP-W1 / WP-U6: the single instance (`single_instance`) comes here.
+    // One GUI per session (design m3 F.1): a second start hands over and ends here, and so does
+    // `--quit`. The guard holds the instance mutex until the process ends.
+    let _instance_guard = match single_instance::claim(args.start) {
+        Claim::Run(guard) => guard,
+        Claim::Exit(code) => {
+            log::info("this process ends here (one MKLM per session)");
+            return code;
+        }
+    };
 
-    let settings_dir = mklm_win::ui::user_settings_dir().ok();
-    let settings = settings_dir
-        .as_deref()
-        .and_then(|dir| match Settings::load(dir) {
-            Ok(settings) => settings,
-            Err(error) => {
-                eprintln!("mklm: warning: settings.toml is unreadable ({error}); using defaults");
-                None
-            }
-        })
-        .unwrap_or_default();
+    // Settings (design m3 F.4): read once, before the window; an unreadable file is kept as
+    // settings.toml.bad at the next save.
+    let settings_dir = match mklm_win::ui::user_settings_dir() {
+        Ok(dir) => Some(dir),
+        Err(error) => {
+            log::warn(format!(
+                "no settings folder ({error}); the settings are not saved"
+            ));
+            None
+        }
+    };
+    let (settings, loaded) = match settings_dir.as_deref() {
+        Some(dir) => load_or_default(dir),
+        None => (Settings::default(), Ok(())),
+    };
+    if let Err(error) = &loaded {
+        log::warn(format!(
+            "settings.toml is unreadable ({error}); using the defaults, and keeping it as settings.toml.bad at the next save"
+        ));
+    }
+    let store = settings_dir.map(|dir| SettingsStore::new(dir, loaded.is_err()));
     let lang = args
         .lang
         .unwrap_or(settings.language)
@@ -692,14 +871,24 @@ pub fn run(args: Args) -> ExitCode {
         .with_winit_custom_application_handler(InputCapture::default())
         .select();
     if let Err(error) = selected {
-        return fatal(&format!("the window system could not start: {error}"));
+        return fatal(
+            StartupError::CannotStart,
+            &format!("the window system could not start: {error}"),
+            lang,
+        );
     }
     let window = match AppWindow::new() {
         Ok(window) => window,
-        Err(error) => return fatal(&format!("the window could not be created: {error}")),
+        Err(error) => {
+            return fatal(
+                StartupError::CannotStart,
+                &format!("the window could not be created: {error}"),
+                lang,
+            );
+        }
     };
     if let Err(error) = slint::select_bundled_translation(lang.bundle()) {
-        eprintln!("mklm: warning: language {:?}: {error}", lang.bundle());
+        log::warn(format!("language {:?}: {error}", lang.bundle()));
     }
     window
         .global::<ui::Theme>()
@@ -710,11 +899,21 @@ pub fn run(args: Args) -> ExitCode {
     window.set_settings_theme_index(theme_mode.index());
     window.set_settings_language_index(args.lang.unwrap_or(settings.language).index());
 
-    let io = match IoWorker::start() {
+    let io = match IoWorker::start(store) {
         Ok(io) => io,
-        Err(error) => return fatal(&format!("the I/O worker could not start: {error}")),
+        Err(error) => {
+            return fatal(
+                StartupError::CannotStart,
+                &format!("the I/O worker could not start: {error}"),
+                lang,
+            );
+        }
     };
-    let start_hidden = args.start == StartMode::Tray && settings.wizard.completed;
+    // `--tray` (sign-in) and `--post-reboot` (RunOnce) start in the taskbar corner once the
+    // wizard is done; the first read of the journal shows the window when it needs the user
+    // (design m3 F.2).
+    let start_hidden =
+        matches!(args.start, StartMode::Tray | StartMode::PostReboot) && settings.wizard.completed;
     let controller = Rc::new(Controller {
         window: window.clone_strong(),
         icon,
@@ -723,6 +922,7 @@ pub fn run(args: Args) -> ExitCode {
             lang: Some(lang),
             settings,
             visible: !start_hidden,
+            reveal_on_attention: start_hidden,
             // An elevated GUI shows no UAC prompt, so none is explained (design m3 B.5); when it
             // cannot be told, the explanation is shown (harmless).
             elevated: mklm_win::elevation::is_elevated().unwrap_or(false),
@@ -731,7 +931,7 @@ pub fn run(args: Args) -> ExitCode {
         io,
         session: RefCell::new(None),
         watchers: RefCell::new(Watchers::default()),
-        settings_dir,
+        instance: RefCell::new(None),
         theme_mode: Cell::new(theme_mode),
         os_dark: Cell::new(os_dark),
         keyboards: Rc::new(VecModel::default()),
@@ -748,75 +948,35 @@ pub fn run(args: Args) -> ExitCode {
     wire_callbacks(&window);
     window.window().on_close_requested(|| {
         // Without a tray icon there would be no way back to a hidden window: quit instead
-        // (design m3 B.16). The session rules of design m3 F.5 are in `state::update`.
-        let has_tray = APP
-            .with(|app| app.borrow().clone())
-            .is_some_and(|app| app.tray.borrow().is_some());
+        // (design m3 B.16). The rules of design m3 F.5 are in `state::update`, which hides the
+        // window itself when it goes to the tray: the first × keeps it for the in-window
+        // notice, and a × during a session never closes it.
+        let has_tray = current_app().is_some_and(|app| app.tray.borrow().is_some());
         dispatch(if has_tray {
             AppMsg::WindowCloseRequested
         } else {
             AppMsg::QuitRequested
         });
-        CloseRequestResponse::HideWindow
+        CloseRequestResponse::KeepWindowShown
     });
     match tray::create_tray(&controller.icon) {
         Ok(tray) => *controller.tray.borrow_mut() = Some(tray),
-        Err(error) => eprintln!("mklm: warning: the tray icon could not be created: {error}"),
+        Err(error) => log::warn(format!("the tray icon could not be created: {error}")),
     }
     let (watchers, warnings) = Watchers::start(
         |os| {
             let dark = os.dark;
             let _ = slint::invoke_from_event_loop(move || {
-                let app = APP.with(|app| app.borrow().clone());
-                if let Some(app) = app {
+                if let Some(app) = current_app() {
                     app.os_dark.set(Some(dark));
                     app.apply_theme();
                 }
             });
         },
-        |event| {
-            use mklm_win::ui::shell_window::ShellEvent;
-            match event {
-                ShellEvent::TaskbarCreated => {
-                    let _ = slint::invoke_from_event_loop(|| {
-                        let app = APP.with(|app| app.borrow().clone());
-                        if let Some(app) = app {
-                            app.tray.borrow_mut().take();
-                            if let Ok(tray) = tray::create_tray(&app.icon) {
-                                *app.tray.borrow_mut() = Some(tray);
-                            }
-                        }
-                    });
-                }
-                ShellEvent::SettingChange(area) if area == "ImmersiveColorSet" => {
-                    let _ = slint::invoke_from_event_loop(|| {
-                        let app = APP.with(|app| app.borrow().clone());
-                        if let Some(app) = app {
-                            app.apply_theme();
-                        }
-                    });
-                }
-                ShellEvent::SettingChange(area) if area == "intl" => post(AppMsg::Refresh),
-                ShellEvent::Resumed => post(AppMsg::Refresh),
-                // Directly, not scheduled: a scheduled closure may not run before the session
-                // ends (design m3 F.5, review A5). The flag is an atomic outside any RefCell.
-                ShellEvent::QueryEndSession => {
-                    if worker::cancel_current_session() {
-                        // A journaled change is open: make sure the next sign-in shows it,
-                        // whatever the journal says at this instant (one short HKCU write).
-                        let _ = mklm_client::run_once::PostRebootCommand::Gui
-                            .command_line()
-                            .map(|line| mklm_win::session::register_post_reboot(&line));
-                    }
-                }
-                ShellEvent::EndSession => worker::wait_for_current_session(END_SESSION_WAIT),
-                ShellEvent::SettingChange(_) => {}
-            }
-        },
+        shell_event,
         |scale| {
             let _ = slint::invoke_from_event_loop(move || {
-                let app = APP.with(|app| app.borrow().clone());
-                if let Some(app) = app {
+                if let Some(app) = current_app() {
                     app.window
                         .global::<ui::Theme>()
                         .set_font_scale(scale as f32);
@@ -825,9 +985,11 @@ pub fn run(args: Args) -> ExitCode {
         },
     );
     for warning in warnings {
-        eprintln!("mklm: warning: {warning}");
+        log::warn(format!("watcher: {warning}"));
     }
     *controller.watchers.borrow_mut() = watchers;
+    // Second starts reach this instance from now on (they retry for 5 s).
+    *controller.instance.borrow_mut() = InstanceService::start(instance_command);
 
     // The title bar once the winit window exists (it is created by the event loop).
     let weak = window.as_weak();
@@ -835,22 +997,30 @@ pub fn run(args: Args) -> ExitCode {
         let Some(window) = weak.upgrade() else { return };
         let created = window.window().winit_window().await.is_ok();
         drop(window);
-        if created {
-            let app = APP.with(|app| app.borrow().clone());
-            if let Some(app) = app {
-                app.apply_theme();
-            }
+        if created && let Some(app) = current_app() {
+            app.apply_theme();
         }
     });
 
+    // Automated checks end through the normal quit path (design m3 F.2, F.5).
     let exit_timer = slint::Timer::default();
     if let Some(after) = args.exit_after {
         exit_timer.start(slint::TimerMode::SingleShot, after, || {
-            let _ = slint::quit_event_loop();
+            dispatch(AppMsg::QuitRequested);
         });
     }
 
     controller.run(Effect::Read);
+    if args.exit_after.is_none() {
+        // The per-user writes of a start: the post-reboot RunOnce rule (design m2 C17, m3 A.4)
+        // and the autostart repair (F.3).
+        controller.run(Effect::RunOnceRule);
+        controller.run(Effect::Autostart(AutostartTask::Repair));
+    } else {
+        // An automated check (`--exit-after`) only reads: it must not change the user's HKCU.
+        log::info("automated check: the start-up RunOnce rule and autostart repair are skipped");
+        controller.run(Effect::Autostart(AutostartTask::Read));
+    }
     if start_hidden {
         controller.run(Effect::Render);
     } else {
@@ -860,15 +1030,94 @@ pub fn run(args: Args) -> ExitCode {
     }
     let result = slint::run_event_loop_until_quit();
 
-    // Tear down on the UI thread in a defined order (tray first, so it leaves the notification
-    // area; then the watchers). A running session worker is left to finish by itself.
-    // WP-U6: wait up to 1 s for the I/O worker's queued saves (design m3 F.5).
+    // Tear down on the UI thread in a defined order (design m3 F.5): the tray first, so that it
+    // leaves the taskbar corner; the watchers; the single-instance pipe. A running session
+    // worker is left to finish by itself (its RunOnce rule runs before its end is posted). The
+    // I/O worker's queued writes get up to 1 s.
     controller.tray.borrow_mut().take();
     *controller.watchers.borrow_mut() = Watchers::default();
+    controller.instance.borrow_mut().take();
+    if !reader::wait_for_writes(QUIT_IO_WAIT) {
+        log::warn("quitting before every queued settings or registry write was done");
+    }
     APP.with(|app| app.borrow_mut().take());
     match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => fatal(&format!("the event loop failed: {error}")),
+        Ok(()) => {
+            log::info("MKLM ended");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fatal(
+            StartupError::Stopped,
+            &format!("the event loop failed: {error}"),
+            lang,
+        ),
+    }
+}
+
+/// The shell window's broadcasts (UI thread, inside its window procedure; design m3 A.4 rule 3).
+/// Work is scheduled with `invoke_from_event_loop`, except at the end of the Windows session
+/// (design m3 F.5, review A5): a scheduled closure may not run before the session ends.
+fn shell_event(event: mklm_win::ui::shell_window::ShellEvent) {
+    use mklm_win::ui::shell_window::ShellEvent;
+    match event {
+        ShellEvent::TaskbarCreated => {
+            let _ = slint::invoke_from_event_loop(|| {
+                if let Some(app) = current_app() {
+                    app.tray.borrow_mut().take();
+                    match tray::create_tray(&app.icon) {
+                        Ok(tray) => *app.tray.borrow_mut() = Some(tray),
+                        Err(error) => {
+                            log::warn(format!("the tray icon could not be re-created: {error}"));
+                        }
+                    }
+                    app.update_tray();
+                }
+            });
+        }
+        ShellEvent::SettingChange(area) if area == "ImmersiveColorSet" => {
+            let _ = slint::invoke_from_event_loop(|| {
+                if let Some(app) = current_app() {
+                    app.apply_theme();
+                }
+            });
+        }
+        ShellEvent::SettingChange(area) if area == "intl" => post(AppMsg::Refresh),
+        ShellEvent::Resumed => post(AppMsg::Refresh),
+        // Directly: the cancel flag is an atomic outside any RefCell. A countdown is reverted at
+        // the relay's next tick; a reconnect wait is left open (it stays waiting for the user).
+        ShellEvent::QueryEndSession => {
+            log::info("the Windows session may end");
+            if worker::cancel_current_session() {
+                // A journaled change is open: make sure the next sign-in shows it, whatever the
+                // journal says at this instant (one short HKCU write).
+                let registered = mklm_client::run_once::PostRebootCommand::Gui
+                    .command_line()
+                    .map_err(|error| error.to_string())
+                    .and_then(|line| {
+                        mklm_win::session::register_post_reboot(&line)
+                            .map_err(|error| error.to_string())
+                    });
+                match registered {
+                    Ok(()) => log::info("an open change: the post-reboot check is registered"),
+                    Err(error) => {
+                        log::warn(format!("registering the post-reboot check failed: {error}"))
+                    }
+                }
+            }
+        }
+        // The process may be ended as soon as this returns: bounded waits (the session worker
+        // 3 s, the queued writes 1 s), then quit.
+        ShellEvent::EndSession => {
+            log::info("the Windows session ends");
+            if !worker::wait_for_current_session(END_SESSION_WAIT) {
+                log::warn("the Windows session ends while a helper session is still open");
+            }
+            if !reader::wait_for_writes(QUIT_IO_WAIT) {
+                log::warn("the Windows session ends before every queued write was done");
+            }
+            let _ = slint::quit_event_loop();
+        }
+        ShellEvent::SettingChange(_) => {}
     }
 }
 
@@ -897,33 +1146,33 @@ fn wire_callbacks(window: &AppWindow) {
             4 => SettingsPage::Taskbar,
             _ => SettingsPage::SignInOptions,
         };
-        let app = APP.with(|app| app.borrow().clone());
-        if let Some(app) = app {
+        if let Some(app) = current_app() {
             app.io.send(IoTask::OpenSettingsPage(page));
         }
     });
+    // Applied at once (design m3 C.1, D.3) and saved in settings.toml (F.4).
     window.on_theme_selected(|index| {
-        let app = APP.with(|app| app.borrow().clone());
-        if let Some(app) = app {
-            app.theme_mode.set(ThemeMode::from_index(index));
+        let theme = ThemeMode::from_index(index);
+        if let Some(app) = current_app() {
+            app.theme_mode.set(theme);
             app.apply_theme();
-            // WP-U6: save the choice in settings.toml.
         }
+        dispatch(AppMsg::ThemeChosen(theme));
     });
     window.on_language_selected(|index| {
         let choice = LangChoice::from_index(index);
         let lang = choice.resolve(mklm_win::ui::user_default_ui_language());
-        let app = APP.with(|app| app.borrow().clone());
-        if let Some(app) = app {
-            let _ = slint::select_bundled_translation(lang.bundle());
+        if let Err(error) = slint::select_bundled_translation(lang.bundle()) {
+            log::warn(format!("language {:?}: {error}", lang.bundle()));
+        }
+        if let Some(app) = current_app() {
             app.window
                 .global::<ui::Theme>()
                 .set_font_family(lang.font_family().into());
-            app.state.borrow_mut().lang = Some(lang);
-            app.render();
-            // WP-U6: save the choice in settings.toml.
         }
+        dispatch(AppMsg::LanguageChosen { choice, lang });
     });
+    window.on_autostart_toggled(|on| dispatch(AppMsg::AutostartToggled(on)));
     wire_change_flow(window);
     // WP-U1 to WP-U7 wire the remaining callbacks (wizard, restart, conflict, journal,
     // recovery, settings) through `state::update`.

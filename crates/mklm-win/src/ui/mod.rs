@@ -7,7 +7,7 @@
 //! - [`shell_window`]: the hidden window for `TaskbarCreated`, `WM_SETTINGCHANGE`, end of session
 //!   and power resume.
 //! - Here: the active input language of the GUI thread, the Windows display language, the
-//!   per-user settings folder, foreground hand-over for the single instance, opening an
+//!   per-user settings and log folders, foreground hand-over for the single instance, opening an
 //!   allowlisted settings page, copying diagnostics to the clipboard, and the start-up error
 //!   message box.
 
@@ -26,13 +26,14 @@ use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, SetCl
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
 use windows::Win32::UI::Shell::{
-    FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW,
+    FOLDERID_LocalAppData, FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+    ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DestroyWindow, HWND_MESSAGE, MB_ICONERROR, MB_OK,
     MB_SETFOREGROUND, MessageBoxW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
-use windows::core::{PCWSTR, w};
+use windows::core::{GUID, PCWSTR, w};
 
 use crate::elevation::ComApartment;
 use crate::error::Error;
@@ -48,15 +49,32 @@ pub fn user_default_ui_language() -> u16 {
 /// `%APPDATA%\SHIN DATA CENTER\MKLM` (`FOLDERID_RoamingAppData`): where the GUI keeps its per-user
 /// `settings.toml` (plan 3.7). Only computed; nothing is created here.
 pub fn user_settings_dir() -> Result<PathBuf, Error> {
-    // SAFETY: FOLDERID_RoamingAppData is a static GUID; no token (the current user). The returned
-    // string is freed below.
-    let text = unsafe { SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None) }
+    Ok(known_folder(&FOLDERID_RoamingAppData)?
+        .join("SHIN DATA CENTER")
+        .join("MKLM"))
+}
+
+/// `%LOCALAPPDATA%\SHIN DATA CENTER\MKLM\logs` (`FOLDERID_LocalAppData`): where the GUI writes its
+/// log (design m3 F.8). Local, not roaming: a log belongs to this PC. Only computed; nothing is
+/// created here.
+pub fn user_log_dir() -> Result<PathBuf, Error> {
+    Ok(known_folder(&FOLDERID_LocalAppData)?
+        .join("SHIN DATA CENTER")
+        .join("MKLM")
+        .join("logs"))
+}
+
+/// The current user's known folder `id` (`SHGetKnownFolderPath`), never from the environment.
+fn known_folder(id: &GUID) -> Result<PathBuf, Error> {
+    // SAFETY: `id` is a valid known-folder GUID; no token (the current user). The returned string
+    // is freed below.
+    let text = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None) }
         .map_err(|error| win32("SHGetKnownFolderPath", &error))?;
     // SAFETY: on success `text` is a NUL-terminated string.
-    let base = PathBuf::from(OsString::from_wide(unsafe { text.as_wide() }));
+    let path = PathBuf::from(OsString::from_wide(unsafe { text.as_wide() }));
     // SAFETY: allocated by SHGetKnownFolderPath with CoTaskMemAlloc; freed once, after the copy.
     unsafe { CoTaskMemFree(Some(text.0.cast_const().cast())) };
-    Ok(base.join("SHIN DATA CENTER").join("MKLM"))
+    Ok(path)
 }
 
 /// The input language (HKL) active on the calling thread, low 32 bits (e.g. `0x04110411` for the
@@ -329,5 +347,15 @@ mod tests {
         assert_eq!(japanese.len(), 9);
         assert_eq!(japanese.last(), Some(&0));
         assert_eq!(String::from_utf16_lossy(&japanese[..8]), "管理用プログラム");
+    }
+
+    /// The per-user folders come from the known-folder API (read only; nothing is created).
+    #[test]
+    fn per_user_folders() {
+        let settings = user_settings_dir().expect("roaming app data");
+        let logs = user_log_dir().expect("local app data");
+        assert!(settings.is_absolute() && logs.is_absolute());
+        assert!(settings.ends_with(r"SHIN DATA CENTER\MKLM"), "{settings:?}");
+        assert!(logs.ends_with(r"SHIN DATA CENTER\MKLM\logs"), "{logs:?}");
     }
 }

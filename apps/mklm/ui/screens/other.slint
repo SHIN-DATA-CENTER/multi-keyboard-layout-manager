@@ -266,6 +266,8 @@ export component SettingsScreen inherits VerticalLayout {
     // 0 = Japanese, 1 = English, 2 = system.
     in-out property <int> language-index;
     in-out property <bool> autostart;
+    // Off while Task Manager disabled the value (design m3 F.3): MKLM never turns it back on.
+    in property <bool> autostart-available: true;
     in property <string> autostart-note;
     // "確認の時間を長くする（60 秒）" (review U10).
     in-out property <bool> long-countdown;
@@ -325,6 +327,7 @@ export component SettingsScreen inherits VerticalLayout {
         CheckBox {
             text: @tr("Start MKLM on the taskbar (inside \"^\") when I sign in");
             checked <=> root.autostart;
+            enabled: root.autostart-available;
             toggled => {
                 root.autostart-toggled(self.checked);
             }

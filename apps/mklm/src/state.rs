@@ -31,9 +31,11 @@ use mklm_core::{
 };
 use mklm_ipc::Request;
 
+use crate::autostart::{AutostartReport, AutostartTask};
 use crate::detect::{Detection, Press, Verdict};
-use crate::i18n::Lang;
+use crate::i18n::{Lang, LangChoice};
 use crate::settings::{PhysicalKind, PhysicalLayout, PhysicalSource, Settings};
+use crate::theme::ThemeMode;
 use crate::vm::change::{ApplyMethod, DraftPlan, InputActivity, MethodDefault};
 use crate::vm::keytest::{self, Expected, KeyContext, KeyTest};
 use crate::vm::session::Stage;
@@ -302,6 +304,11 @@ pub struct AppState {
     pub visible: bool,
     /// Quitting once the running session ends (design m3 F.5).
     pub quit_pending: bool,
+    /// Started in the taskbar corner (`--tray`, `--post-reboot`): the first read of the journal
+    /// shows the window when it needs the user ([`needs_user_at_start`], design m3 F.2).
+    pub reveal_on_attention: bool,
+    /// The autostart value as the I/O worker last read it (design m3 F.3); `None` until then.
+    pub autostart: Option<AutostartReport>,
 }
 
 /// Something that happened (a user action, a worker's answer, a watcher).
@@ -403,7 +410,21 @@ pub enum AppMsg {
     CloseNoticeAnswered {
         quit: bool,
     },
+    /// Tray "終了", the single instance's `quit`, the window's × without a tray icon,
+    /// `--exit-after` (design m3 F.5).
     QuitRequested,
+    /// A theme was chosen in Settings (already applied to the window): save it (design m3 F.4).
+    ThemeChosen(ThemeMode),
+    /// A language was chosen in Settings (the translation is already switched); `lang` is the
+    /// resolved language.
+    LanguageChosen {
+        choice: LangChoice,
+        lang: Lang,
+    },
+    /// The sign-in start switch (design m3 B.14, F.3).
+    AutostartToggled(bool),
+    /// The I/O worker read (and maybe changed) the autostart value.
+    AutostartRead(Box<AutostartReport>),
 }
 
 /// Something `app.rs` must do.
@@ -437,6 +458,9 @@ pub enum Effect {
     RunOnceRule,
     /// Put text on the clipboard ("詳細をコピー": English diagnostics only, never keys).
     CopyText(String),
+    /// Read or change the autostart value on the I/O worker (design m3 F.3); answered by
+    /// [`AppMsg::AutostartRead`].
+    Autostart(AutostartTask),
     ShowWindow,
     HideWindow,
     Quit,
@@ -507,11 +531,17 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             if page == Page::Main || page == Page::Journal {
                 effects.insert(0, Effect::Read);
             }
+            if page == Page::Settings {
+                // The switch shows the value itself, which Task Manager may have changed.
+                effects.insert(0, Effect::Autostart(AutostartTask::Read));
+            }
             effects
         }
         AppMsg::SystemRead(read) => {
+            let mut effects = reveal_at_start(state, &read);
             state.read = Some(*read);
-            vec![Effect::Render]
+            effects.push(Effect::Render);
+            effects
         }
         AppMsg::ResultReadArrived => {
             if !state.result_read_pending {
@@ -817,7 +847,67 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             effects
         }
         AppMsg::QuitRequested => quit_requested(state),
+        AppMsg::ThemeChosen(theme) => {
+            if state.settings.theme == theme {
+                return Vec::new();
+            }
+            state.settings.theme = theme;
+            vec![Effect::SaveSettings(Box::new(state.settings.clone()))]
+        }
+        AppMsg::LanguageChosen { choice, lang } => {
+            state.lang = Some(lang);
+            let mut effects = Vec::new();
+            if state.settings.language != choice {
+                state.settings.language = choice;
+                effects.push(Effect::SaveSettings(Box::new(state.settings.clone())));
+            }
+            effects.push(Effect::Render);
+            effects
+        }
+        AppMsg::AutostartToggled(on) => {
+            // Never turned back on when Task Manager turned it off (design m3 F.3): the switch
+            // is unavailable then, and a stale click is dropped here too.
+            let disabled = state
+                .autostart
+                .as_ref()
+                .and_then(|report| report.state.as_ref().ok())
+                .is_some_and(|value| value.disabled_by_user);
+            if disabled && on {
+                return vec![Effect::Render];
+            }
+            vec![Effect::Autostart(AutostartTask::Set(on))]
+        }
+        AppMsg::AutostartRead(report) => {
+            state.autostart = Some(*report);
+            vec![Effect::Render]
+        }
     }
+}
+
+/// The journal needs the user at start-up (design m3 F.2): the post-reboot check, a recovery or
+/// a conflict. MKLM started in the taskbar corner then shows its window.
+pub fn needs_user_at_start(summary: &StartupSummary) -> bool {
+    summary.post_reboot_due()
+        || summary.needs_recovery()
+        || summary
+            .with(mklm_core::Attention::Conflict)
+            .next()
+            .is_some()
+}
+
+/// The first read of the journal after a start in the taskbar corner: show the window when the
+/// journal needs the user. A read that could not get the journal leaves the decision to the next
+/// one; later reads never pop the window up.
+fn reveal_at_start(state: &mut AppState, read: &SystemRead) -> Vec<Effect> {
+    if !state.reveal_on_attention || read.journal.is_none() {
+        return Vec::new();
+    }
+    state.reveal_on_attention = false;
+    if state.visible || !needs_user_at_start(&read.summary) {
+        return Vec::new();
+    }
+    state.visible = true;
+    vec![Effect::ShowWindow]
 }
 
 /// The snapshot a draft's page describes: the preparation's, else the display read's.
@@ -2532,5 +2622,187 @@ mod tests {
         update(&mut state, AppMsg::OpenChange(KEYCHRON_ROW.into()));
         update(&mut state, AppMsg::Navigate(Page::Settings));
         assert!(state.draft.is_none());
+    }
+
+    // --- The process (design m3 F; WP-U6) ---
+
+    #[test]
+    fn theme_and_language_choices_are_saved() {
+        // T-SET-1: the choices survive a restart through settings.toml (design m3 F.4).
+        let mut state = AppState::default();
+        let effects = update(&mut state, AppMsg::ThemeChosen(ThemeMode::Dark));
+        assert!(
+            matches!(effects.as_slice(), [Effect::SaveSettings(saved)] if saved.theme == ThemeMode::Dark)
+        );
+        // The same choice again writes nothing.
+        assert!(update(&mut state, AppMsg::ThemeChosen(ThemeMode::Dark)).is_empty());
+        let effects = update(
+            &mut state,
+            AppMsg::LanguageChosen {
+                choice: LangChoice::En,
+                lang: Lang::En,
+            },
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::SaveSettings(saved), Effect::Render]
+                if saved.language == LangChoice::En && saved.theme == ThemeMode::Dark
+        ));
+        assert_eq!(state.lang, Some(Lang::En));
+        assert_eq!(
+            update(
+                &mut state,
+                AppMsg::LanguageChosen {
+                    choice: LangChoice::En,
+                    lang: Lang::En,
+                },
+            ),
+            vec![Effect::Render]
+        );
+    }
+
+    fn autostart_read(value: crate::autostart::RunValue) -> AppMsg {
+        AppMsg::AutostartRead(Box::new(AutostartReport {
+            state: Ok(value),
+            write_error: None,
+        }))
+    }
+
+    #[test]
+    fn the_autostart_switch_goes_through_the_io_worker() {
+        // Design m3 F.3: the switch shows the value itself, read when Settings opens.
+        let mut state = AppState::default();
+        assert_eq!(
+            update(&mut state, AppMsg::Navigate(Page::Settings)),
+            vec![Effect::Autostart(AutostartTask::Read), Effect::Render]
+        );
+        assert_eq!(
+            update(&mut state, AppMsg::AutostartToggled(false)),
+            vec![Effect::Autostart(AutostartTask::Set(false))]
+        );
+        let off = crate::autostart::RunValue::default();
+        assert_eq!(
+            update(&mut state, autostart_read(off.clone())),
+            vec![Effect::Render]
+        );
+        assert_eq!(
+            state.autostart.as_ref().map(|report| &report.state),
+            Some(&Ok(off))
+        );
+        assert_eq!(
+            update(&mut state, AppMsg::AutostartToggled(true)),
+            vec![Effect::Autostart(AutostartTask::Set(true))]
+        );
+        // Turned off in Task Manager: never turned back on (T-AUTO-2). Turning it off is fine.
+        update(
+            &mut state,
+            autostart_read(crate::autostart::RunValue {
+                command_line: Some(r#""C:\MKLM\mklm.exe" --tray"#.into()),
+                disabled_by_user: true,
+            }),
+        );
+        assert_eq!(
+            update(&mut state, AppMsg::AutostartToggled(true)),
+            vec![Effect::Render]
+        );
+        assert_eq!(
+            update(&mut state, AppMsg::AutostartToggled(false)),
+            vec![Effect::Autostart(AutostartTask::Set(false))]
+        );
+    }
+
+    fn summary_with(attention: mklm_core::Attention) -> StartupSummary {
+        StartupSummary {
+            items: vec![mklm_client::startup::AttentionItem {
+                op: OpRef {
+                    op_id: op(),
+                    kind: OpKind::Migrate {
+                        standard: Layout::Jis,
+                        assignments: Vec::new(),
+                    },
+                    state: OpState::Written,
+                },
+                attention,
+            }],
+            ..StartupSummary::default()
+        }
+    }
+
+    fn read_with(summary: StartupSummary) -> AppMsg {
+        AppMsg::SystemRead(Box::new(SystemRead {
+            snapshot: None,
+            warnings: Vec::new(),
+            journal: Some(Journal::default()),
+            boot: None,
+            summary,
+        }))
+    }
+
+    #[test]
+    fn a_start_in_the_tray_shows_the_window_only_when_the_journal_needs_the_user() {
+        use mklm_core::Attention;
+        // Design m3 F.2: a recovery or a conflict (and the post-reboot check) shows the window.
+        for attention in [Attention::Recover, Attention::Conflict] {
+            let mut state = AppState {
+                reveal_on_attention: true,
+                ..AppState::default()
+            };
+            assert_eq!(
+                update(&mut state, read_with(summary_with(attention))),
+                vec![Effect::ShowWindow, Effect::Render],
+                "{attention:?}"
+            );
+            assert!(state.visible && !state.reveal_on_attention);
+        }
+        // A read without the journal decides nothing yet.
+        let mut state = AppState {
+            reveal_on_attention: true,
+            ..AppState::default()
+        };
+        let mut unread = read_with(summary_with(Attention::Recover));
+        if let AppMsg::SystemRead(read) = &mut unread {
+            read.journal = None;
+        }
+        assert_eq!(update(&mut state, unread), vec![Effect::Render]);
+        assert!(state.reveal_on_attention && !state.visible);
+        // A change waiting for a restart only shows in the tooltip and the banner.
+        assert_eq!(
+            update(
+                &mut state,
+                read_with(summary_with(Attention::WaitingForReboot))
+            ),
+            vec![Effect::Render]
+        );
+        assert!(!state.visible && !state.reveal_on_attention);
+        // Only the first read decides; later ones never pop the window up.
+        assert_eq!(
+            update(&mut state, read_with(summary_with(Attention::Recover))),
+            vec![Effect::Render]
+        );
+        assert!(!state.visible);
+        // A window started visible is never "shown" again by a read.
+        let mut state = AppState {
+            visible: true,
+            ..AppState::default()
+        };
+        assert_eq!(
+            update(&mut state, read_with(summary_with(Attention::Recover))),
+            vec![Effect::Render]
+        );
+    }
+
+    #[test]
+    fn an_activation_shows_the_window_and_keeps_the_page() {
+        // Review A8: a second start (or the tray) never replaces the page the user is on.
+        let mut state = ready_state();
+        update(&mut state, AppMsg::OpenChange(KEYCHRON_ROW.into()));
+        state.visible = false;
+        assert_eq!(
+            update(&mut state, AppMsg::Activate),
+            vec![Effect::ShowWindow, Effect::Read, Effect::Render]
+        );
+        assert!(state.visible);
+        assert_eq!(state.page, Page::Change);
+        assert!(state.draft.is_some());
     }
 }

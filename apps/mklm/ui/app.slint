@@ -203,6 +203,8 @@ export component AppWindow inherits Window {
     in-out property <int> settings-theme-index: 2;
     in-out property <int> settings-language-index: 2;
     in-out property <bool> settings-autostart;
+    // False while Task Manager has turned it off (MKLM never turns it back on) or it is unread.
+    in property <bool> settings-autostart-available: true;
     in property <string> settings-autostart-note;
     in-out property <bool> settings-long-countdown;
     in property <bool> settings-restore-on-uninstall: true;
@@ -472,6 +474,7 @@ export component AppWindow inherits Window {
                 theme-index <=> root.settings-theme-index;
                 language-index <=> root.settings-language-index;
                 autostart <=> root.settings-autostart;
+                autostart-available: root.settings-autostart-available;
                 autostart-note: root.settings-autostart-note;
                 long-countdown <=> root.settings-long-countdown;
                 restore-on-uninstall: root.settings-restore-on-uninstall;
