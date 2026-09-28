@@ -103,6 +103,8 @@ export component AppWindow inherits Window {
     in-out property <bool> show-hidden;
     callback assign(string);
     callback apply-now(string);
+    callback toggle-hidden(string);
+    callback show-hidden-toggled(bool);
     callback toggle-identify();
     callback banner-action();
     callback refresh();
@@ -296,6 +298,12 @@ export component AppWindow inherits Window {
                 }
                 apply-now(id) => {
                     root.apply-now(id);
+                }
+                toggle-hidden(id) => {
+                    root.toggle-hidden(id);
+                }
+                show-hidden-toggled(on) => {
+                    root.show-hidden-toggled(on);
                 }
                 toggle-identify => {
                     root.toggle-identify();

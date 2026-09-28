@@ -6,12 +6,11 @@
 use std::cell::{Cell, RefCell};
 use std::process::ExitCode;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mklm_client::launch::LaunchConfig;
 use mklm_client::orchestrator::{LaunchError, LaunchFailure, RequestEnd, RequestReport};
 use mklm_client::run_once::RunOnceError;
-use mklm_core::assess;
 use slint::winit_030::WinitWindowAccessor;
 use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::winit_030::winit::window::Theme as WinitTheme;
@@ -28,8 +27,7 @@ use crate::state::{
 use crate::theme::{ResolvedTheme, ThemeMode, is_dark_rgb};
 use crate::tray;
 use crate::ui::{self, AppWindow, TrayIcon};
-use crate::vm::keyboards::{KeyboardRow, ListOptions, keyboard_rows};
-use crate::vm::status::status_line;
+use crate::vm::keyboards::{KeyboardRow, MainInput, main_screen};
 use crate::vm::{self, ListOp, keytest, list_ops};
 use crate::watchers::Watchers;
 use crate::worker::{self, SessionWorker};
@@ -75,6 +73,8 @@ struct Controller {
     shown_rows: RefCell<Vec<KeyboardRow>>,
     /// Polls the input language while the window is visible (design m3 A.4 rule 5).
     layout_timer: slint::Timer,
+    /// Gathers keyboard arrivals and removals before the list is read again (design m3 B.2).
+    settle_timer: slint::Timer,
 }
 
 impl std::fmt::Debug for Controller {
@@ -106,6 +106,12 @@ impl Controller {
                 if let Err(error) = mklm_win::ui::copy_text_to_clipboard(&text) {
                     eprintln!("mklm: warning: copying the details failed: {error}");
                 }
+            }
+            Effect::ScheduleSettle(delay) => {
+                self.settle_timer
+                    .start(slint::TimerMode::SingleShot, delay, || {
+                        dispatch(AppMsg::KeyboardsSettled);
+                    });
             }
             Effect::SaveSettings(settings) => {
                 if let Some(dir) = &self.settings_dir {
@@ -323,14 +329,16 @@ impl Controller {
         let Some(snapshot) = &read.snapshot else {
             return;
         };
-        let assessment = assess(snapshot);
-        let status = status_line(
-            &assessment,
-            &snapshot.input,
-            state.active_hkl,
-            &read.summary,
+        let main = main_screen(&MainInput {
+            snapshot,
+            journal: read.journal.as_ref().zip(read.boot),
+            summary: &read.summary,
+            settings: &state.settings,
+            active_hkl: state.active_hkl,
+            highlighted: state.highlighted.as_deref(),
             lang,
-        );
+        });
+        let status = main.status;
         self.window.set_status(ui::StatusVm {
             input_method: status.input_method.into(),
             input_method_tone: tone(status.input_method_tone),
@@ -343,44 +351,45 @@ impl Controller {
             banner_tone: tone(status.banner_tone),
             banner_action: status.banner_action.into(),
         });
-        // WP-U1: the blocking attention and the `apply_pending` keyboards from the journal.
-        let blocked_reason = read
-            .summary
-            .blocks_writes()
-            .then(|| crate::i18n::cannot_change_now(None, lang));
-        let rows = keyboard_rows(
-            snapshot,
-            &assessment,
-            &ListOptions {
-                settings: &state.settings,
-                highlighted: state.highlighted.as_deref(),
-                blocked_reason: blocked_reason.as_deref(),
-                apply_now: &[],
-                lang,
-            },
-        );
-        self.update_keyboards(rows);
+        self.window
+            .set_identify_announcement(main.announcement.into());
+        self.update_keyboards(main.rows);
     }
 
-    /// The change page (design m3 B.4, B.5; WP-U3).
+    /// The change page (design m3 B.4, B.5; WP-U3), also for "今すぐ反映…" (design m3 B.12).
     fn render_change(&self, state: &AppState, lang: Lang) {
         let Some(draft) = &state.draft else {
             return;
         };
-        let display = state.read.as_ref().and_then(|read| read.snapshot.as_ref());
-        let other_name = draft
-            .other_keyboard
-            .as_deref()
-            .map(|id| state::display_name(state, id));
-        let page = vm::change::change_page(&vm::change::ChangeContext {
-            draft,
-            display,
-            uac_notice_seen: state.settings.change.uac_notice_seen,
-            elevated: state.elevated,
-            seconds: vm::change::countdown_seconds(&state.settings),
-            other_name: other_name.as_deref(),
-            lang,
-        });
+        let page = if draft.apply_now {
+            let blocked = state
+                .read
+                .as_ref()
+                .and_then(|read| vm::status::blocked_reason(&read.summary, lang));
+            vm::keyboards::apply_now_page(&vm::keyboards::ApplyNowContext {
+                draft,
+                offered: !state::apply_now_targets(state).is_empty(),
+                blocked: blocked.as_deref(),
+                uac_notice_seen: state.settings.change.uac_notice_seen,
+                elevated: state.elevated,
+                lang,
+            })
+        } else {
+            let display = state.read.as_ref().and_then(|read| read.snapshot.as_ref());
+            let other_name = draft
+                .other_keyboard
+                .as_deref()
+                .map(|id| state::display_name(state, id));
+            vm::change::change_page(&vm::change::ChangeContext {
+                draft,
+                display,
+                uac_notice_seen: state.settings.change.uac_notice_seen,
+                elevated: state.elevated,
+                seconds: vm::change::countdown_seconds(&state.settings),
+                other_name: other_name.as_deref(),
+                lang,
+            })
+        };
         let index = |index: Option<usize>| index.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1);
         let choices = |rows: &[vm::change::ChoiceRow]| {
             ModelRc::new(VecModel::from(
@@ -438,7 +447,9 @@ impl Controller {
             detect_feedback_tone: tone(page.detect.feedback_tone),
             detect_verdict: page.detect.verdict.into(),
             detect_choose_text: page.detect.choose_text.into(),
-            restore_mode: page.restore,
+            // No layout choices, detection or "MKLM 導入前に戻す…" on the restore preview and on
+            // "今すぐ反映…".
+            restore_mode: page.restore || draft.apply_now,
             summary: page.summary.into(),
             standard_visible: page.standard_visible,
             standard_choices: choices(&page.standard_choices),
@@ -559,6 +570,7 @@ fn keyboard_row_vm(row: KeyboardRow) -> ui::KeyboardRowVm {
                 .collect::<Vec<_>>(),
         )),
         highlighted: row.highlighted,
+        hidden: row.hidden,
         can_assign: row.can_assign,
         blocked_note: row.blocked_note.into(),
         assign_label: row.assign_label.into(),
@@ -737,6 +749,7 @@ pub fn run(args: Args) -> ExitCode {
         keyboards: Rc::new(VecModel::default()),
         shown_rows: RefCell::new(Vec::new()),
         layout_timer: slint::Timer::default(),
+        settle_timer: slint::Timer::default(),
     });
     APP.with(|app| *app.borrow_mut() = Some(controller.clone()));
     window.set_keyboards(ModelRc::from(controller.keyboards.clone()));
@@ -823,6 +836,9 @@ pub fn run(args: Args) -> ExitCode {
                 }
             });
         },
+        // Called on the watcher's dispatcher thread: only schedules; the state gathers a burst
+        // for 750 ms and then reads on the I/O worker (design m3 A.4).
+        |_change| post(AppMsg::KeyboardsChanged),
     );
     for warning in warnings {
         eprintln!("mklm: warning: {warning}");
@@ -877,6 +893,13 @@ fn wire_callbacks(window: &AppWindow) {
     window.on_navigate(|screen| dispatch(AppMsg::Navigate(page(screen))));
     window.on_refresh(|| dispatch(AppMsg::Refresh));
     window.on_toggle_identify(|| dispatch(AppMsg::ToggleIdentify));
+    // The main screen (design m3 B.2, B.12; WP-U1).
+    window.on_banner_action(|| dispatch(AppMsg::BannerAction { at: Instant::now() }));
+    // Every row offers the same page: `Request::Recover` resets every keyboard the journal lists
+    // at once.
+    window.on_apply_now(|_row| dispatch(AppMsg::ApplyNow { at: Instant::now() }));
+    window.on_toggle_hidden(|row: SharedString| dispatch(AppMsg::ToggleHidden(row.to_string())));
+    window.on_show_hidden_toggled(|on| dispatch(AppMsg::ShowHidden(on)));
     window.on_key_pressed(|text: SharedString, shift| {
         dispatch(AppMsg::KeyTestPressed {
             text: text.to_string(),

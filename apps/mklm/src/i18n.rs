@@ -193,6 +193,46 @@ pub fn pending_hint(action: PendingAction, lang: Lang) -> String {
     }
 }
 
+/// The hint under a row's "保存済み（反映待ち: …）" when the row offers no "今すぐ反映…" (the
+/// journal holds no reset MKLM could redo for it, or new operations are blocked; review U8): it
+/// never points at a button the row does not have.
+pub fn pending_hint_without_apply_now(action: PendingAction, lang: Lang) -> String {
+    match action {
+        PendingAction::ResetKeyboard => pick(
+            lang,
+            "抜き差しすると反映されます",
+            "Unplug and replug it to put it into effect",
+        ),
+        PendingAction::Reconnect | PendingAction::RestartPc => pending_hint(action, lang),
+    }
+}
+
+/// The banner of a change that only an unplug or a reconnect puts into effect (design m3
+/// B.12 `NeedsApply` without "今すぐ反映…": Bluetooth, or a keyboard that is not connected).
+pub fn needs_reconnect(lang: Lang) -> String {
+    pick(
+        lang,
+        "まだ反映されていない変更があります。キーボードを抜き差しするか、接続し直してください（Bluetooth は電源をオフにしてからオンにします）",
+        "A change is not in effect yet. Unplug and replug the keyboard, or reconnect it (Bluetooth: turn it off and on)",
+    )
+}
+
+/// The polite announcement when "キーを押して特定" marks a row (design m3 B.3, E.3).
+pub fn key_pressed_on(name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{name} のキーが押されました"),
+        Lang::En => format!("A key was pressed on {name}"),
+    }
+}
+
+/// Names in a sentence: "Keychron Receiver、VXE R1SE+" / "Keychron Receiver, VXE R1SE+".
+pub fn name_list(names: &[String], lang: Lang) -> String {
+    names.join(match lang {
+        Lang::Ja => "、",
+        Lang::En => ", ",
+    })
+}
+
 /// How a change takes effect, as a sentence for the change page (plan 3.5; design m3 B.5).
 /// `seconds` is the keep-or-revert time (20, or 60 with the accessibility setting, design m3
 /// B.6).
@@ -264,6 +304,244 @@ pub fn cannot_change_now(attention: Option<Attention>, lang: Lang) -> String {
         Some(Attention::None | Attention::NeedsApply) => ("", ""),
     };
     pick(lang, ja, en)
+}
+
+/// Why "変更…" is disabled while the post-reboot check is due (design m3 B.9): a `PendingReboot`
+/// seen from a new boot needs the user's keep or revert on that page first.
+pub fn cannot_change_before_post_reboot_check(lang: Lang) -> String {
+    pick(
+        lang,
+        "今は変更できません: PC の再起動後の確認が終わっていません",
+        "Cannot change now: the check after the PC restart is not done",
+    )
+}
+
+// --- The main screen (design m3 B.2, B.12; WP-U1) ---
+
+/// The sign-in screen's input method on the status line, and whether it types Japanese: a
+/// language name, never a raw KLID (review U5). `None`: it could not be read.
+pub fn sign_in_status(klid: Option<&str>, lang: Lang) -> (String, bool) {
+    match klid {
+        Some(klid) if mklm_core::klid_has_japanese_layout(klid) => {
+            (pick(lang, "日本語 ✓", "Japanese ✓"), true)
+        }
+        Some(klid) => {
+            let name = klid_name(klid, lang);
+            let text = match lang {
+                Lang::Ja => {
+                    format!("{name} ⚠ サインイン画面では、すべてのキーボードが US 配列になります")
+                }
+                Lang::En => format!("{name} ⚠ at the sign-in screen every keyboard types US"),
+            };
+            (text, false)
+        }
+        None => (pick(lang, "不明", "unknown"), false),
+    }
+}
+
+/// Under the status line in fixed mode: what it means and the way out (review U4). `standard`
+/// is the layout's name ("JIS").
+pub fn fixed_mode_note(standard: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!(
+            "すべてのキーボードが {standard} として動きます。ほかの配列のキーボードは、その行の［変更…］で変えられます"
+        ),
+        Lang::En => format!(
+            "Every keyboard types {standard}. Change another keyboard with \"Change…\" on its row"
+        ),
+    }
+}
+
+/// The banner of an unreadable journal (design m3 B.2: before every other attention).
+pub fn journal_unreadable_banner(lang: Lang) -> String {
+    pick(
+        lang,
+        "記録（ジャーナル）を読めません。MKLM を更新するまで変更できません",
+        "The journal cannot be read; nothing can be changed until MKLM is updated",
+    )
+}
+
+/// The banner while the check after the PC restart is due (design m3 B.9).
+pub fn post_reboot_banner(lang: Lang) -> String {
+    pick(
+        lang,
+        "PC の再起動後の確認が必要です",
+        "Check the keyboards after the restart",
+    )
+}
+
+/// The banner's button (design m3 B.12): what it opens, in the words of the attention it is
+/// about ("回復…" for an interrupted operation, "確認…" for a change that waits).
+pub fn banner_action(
+    target: crate::vm::status::BannerTarget,
+    attention: Attention,
+    lang: Lang,
+) -> String {
+    use crate::vm::status::BannerTarget;
+    let (ja, en) = match target {
+        BannerTarget::PostReboot => ("確認…", "Check…"),
+        BannerTarget::Recovery if attention == Attention::Recover => ("回復…", "Recover…"),
+        BannerTarget::Recovery | BannerTarget::Conflict => ("確認…", "Review…"),
+        BannerTarget::Restart => ("再起動…", "Restart…"),
+        BannerTarget::ApplyNow => ("今すぐ反映…", "Apply now…"),
+    };
+    pick(lang, ja, en)
+}
+
+/// "設定した配列" of a device whose collections are set differently (design m3 B.2).
+pub fn assigned_mixed(lang: Lang) -> String {
+    pick(
+        lang,
+        "混在（コレクションごとに違います）",
+        "mixed (the collections differ)",
+    )
+}
+
+/// The screen-reader part of a row that names the assigned layout: "設定した配列 JIS".
+pub fn assigned_summary(assigned: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("設定した配列 {assigned}"),
+        Lang::En => format!("assigned {assigned}"),
+    }
+}
+
+/// The accessible label of a row's "変更…" button (design m3 E.2): "Keychron Receiver の配列を
+/// 変更".
+pub fn assign_label(name: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{name} の配列を変更"),
+        Lang::En => format!("Change the layout of {name}"),
+    }
+}
+
+/// Why a keyboard types as it does, for "現在の動作" (glossary; review U4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Behavior {
+    /// Not what the stored values predict: a warning.
+    Unexpected,
+    /// An explicitly assigned layout in effect: the only case with "✓ 設定どおり".
+    AsSet,
+    /// Fixed mode, as predicted: neutral.
+    FixedMode,
+    /// The PC's standard layout, as predicted: neutral.
+    Standard,
+}
+
+/// "JIS として動作中 ✓ 設定どおり" and the like (design m3 B.2): "✓" only for [`Behavior::AsSet`].
+pub fn current_behavior(layout: &LayoutTable, behavior: Behavior, lang: Lang) -> String {
+    let name = table(layout, lang);
+    match (behavior, lang) {
+        (Behavior::Unexpected, Lang::Ja) => format!("{name} として動作中 ⚠"),
+        (Behavior::Unexpected, Lang::En) => format!("types {name} ⚠"),
+        (Behavior::AsSet, Lang::Ja) => format!("{name} として動作中 ✓ 設定どおり"),
+        (Behavior::AsSet, Lang::En) => format!("types {name} ✓ as set"),
+        (Behavior::FixedMode, Lang::Ja) => format!("{name} として動作中（固定モード）"),
+        (Behavior::FixedMode, Lang::En) => format!("types {name} (fixed mode)"),
+        (Behavior::Standard, Lang::Ja) => format!("{name} として動作中（PC の標準配列）"),
+        (Behavior::Standard, Lang::En) => format!("types {name} (the PC's standard)"),
+    }
+}
+
+/// "現在の動作" of a connected keyboard Windows reports no type for.
+pub fn behavior_unknown(lang: Lang) -> String {
+    pick(lang, "動作を確認できません", "cannot tell how it types")
+}
+
+/// "⚠ 実物は US 配列ですが JIS として動いています" (review U4): the physical layout MKLM learned
+/// differs from how the keyboard types.
+pub fn physical_differs(real: &LayoutTable, types: &LayoutTable, lang: Lang) -> String {
+    let real = table(real, lang);
+    let types = table(types, lang);
+    match lang {
+        Lang::Ja => format!("⚠ 実物は {real} 配列ですが {types} として動いています"),
+        Lang::En => format!("⚠ It is a {real} keyboard but types {types}"),
+    }
+}
+
+/// Parts of one screen-reader sentence (a row's `accessible-summary`), in reading order.
+pub fn summary_join(parts: &[String], lang: Lang) -> String {
+    name_list(parts, lang)
+}
+
+/// The "今すぐ反映…" page's title (design m3 B.12; review U8). `names`: the keyboards reset.
+pub fn apply_now_title(names: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("{names} の配列を今すぐ反映"),
+        Lang::En => format!("Put the saved layout of {names} into effect"),
+    }
+}
+
+/// What the "今すぐ反映…" page is about: the layout is saved, a reset puts it into effect.
+pub fn apply_now_summary(names: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!(
+            "{names} の配列は保存済みですが、まだ反映されていません。キーボードをリセットすると反映されます（Windows がキーボードを接続し直します。キーボード本体の設定は変わりません）。"
+        ),
+        Lang::En => format!(
+            "The layout of {names} is saved but not in effect yet. Resetting the keyboard puts it into effect (Windows reconnects it; the keyboard's own settings do not change)."
+        ),
+    }
+}
+
+/// The two ways of the "今すぐ反映…" page (design m3 B.5, B.12): `(text, detail)`. Resetting
+/// has no countdown — the layout was kept already — and "not now" sends nothing.
+pub fn apply_now_method(live: bool, lang: Lang) -> (String, String) {
+    if live {
+        (
+            pick(
+                lang,
+                "今すぐキーボードをリセットして反映する",
+                "Reset the keyboard now",
+            ),
+            pick(
+                lang,
+                "このキーボードは数秒間使えません。その間は、ほかのキーボードかマウスで操作します。",
+                "This keyboard stops working for a few seconds; use another keyboard or the mouse meanwhile.",
+            ),
+        )
+    } else {
+        (
+            pick(lang, "今はリセットしない", "Not now"),
+            pick(
+                lang,
+                "MKLM は何もしません。キーボードを抜き差しするか、PC を再起動すると反映されます（シャットダウンではなく再起動）。",
+                "MKLM does nothing now. Unplugging and replugging the keyboard, or restarting the PC (Restart, not Shut down), puts the layout into effect.",
+            ),
+        )
+    }
+}
+
+/// Plan 1.4 on the "今すぐ反映…" page: only the keyboards being reset typed lately.
+pub fn apply_now_only_keyboard(lang: Lang) -> String {
+    pick(
+        lang,
+        "このキーボードは、最近入力のあった唯一のキーボードです。抜き差しするか、PC を再起動して反映することをおすすめします。",
+        "This keyboard is the only one that typed recently. Unplugging and replugging it, or restarting the PC, is recommended instead.",
+    )
+}
+
+/// The "今すぐ反映…" page after the change took effect meanwhile (replugged, or new operations
+/// are blocked): nothing is left to send.
+pub fn apply_now_nothing_left(lang: Lang) -> String {
+    pick(
+        lang,
+        "反映を待っている変更はありません。",
+        "No saved layout is waiting to be put into effect.",
+    )
+}
+
+/// The "今すぐ反映…" page's main button; without "（次に Windows の確認が出ます）" when no
+/// prompt follows (an elevated GUI, design m3 B.5).
+pub fn apply_now_button(prompt: bool, lang: Lang) -> String {
+    if prompt {
+        pick(
+            lang,
+            "反映する（次に Windows の確認が出ます）",
+            "Apply now (Windows asks next)",
+        )
+    } else {
+        pick(lang, "反映する", "Apply now")
+    }
 }
 
 /// The two ways a change can take effect (design m3 B.5; review U1): the choice replaces the

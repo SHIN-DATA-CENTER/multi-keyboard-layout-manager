@@ -7,15 +7,26 @@
 //! assigned layout that is in effect gets it. A keyboard that follows the PC's standard layout or
 //! the fixed mode is shown neutrally, and a known physical layout that differs from how it types
 //! is a warning with the way out ("US にする…").
+//!
+//! [`main_screen`] puts the whole page together (status line, rows and the identification
+//! announcement), so that `app.rs` only copies it into the window and the snapshot tests see
+//! exactly what the page says (design m3 H.3). "今すぐ反映…" opens the change page of WP-U3 with
+//! only the apply method to choose ([`apply_now_page`], design m3 B.12, review U8).
 
+use mklm_client::startup::StartupSummary;
 use mklm_core::{
-    Assessment, KeyboardAssessment, KeyboardDevice, KeyboardDriver, LayoutBasis, LayoutTable,
-    SystemSnapshot, Transport,
+    Assessment, BootId, Journal, KeyboardAssessment, KeyboardDevice, KeyboardDriver, LayoutBasis,
+    LayoutTable, SystemSnapshot, Transport, assess,
 };
 
+use super::change::{ApplyMethod, ChangePage};
+use super::status::{
+    NeedsApply, RestartWaits, StatusLine, blocked_reason, needs_apply, restart_waits, status_line,
+};
 use super::{Badge, SnapshotText, Tone};
-use crate::i18n::{self, BadgeKind, Lang};
+use crate::i18n::{self, BadgeKind, Behavior, Lang};
 use crate::settings::{PhysicalKind, Settings};
+use crate::state::ChangeDraft;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct KeyboardRow {
@@ -40,6 +51,9 @@ pub struct KeyboardRow {
     pub physical_note: String,
     pub badges: Vec<Badge>,
     pub highlighted: bool,
+    /// Hidden by the user (listed only with "非表示と未接続も表示", or while it is the keyboard
+    /// that typed): the row menu offers "表示する" instead of "非表示にする".
+    pub hidden: bool,
     pub can_assign: bool,
     /// Why "変更…" is disabled (design m3 E.2): shown on the row and read with it.
     pub blocked_note: String,
@@ -57,8 +71,10 @@ pub struct ListOptions<'a> {
     /// Why new operations are blocked now (`i18n::cannot_change_now`), if they are (design m2
     /// C.7): the rows cannot be changed.
     pub blocked_reason: Option<&'a str>,
-    /// Instance IDs whose journal entry keeps an `apply_pending` keyboard reset (WP-U1).
+    /// Keyboards (instance IDs) "今すぐ反映…" puts into effect ([`NeedsApply::apply_now`]).
     pub apply_now: &'a [String],
+    /// Keyboards the journal leaves to the PC restart ([`restart_waits`]).
+    pub restart: &'a RestartWaits,
     pub lang: Lang,
 }
 
@@ -112,7 +128,14 @@ pub fn keyboard_rows(
         };
         let present = members.iter().any(|(kb, _)| kb.present);
         let hidden = options.settings.is_hidden(&id);
-        if (!present || hidden) && !options.settings.keyboards.show_hidden {
+        let highlighted = options.highlighted.is_some_and(|typed| {
+            members
+                .iter()
+                .any(|(kb, _)| kb.instance_id.eq_ignore_ascii_case(typed))
+        });
+        // Hidden and disconnected rows only on request; a hidden keyboard that just typed while
+        // identifying is shown (with its "非表示" badge), or identifying could not find it.
+        if (!present || (hidden && !highlighted)) && !options.settings.keyboards.show_hidden {
             continue;
         }
         // The member that speaks for the group: the first connected one, else the first.
@@ -129,27 +152,47 @@ pub fn keyboard_rows(
             .collect();
         let mixed = tables.windows(2).any(|pair| pair[0] != pair[1]);
         let assigned = match (&ka.after_restart, mixed) {
-            (_, true) => match lang {
-                Lang::Ja => "混在（コレクションごとに違います）".to_string(),
-                Lang::En => "mixed (the collections differ)".to_string(),
-            },
+            (_, true) => i18n::assigned_mixed(lang),
             (Some(layout), false) => i18n::effective(layout, lang),
             (None, false) => "—".to_string(),
         };
         let pending_action = members.iter().filter_map(|(_, ka)| ka.pending_action).max();
+        // Not in effect yet, and the journal waits for the restart: that is what puts it into
+        // effect, whatever the device would allow (the banner says the same).
+        let pending_action = pending_action.map(|action| {
+            if members
+                .iter()
+                .any(|(kb, _)| options.restart.covers(&kb.instance_id))
+            {
+                mklm_core::PendingAction::RestartPc
+            } else {
+                action
+            }
+        });
+        // Offered only where the journal holds a reset MKLM can redo now (review U8): a change
+        // the journal does not know is not put into effect by `Recover`.
+        let apply_now = pending_action == Some(mklm_core::PendingAction::ResetKeyboard)
+            && options.blocked_reason.is_none()
+            && members.iter().any(|(kb, _)| {
+                options
+                    .apply_now
+                    .iter()
+                    .any(|id| id.eq_ignore_ascii_case(&kb.instance_id))
+            });
         let pending = pending_action
             .map(|action| i18n::pending(action, lang))
             .unwrap_or_default();
         let pending_hint = pending_action
-            .map(|action| i18n::pending_hint(action, lang))
+            .map(|action| {
+                if apply_now {
+                    i18n::pending_hint(action, lang)
+                } else {
+                    i18n::pending_hint_without_apply_now(action, lang)
+                }
+            })
             .unwrap_or_default();
         let (current, current_tone) = current_state(ka, kb.present, lang);
         let physical_note = physical_note(options.settings, &members, ka, lang);
-        let highlighted = options.highlighted.is_some_and(|typed| {
-            members
-                .iter()
-                .any(|(kb, _)| kb.instance_id.eq_ignore_ascii_case(typed))
-        });
         let mut badges = Vec::new();
         let mut badge = |kind, tone| badges.push(super::Badge::new(kind, tone, lang));
         if highlighted {
@@ -192,23 +235,14 @@ pub fn keyboard_rows(
             Some(reason) if !read_only => reason.to_string(),
             _ => String::new(),
         };
-        let apply_now = pending_action == Some(mklm_core::PendingAction::ResetKeyboard)
-            && options.blocked_reason.is_none()
-            && members.iter().any(|(kb, _)| {
-                options
-                    .apply_now
-                    .iter()
-                    .any(|id| id.eq_ignore_ascii_case(&kb.instance_id))
-            });
+        // One sentence for the screen reader, in the order the row shows it (design m3 E.2).
         let mut summary = vec![
             group.display_name.clone(),
             transport.clone(),
-            match lang {
-                Lang::Ja => format!("設定した配列 {assigned}"),
-                Lang::En => format!("assigned {assigned}"),
-            },
+            i18n::assigned_summary(&assigned, lang),
         ];
         summary.extend((!pending.is_empty()).then(|| pending.clone()));
+        summary.extend((!pending_hint.is_empty()).then(|| pending_hint.clone()));
         summary.push(current.clone());
         summary.extend((!physical_note.is_empty()).then(|| physical_note.clone()));
         summary.extend(badges.iter().map(|b| b.accessible.clone()));
@@ -231,16 +265,11 @@ pub fn keyboard_rows(
             physical_note,
             badges,
             highlighted,
+            hidden,
             can_assign,
             blocked_note,
-            assign_label: match lang {
-                Lang::Ja => format!("{} の配列を変更", group.display_name),
-                Lang::En => format!("Change the layout of {}", group.display_name),
-            },
-            accessible_summary: summary.join(match lang {
-                Lang::Ja => "、",
-                Lang::En => ", ",
-            }),
+            assign_label: i18n::assign_label(&group.display_name, lang),
+            accessible_summary: i18n::summary_join(&summary, lang),
         });
     }
     rows
@@ -252,39 +281,20 @@ pub fn keyboard_rows(
 fn current_state(ka: &KeyboardAssessment, present: bool, lang: Lang) -> (String, Tone) {
     let Some(layout) = ka.current.as_ref().filter(|_| present) else {
         return if present {
-            match lang {
-                Lang::Ja => ("動作を確認できません".to_string(), Tone::Neutral),
-                Lang::En => ("cannot tell how it types".to_string(), Tone::Neutral),
-            }
+            (i18n::behavior_unknown(lang), Tone::Neutral)
         } else {
             (i18n::badge(BadgeKind::NotConnected, lang).0, Tone::Neutral)
         };
     };
-    let name = i18n::table(&layout.table, lang);
-    let after = ka.after_restart.as_ref();
-    match (after, lang) {
-        (Some(after), _) if after.table != layout.table => match lang {
-            Lang::Ja => (format!("{name} として動作中 ⚠"), Tone::Warning),
-            Lang::En => (format!("types {name} ⚠"), Tone::Warning),
-        },
-        (Some(after), Lang::Ja) if after.basis == LayoutBasis::KeyboardType => {
-            (format!("{name} として動作中 ✓ 設定どおり"), Tone::Success)
+    let (behavior, tone) = match ka.after_restart.as_ref() {
+        Some(after) if after.table != layout.table => (Behavior::Unexpected, Tone::Warning),
+        Some(after) if after.basis == LayoutBasis::KeyboardType => (Behavior::AsSet, Tone::Success),
+        Some(after) if after.basis == LayoutBasis::FixedMode => {
+            (Behavior::FixedMode, Tone::Neutral)
         }
-        (Some(after), Lang::En) if after.basis == LayoutBasis::KeyboardType => {
-            (format!("types {name} ✓ as set"), Tone::Success)
-        }
-        (Some(after), Lang::Ja) if after.basis == LayoutBasis::FixedMode => {
-            (format!("{name} として動作中（固定モード）"), Tone::Neutral)
-        }
-        (Some(after), Lang::En) if after.basis == LayoutBasis::FixedMode => {
-            (format!("types {name} (fixed mode)"), Tone::Neutral)
-        }
-        (_, Lang::Ja) => (
-            format!("{name} として動作中（PC の標準配列）"),
-            Tone::Neutral,
-        ),
-        (_, Lang::En) => (format!("types {name} (the PC's standard)"), Tone::Neutral),
-    }
+        _ => (Behavior::Standard, Tone::Neutral),
+    };
+    (i18n::current_behavior(&layout.table, behavior, lang), tone)
 }
 
 /// "⚠ 実物は US 配列ですが JIS として動いています" when a member's physical layout is known and
@@ -301,19 +311,202 @@ fn physical_note(
     else {
         return String::new();
     };
-    let (real, real_table) = match physical.layout {
-        PhysicalKind::Jis => ("JIS", LayoutTable::Jis),
-        PhysicalKind::Us => ("US", LayoutTable::Us),
+    let real = match physical.layout {
+        PhysicalKind::Jis => LayoutTable::Jis,
+        PhysicalKind::Us => LayoutTable::Us,
     };
     match ka.current.as_ref().map(|layout| &layout.table) {
-        Some(types) if *types != real_table => {
-            let types = i18n::table(types, lang);
-            match lang {
-                Lang::Ja => format!("⚠ 実物は {real} 配列ですが {types} として動いています"),
-                Lang::En => format!("⚠ It is a {real} keyboard but types {types}"),
-            }
-        }
+        Some(types) if *types != real => i18n::physical_differs(&real, types, lang),
         _ => String::new(),
+    }
+}
+
+/// "Keychron Receiver のキーが押されました" (polite, design m3 B.3, E.3) for the row that
+/// "キーを押して特定" marks; empty when none is marked. The text changes only when another row
+/// is marked, so the same keyboard typing on is not announced again.
+pub fn identify_announcement(rows: &[KeyboardRow], lang: Lang) -> String {
+    rows.iter()
+        .find(|row| row.highlighted)
+        .map(|row| i18n::key_pressed_on(&row.name, lang))
+        .unwrap_or_default()
+}
+
+/// The physical devices (groups) that contain one of `ids`, in list order.
+fn groups_of<'a>(
+    assessment: &'a Assessment,
+    ids: &'a [String],
+) -> impl Iterator<Item = &'a mklm_core::DeviceGroup> + 'a {
+    assessment.groups.iter().filter(move |group| {
+        group
+            .keyboards
+            .iter()
+            .any(|member| ids.iter().any(|id| id.eq_ignore_ascii_case(member)))
+    })
+}
+
+/// The instance IDs of every physical device (group) that contains one of `ids`: the keyboards a
+/// reset of `ids` takes away for a few seconds (the apply method's default, design m3 B.5).
+pub fn device_members(assessment: &Assessment, ids: &[String]) -> Vec<String> {
+    groups_of(assessment, ids)
+        .flat_map(|group| group.keyboards.iter().cloned())
+        .collect()
+}
+
+/// The devices that contain one of `ids`, one entry each, in list order: the name and the
+/// instance IDs (the "今の状態" of the result names them one by one, design m3 B.17).
+pub fn devices(assessment: &Assessment, ids: &[String]) -> Vec<(String, Vec<String>)> {
+    groups_of(assessment, ids)
+        .map(|group| (group.display_name.clone(), group.keyboards.clone()))
+        .collect()
+}
+
+/// Everything the "今すぐ反映…" page depends on besides the draft (design m3 B.12; review U8).
+#[derive(Debug, Clone, Copy)]
+pub struct ApplyNowContext<'a> {
+    /// `ChangeDraft::apply_now`: the devices by name and the method.
+    pub draft: &'a ChangeDraft,
+    /// The last read still leaves something that a reset puts into effect, and new operations
+    /// are not blocked (`state::apply_now_targets` is not empty).
+    pub offered: bool,
+    /// Why new operations are blocked now ([`blocked_reason`]), if they are.
+    pub blocked: Option<&'a str>,
+    /// `settings.change.uac_notice_seen`: the prompt is explained by one line next to the button.
+    pub uac_notice_seen: bool,
+    /// The GUI runs elevated: no prompt follows (design m3 B.5).
+    pub elevated: bool,
+    pub lang: Lang,
+}
+
+/// The change page of WP-U3 for "今すぐ反映…" (design m3 B.12, B.18: the two ways of design m3
+/// B.5, then `Request::Recover`): no layout to choose, only how — reset now, or not now (an
+/// unplug or the PC restart puts it into effect, and nothing is sent). Resetting is never the
+/// only choice and never starts without the button (design m3 0.2 principle 6).
+pub fn apply_now_page(ctx: &ApplyNowContext<'_>) -> ChangePage {
+    let lang = ctx.lang;
+    let draft = ctx.draft;
+    let prompt = !ctx.elevated;
+    let mut page = ChangePage {
+        title: i18n::apply_now_title(&draft.name, lang),
+        apply_text: i18n::apply_now_button(prompt, lang),
+        ..ChangePage::default()
+    };
+    if let Some(reason) = ctx.blocked {
+        // Another operation started meanwhile (from the CLI, say): nothing may be sent.
+        page.note = reason.to_string();
+        page.note_tone = Tone::Warning;
+        return page;
+    }
+    if !ctx.offered {
+        // Replugged or put into effect meanwhile: nothing left to decide.
+        page.note = i18n::apply_now_nothing_left(lang);
+        page.note_tone = Tone::Info;
+        return page;
+    }
+    page.summary = i18n::apply_now_summary(&draft.name, lang);
+    let method = draft.resolved_method();
+    (page.live_text, page.live_detail) = i18n::apply_now_method(true, lang);
+    (page.restart_text, page.restart_detail) = i18n::apply_now_method(false, lang);
+    page.method_visible = true;
+    page.method = Some(method);
+    if draft.method.is_none()
+        && draft
+            .method_default
+            .is_some_and(|default| default.only_keyboard_warning)
+    {
+        page.warnings.push(i18n::apply_now_only_keyboard(lang));
+    }
+    page.can_apply = method == ApplyMethod::Live;
+    if prompt && ctx.uac_notice_seen && page.can_apply {
+        page.uac_line = i18n::uac_line(lang);
+    }
+    page
+}
+
+/// Everything the main screen depends on.
+#[derive(Debug, Clone, Copy)]
+pub struct MainInput<'a> {
+    pub snapshot: &'a SystemSnapshot,
+    /// The journal and the boot it was read in; `None` when either could not be read (nothing
+    /// is offered to put into effect then).
+    pub journal: Option<(&'a Journal, BootId)>,
+    pub summary: &'a StartupSummary,
+    pub settings: &'a Settings,
+    /// The GUI thread's input language (HKL, low 32 bits).
+    pub active_hkl: u32,
+    /// The keyboard (instance ID) that typed last while identifying.
+    pub highlighted: Option<&'a str>,
+    pub lang: Lang,
+}
+
+/// The main screen (plan 3.2, design m3 B.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MainScreen {
+    pub status: StatusLine,
+    pub rows: Vec<KeyboardRow>,
+    /// See [`identify_announcement`].
+    pub announcement: String,
+}
+
+/// What "今すぐ反映…" would put into effect now: [`needs_apply`] of the journal (empty without
+/// a journal).
+pub fn main_needs_apply(input: &MainInput<'_>) -> NeedsApply {
+    input
+        .journal
+        .map(|(journal, boot)| needs_apply(journal, boot, input.summary, input.snapshot))
+        .unwrap_or_default()
+}
+
+pub fn main_screen(input: &MainInput<'_>) -> MainScreen {
+    let lang = input.lang;
+    let assessment = assess(input.snapshot);
+    let needs_apply = main_needs_apply(input);
+    let blocked = blocked_reason(input.summary, lang);
+    let status = status_line(
+        &assessment,
+        &input.snapshot.input,
+        input.active_hkl,
+        input.summary,
+        &needs_apply,
+        lang,
+    );
+    let restart = input
+        .journal
+        .map(|(journal, boot)| restart_waits(journal, boot))
+        .unwrap_or_default();
+    let rows = keyboard_rows(
+        input.snapshot,
+        &assessment,
+        &ListOptions {
+            settings: input.settings,
+            highlighted: input.highlighted,
+            blocked_reason: blocked.as_deref(),
+            apply_now: &needs_apply.apply_now,
+            restart: &restart,
+            lang,
+        },
+    );
+    let announcement = identify_announcement(&rows, lang);
+    MainScreen {
+        status,
+        rows,
+        announcement,
+    }
+}
+
+impl SnapshotText for MainScreen {
+    fn snapshot_text(&self) -> String {
+        let mut text = self.status.snapshot_text();
+        if !self.announcement.is_empty() {
+            text.push_str(&format!("announce: {}\n", self.announcement));
+        }
+        for row in &self.rows {
+            text.push_str(&row.snapshot_text());
+            text.push_str(&format!(
+                "  reader: {}\n  button: {}\n",
+                row.accessible_summary, row.assign_label
+            ));
+        }
+        text
     }
 }
 
@@ -321,7 +514,7 @@ impl SnapshotText for KeyboardRow {
     fn snapshot_text(&self) -> String {
         let badges: Vec<&str> = self.badges.iter().map(|b| b.text.as_str()).collect();
         let mut text = format!(
-            "{} [{} {}] assigned={} pending={} current={} ({:?}) badges={} assign={}{}\n",
+            "{} [{} {}] assigned={} pending={} current={} ({:?}) badges={} assign={}{}{}{}\n",
             self.name,
             self.transport,
             self.vid_pid,
@@ -331,6 +524,8 @@ impl SnapshotText for KeyboardRow {
             self.current_tone,
             badges.join("|"),
             self.can_assign,
+            if self.apply_now { " apply-now" } else { "" },
+            if self.hidden { " hidden" } else { "" },
             if self.highlighted { " *" } else { "" }
         );
         for (label, value) in [
@@ -352,6 +547,7 @@ mod tests {
 
     use super::*;
     use crate::settings::{PhysicalLayout, PhysicalSource};
+    use crate::vm::change::MethodDefault;
 
     fn rows(
         settings: &Settings,
@@ -369,6 +565,7 @@ mod tests {
                 highlighted,
                 blocked_reason,
                 apply_now: &[],
+                restart: &RestartWaits::default(),
                 lang,
             },
         )
@@ -417,15 +614,27 @@ mod tests {
     }
 
     #[test]
+    fn the_dev_machine_in_english() {
+        let text = rows(&Settings::default(), None, None, Lang::En);
+        assert!(
+            text.contains("current=types US ✓ as set (Success)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("assigned=follows the standard (JIS)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("current=types JIS (the PC's standard) (Neutral)"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn a_known_physical_layout_and_a_block() {
         let mut settings = Settings::default();
         // The VXE was detected as a US keyboard, but it types JIS (the standard layout).
-        let vxe = fixtures::dev_machine()
-            .keyboards
-            .iter()
-            .find(|kb| kb.display_name.contains("VXE") || kb.instance_id.contains("25A7"))
-            .map(|kb| kb.instance_id.clone())
-            .unwrap();
+        let vxe = fixtures::vxe_ble().instance_id;
         settings.learn_physical(PhysicalLayout {
             id: vxe,
             layout: crate::settings::PhysicalKind::Us,
@@ -443,14 +652,451 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("assign=false"), "{text}");
+        let english = rows(&settings, None, None, Lang::En);
+        assert!(
+            english.contains("physical: ⚠ It is a US keyboard but types JIS"),
+            "{english}"
+        );
     }
 
     #[test]
     fn hidden_and_disconnected_keyboards() {
+        // By default neither the hidden row nor the one without a connected member is listed.
         let mut settings = Settings::default();
+        settings
+            .keyboards
+            .hidden
+            .push(fixtures::vxe_ble().container_id.unwrap());
+        let text = rows(&settings, None, None, Lang::En);
+        assert!(!text.contains("X3-5.4 Mouse"), "{text}");
+        assert!(!text.contains("VXE"), "{text}");
+        // "非表示と未接続も表示": both, marked.
         settings.keyboards.show_hidden = true;
         let text = rows(&settings, None, None, Lang::En);
         assert!(text.contains("X3-5.4 Mouse"), "{text}");
         assert!(text.contains("Not connected"), "{text}");
+        assert!(text.contains("badges=No key press yet|Hidden"), "{text}");
+        assert!(text.contains(" hidden\n"), "{text}");
+    }
+
+    const BOOT: &str = "9b1c0d6e-2f4a-4c8b-a1d3-5e6f7a8b9c0d";
+
+    /// A schema-1 journal entry (as M2 wrote them) that set the Keychron to JIS and closed in
+    /// `state` with `apply_pending` (JSON or `null`).
+    fn keychron_entry(state: &str, apply_pending: &str) -> mklm_core::JournalEntry {
+        let json = format!(
+            r#"{{
+              "schema_version": 1,
+              "op_id": "0000000a-0000-4000-8000-000000000000",
+              "seq": 1,
+              "kind": {{ "kind": "set-layout",
+                "requested": "HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000",
+                "instance_ids": ["HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000"],
+                "layout": "jis" }},
+              "state": "{state}",
+              "boot_id": "{BOOT}",
+              "owner": {{ "pid": 12345, "creation_time": 134036790000000000 }},
+              "created_at": 1790500000000,
+              "updated_at": 1790500004000,
+              "apply": "reset-keyboard",
+              "countdown": null,
+              "records": [],
+              "context": [],
+              "failure": null,
+              "apply_pending": {apply_pending},
+              "history": []
+            }}"#
+        );
+        mklm_core::JournalEntry::from_json(&json).unwrap()
+    }
+
+    fn reset_pending() -> String {
+        format!(
+            r#"{{ "action": "reset-keyboard",
+                "instance_ids": ["HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000"],
+                "since": "{BOOT}" }}"#
+        )
+    }
+
+    /// The dev machine with the Keychron stored as JIS while it still types US (the reset that
+    /// would put it into effect has not happened).
+    fn keychron_saved_as_jis() -> SystemSnapshot {
+        let mut snapshot = fixtures::dev_machine();
+        let keychron = snapshot
+            .keyboards
+            .iter_mut()
+            .find(|kb| kb.display_name == "Keychron Receiver")
+            .unwrap();
+        keychron.overrides.keyboard_type_override = Some(7);
+        keychron.overrides.keyboard_subtype_override = Some(2);
+        snapshot
+    }
+
+    struct Scene {
+        snapshot: SystemSnapshot,
+        journal: Journal,
+        boot: BootId,
+        summary: StartupSummary,
+        settings: Settings,
+    }
+
+    impl Scene {
+        fn new(snapshot: SystemSnapshot, entries: Vec<mklm_core::JournalEntry>) -> Self {
+            let journal = Journal {
+                entries,
+                ..Journal::default()
+            };
+            let boot = BootId::parse(BOOT).unwrap();
+            let summary =
+                mklm_client::startup::summarize(&journal, boot, &|_| mklm_core::Liveness::Dead);
+            Self {
+                snapshot,
+                journal,
+                boot,
+                summary,
+                settings: Settings::default(),
+            }
+        }
+
+        fn screen(&self, lang: Lang) -> MainScreen {
+            main_screen(&MainInput {
+                snapshot: &self.snapshot,
+                journal: Some((&self.journal, self.boot)),
+                summary: &self.summary,
+                settings: &self.settings,
+                active_hkl: 0x0411_0411,
+                highlighted: None,
+                lang,
+            })
+        }
+    }
+
+    const LATIN_NAMES: [&str; 4] = [
+        "日本語 PS/2 キーボード (106/109 キー Ctrl+英数)",
+        "Keychron Receiver",
+        "VXE R1SE+",
+        "X3-5.4 Mouse",
+    ];
+
+    #[test]
+    fn a_saved_reset_is_offered_on_its_row_and_the_banner() {
+        let scene = Scene::new(
+            keychron_saved_as_jis(),
+            vec![keychron_entry("confirmed", &reset_pending())],
+        );
+        let screen = scene.screen(Lang::Ja);
+        assert_eq!(
+            screen.status.banner_target,
+            Some(super::super::status::BannerTarget::ApplyNow)
+        );
+        assert_eq!(screen.status.banner_action, "今すぐ反映…");
+        let keychron = &screen.rows[1];
+        assert!(keychron.apply_now, "{keychron:?}");
+        assert_eq!(
+            keychron.pending,
+            "保存済み（反映待ち: キーボードのリセットが必要）"
+        );
+        assert_eq!(
+            keychron.pending_hint,
+            "抜き差しするか、［今すぐ反映…］を押してください"
+        );
+        assert!(
+            keychron.accessible_summary.contains("［今すぐ反映…］"),
+            "{keychron:?}"
+        );
+        // The same NeedsApply entry blocks nothing.
+        assert!(screen.rows.iter().all(|row| row.blocked_note.is_empty()));
+        assert!(keychron.can_assign);
+        for row in &screen.rows {
+            for text in [&row.pending_hint, &row.accessible_summary] {
+                assert_eq!(
+                    crate::vm::unexpected_latin(text, &LATIN_NAMES),
+                    Vec::<String>::new()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_offered_once_raw_input_reports_the_stored_type() {
+        // The keyboard was replugged: it types JIS as stored, the journal still lists it.
+        let mut snapshot = keychron_saved_as_jis();
+        snapshot.keyboards[1].reported_type = Some(mklm_core::KeyboardType::JIS);
+        let scene = Scene::new(
+            snapshot,
+            vec![keychron_entry("confirmed", &reset_pending())],
+        );
+        let screen = scene.screen(Lang::Ja);
+        assert_eq!(screen.status.banner, "");
+        assert!(!screen.rows[1].apply_now);
+        assert_eq!(screen.rows[1].pending, "");
+    }
+
+    #[test]
+    fn a_pending_change_the_journal_does_not_know_has_no_button() {
+        // Stored JIS, typing US, no journal entry: `Recover` would not reset it (review U8).
+        let scene = Scene::new(keychron_saved_as_jis(), Vec::new());
+        let screen = scene.screen(Lang::Ja);
+        let keychron = &screen.rows[1];
+        assert!(!keychron.apply_now);
+        assert_eq!(keychron.pending_hint, "抜き差しすると反映されます");
+        assert_eq!(screen.status.banner, "");
+    }
+
+    #[test]
+    fn a_block_disables_the_rows_and_the_apply_now_button() {
+        let mut scene = Scene::new(
+            keychron_saved_as_jis(),
+            vec![keychron_entry("pending-reboot", "null")],
+        );
+        scene.settings.keyboards.show_hidden = true;
+        let screen = scene.screen(Lang::Ja);
+        assert_eq!(screen.status.banner_action, "再起動…");
+        // The journal waits for the restart: the row says so, not "reset" or "unplug".
+        let keychron = &screen.rows[1];
+        assert_eq!(
+            (keychron.pending.as_str(), keychron.pending_hint.as_str()),
+            (
+                "保存済み（反映待ち: PC の再起動が必要）",
+                "PC を再起動してください（シャットダウンではなく再起動）"
+            )
+        );
+        for row in screen.rows.iter().filter(|row| row.name != "X3-5.4 Mouse") {
+            assert!(!row.can_assign && !row.apply_now);
+            assert_eq!(
+                row.blocked_note,
+                "今は変更できません: PC の再起動を待っている変更があります"
+            );
+            assert!(
+                row.accessible_summary.ends_with(&row.blocked_note),
+                "{row:?}"
+            );
+        }
+        let english = scene.screen(Lang::En);
+        assert_eq!(
+            english.rows[0].blocked_note,
+            "Cannot change now: a change waits for a PC restart"
+        );
+    }
+
+    #[test]
+    fn identifying_marks_announces_and_reveals_a_hidden_keyboard() {
+        let keychron = fixtures::keychron();
+        let mut settings = Settings::default();
+        settings
+            .keyboards
+            .hidden
+            .push(keychron.container_id.clone().unwrap());
+        let snapshot = fixtures::dev_machine();
+        let assessment = assess(&snapshot);
+        let list = |highlighted: Option<&str>, lang| {
+            keyboard_rows(
+                &snapshot,
+                &assessment,
+                &ListOptions {
+                    settings: &settings,
+                    highlighted,
+                    blocked_reason: None,
+                    apply_now: &[],
+                    restart: &RestartWaits::default(),
+                    lang,
+                },
+            )
+        };
+        // Hidden: not listed.
+        assert!(list(None, Lang::Ja).iter().all(|row| !row.hidden));
+        assert_eq!(identify_announcement(&list(None, Lang::Ja), Lang::Ja), "");
+        // It typed while identifying: listed, marked, announced, still badged as hidden.
+        let rows = list(Some(&keychron.instance_id), Lang::Ja);
+        let row = rows.iter().find(|row| row.highlighted).unwrap();
+        assert!(row.hidden);
+        assert!(row.badges.iter().any(|badge| badge.text == "非表示"));
+        assert!(
+            row.badges
+                .iter()
+                .any(|badge| badge.text == "◀ いま押したキーボード")
+        );
+        assert_eq!(
+            identify_announcement(&rows, Lang::Ja),
+            "Keychron Receiver のキーが押されました"
+        );
+        assert_eq!(
+            identify_announcement(&list(Some(&keychron.instance_id), Lang::En), Lang::En),
+            "A key was pressed on Keychron Receiver"
+        );
+    }
+
+    #[test]
+    fn device_members_cover_the_whole_device() {
+        let snapshot = fixtures::dev_machine();
+        let assessment = assess(&snapshot);
+        let keychron = fixtures::keychron().instance_id;
+        assert_eq!(
+            device_members(&assessment, &[keychron.to_lowercase()]),
+            vec![keychron.clone()]
+        );
+        assert_eq!(
+            devices(&assessment, std::slice::from_ref(&keychron)),
+            vec![("Keychron Receiver".to_string(), vec![keychron])]
+        );
+        assert!(device_members(&assessment, &[]).is_empty());
+    }
+
+    fn apply_now_draft(method: Option<ApplyMethod>, default: MethodDefault) -> ChangeDraft {
+        ChangeDraft {
+            apply_now: true,
+            method,
+            method_default: Some(default),
+            ..ChangeDraft::new(
+                String::new(),
+                "Keychron Receiver".into(),
+                vec![fixtures::keychron().instance_id],
+            )
+        }
+    }
+
+    const LIVE: MethodDefault = MethodDefault {
+        method: ApplyMethod::Live,
+        only_keyboard_warning: false,
+    };
+
+    #[test]
+    fn the_apply_now_page() {
+        let draft = apply_now_draft(None, LIVE);
+        let context = |uac_notice_seen, elevated, lang| ApplyNowContext {
+            draft: &draft,
+            offered: true,
+            blocked: None,
+            uac_notice_seen,
+            elevated,
+            lang,
+        };
+        // The first time the standalone UAC explanation follows the button: no line here.
+        let ja = apply_now_page(&context(false, false, Lang::Ja));
+        assert_eq!(
+            ja.snapshot_text(),
+            "title: Keychron Receiver の配列を今すぐ反映\n\
+             method: ◉ 今すぐキーボードをリセットして反映する — このキーボードは数秒間使えません。その間は、ほかのキーボードかマウスで操作します。\n\
+             method: ○ 今はリセットしない — MKLM は何もしません。キーボードを抜き差しするか、PC を再起動すると反映されます（シャットダウンではなく再起動）。\n\
+             summary: Keychron Receiver の配列は保存済みですが、まだ反映されていません。キーボードをリセットすると反映されます（Windows がキーボードを接続し直します。キーボード本体の設定は変わりません）。\n\
+             all users: \n\
+             button: 反映する（次に Windows の確認が出ます）\n\
+             can apply: true\n"
+        );
+        assert_eq!(
+            crate::vm::unexpected_latin(
+                &crate::vm::snapshot_values(&ja.snapshot_text()),
+                &LATIN_NAMES
+            ),
+            Vec::<String>::new()
+        );
+        // Later with one line; never when no prompt follows.
+        let seen = apply_now_page(&context(true, false, Lang::En));
+        assert!(
+            seen.uac_line
+                .starts_with("Windows asks for permission next")
+        );
+        assert_eq!(seen.apply_text, "Apply now (Windows asks next)");
+        let elevated = apply_now_page(&context(true, true, Lang::Ja));
+        assert_eq!(
+            (elevated.uac_line.as_str(), elevated.apply_text.as_str()),
+            ("", "反映する")
+        );
+    }
+
+    #[test]
+    fn the_apply_now_page_does_not_reset_the_only_keyboard_by_default() {
+        let only = MethodDefault {
+            method: ApplyMethod::Restart,
+            only_keyboard_warning: true,
+        };
+        let draft = apply_now_draft(None, only);
+        let page = apply_now_page(&ApplyNowContext {
+            draft: &draft,
+            offered: true,
+            blocked: None,
+            uac_notice_seen: true,
+            elevated: false,
+            lang: Lang::Ja,
+        });
+        // "Not now" is preselected and sends nothing; the warning of plan 1.4 says why.
+        assert_eq!(page.method, Some(ApplyMethod::Restart));
+        assert!(!page.can_apply && page.uac_line.is_empty());
+        assert_eq!(
+            page.warnings,
+            vec![
+                "このキーボードは、最近入力のあった唯一のキーボードです。抜き差しするか、PC を再起動して反映することをおすすめします。"
+                    .to_string()
+            ]
+        );
+        // The user's own choice: reset now, and the warning has done its job.
+        let chosen = apply_now_draft(Some(ApplyMethod::Live), only);
+        let page = apply_now_page(&ApplyNowContext {
+            draft: &chosen,
+            offered: true,
+            blocked: None,
+            uac_notice_seen: true,
+            elevated: false,
+            lang: Lang::Ja,
+        });
+        assert!(page.can_apply && page.warnings.is_empty());
+        // Nothing left (replugged meanwhile): nothing to choose or send.
+        let page = apply_now_page(&ApplyNowContext {
+            draft: &chosen,
+            offered: false,
+            blocked: None,
+            uac_notice_seen: true,
+            elevated: false,
+            lang: Lang::En,
+        });
+        assert!(!page.method_visible && !page.can_apply && page.summary.is_empty());
+        assert_eq!(
+            page.note,
+            "No saved layout is waiting to be put into effect."
+        );
+        // Another operation started meanwhile: why nothing may be sent.
+        let busy = i18n::cannot_change_now(Some(mklm_core::Attention::Busy), Lang::Ja);
+        let page = apply_now_page(&ApplyNowContext {
+            draft: &chosen,
+            offered: false,
+            blocked: Some(&busy),
+            uac_notice_seen: true,
+            elevated: false,
+            lang: Lang::Ja,
+        });
+        assert!(!page.method_visible && !page.can_apply);
+        assert_eq!(
+            (page.note.as_str(), page.note_tone),
+            ("今は変更できません: 別の MKLM が処理中です", Tone::Warning)
+        );
+    }
+
+    #[test]
+    fn the_dev_machine_journal_of_m2_shows_nothing_to_do() {
+        // The schema-1 journal the development machine keeps from the M2 tests (a resolved
+        // conflict and a kept US assignment, both closed in an earlier boot).
+        let (ops, baselines) = fixtures::schema_1_journal();
+        let journal = Journal::parse(&ops, &baselines);
+        assert!(journal.unreadable.is_empty());
+        let boot = BootId::parse(BOOT).unwrap();
+        let summary =
+            mklm_client::startup::summarize(&journal, boot, &|_| mklm_core::Liveness::Dead);
+        let settings = Settings::default();
+        let screen = main_screen(&MainInput {
+            snapshot: &fixtures::dev_machine(),
+            journal: Some((&journal, boot)),
+            summary: &summary,
+            settings: &settings,
+            active_hkl: 0x0411_0411,
+            highlighted: None,
+            lang: Lang::Ja,
+        });
+        assert_eq!(screen.status.banner, "");
+        assert!(
+            screen
+                .rows
+                .iter()
+                .all(|row| row.can_assign && !row.apply_now && row.pending.is_empty())
+        );
     }
 }

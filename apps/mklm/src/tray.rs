@@ -19,7 +19,8 @@ pub fn create_tray(icon: &Image) -> Result<TrayIcon, PlatformError> {
     tray.set_tray_image(icon.clone());
     tray.on_icon_clicked(|| dispatch(AppMsg::Activate));
     tray.on_show_window(|| dispatch(AppMsg::Activate));
-    tray.on_identify(|| dispatch(AppMsg::ToggleIdentify));
+    // Raw Input reaches only the focused window: show it first (design m3 B.3).
+    tray.on_identify(|| dispatch(AppMsg::StartIdentify));
     // WP-U5: the undo preview (design m3 B.12) through the recovery page.
     tray.on_undo_open(|| dispatch(AppMsg::Navigate(crate::state::Page::Recovery)));
     tray.on_quit_app(|| dispatch(AppMsg::QuitRequested));
