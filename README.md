@@ -42,11 +42,20 @@ JIS 配列（日本語 106/109）と US 配列（英語 101/104）の物理キ�
 | M2 | 書き込みと安全網（ジャーナル、回復、helper、書き込みのコマンド） | 完了。再起動を伴う実機テスト（R8〜R10）は後日（設計: [docs/design/m2-engine.md](docs/design/m2-engine.md)） |
 | M3 | GUI（Slint）（設計: [docs/design/m3-gui.md](docs/design/m3-gui.md)） | 完了 |
 | M4 | 常駐機能（ずれの検知と通知） | 予定 |
-| M5 | 配布（NSIS インストーラー、GitHub Releases、自動更新） | インストーラーとリリースのビルドまで。自動更新は予定 |
+| M5 | 配布（NSIS インストーラー、GitHub Releases、自動更新） | インストーラーとリリースのビルドまで完了。自動更新（M5b。設計: [docs/design/m5b-updater.md](docs/design/m5b-updater.md)）は実装中で、v0.2.0 から |
 
 ## インストール
 
 [GitHub の Releases](https://github.com/SHIN-DATA-CENTER/multi-keyboard-layout-manager/releases) から `MKLM-Setup-<版>-x64.exe`（ARM の PC は `-arm64.exe`）をダウンロードして実行する。署名がないために出る警告への対処、アンインストールのしかたは [docs/install-guide.ja.md](docs/install-guide.ja.md) を参照。
+
+### 自動更新（v0.2.0 から）
+
+- 1 日に 1 回 GitHub で新しい版を確かめ、あれば自動でダウンロードする（設定でオフにできる）。送るのは MKLM の版と PC の種類（x64 / ARM64）だけ。
+- ダウンロードしたものは、メンテナーがオフラインの鍵（minisign）で署名した更新情報 `latest.json` と、その SHA-256 で確かめる。鍵の失効、古い更新情報の再送（巻き戻し）、ダウングレードも検出する。
+- **インストールは、利用者が更新のページで［今すぐ更新］を押したときだけ**。UAC の画面で「詳細を表示」を押し、プログラムの場所が `C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe` であることを確かめてから「はい」を押す。MKLM はいったん終了し、更新の後に自動で開く。キーボードの設定は変えない。
+- v0.1.0 には自動更新がないので、v0.2.0 は手でインストールする。
+- `mklm-cli update --check` と `mklm-cli update --status` で、確認と状態の表示ができる（CLI はインストールしない）。終了コード、サイレント インストール（`/S`）、手での署名の確かめ方は [docs/install-guide.ja.md](docs/install-guide.ja.md)。
+- メンテナーの署名と公開の手順は [docs/maintainer/release-signing.ja.md](docs/maintainer/release-signing.ja.md)。
 
 ## ビルド
 
@@ -59,6 +68,8 @@ cargo build --release
 `target\release\` に `mklm.exe`（GUI）、`mklm-cli.exe`、`mklm-helper.exe` ができる。**3 つは同じフォルダーに置いて使う**（GUI と CLI は、同じフォルダーの `mklm-helper.exe` を UAC で昇格して起動し、書き込みはすべて helper が行う）。
 
 インストーラーは NSIS 3.12 以降で作る: `powershell -ExecutionPolicy Bypass -File installer\build-installer.ps1 -Arch x64`（`dist\` に `MKLM-Setup-<版>-x64.exe` と `SHA256SUMS` ができる）。`v0.1.0` のようなタグをプッシュすると、GitHub Actions が x64 版と ARM64 版を作って Release の下書きに添付する（`.github/workflows/release.yml`）。
+
+リリースの署名と公開は `cargo xtask`（`xtask/`）で行う。`xtask` は公開のデータだけを扱い、秘密鍵には触れない（署名は公式の `minisign` がオフラインで行う）。手順は [docs/maintainer/release-signing.ja.md](docs/maintainer/release-signing.ja.md)。
 
 ## 使い方
 
@@ -120,7 +131,10 @@ mklm-cli reboot
 | 文書 | 内容 |
 |---|---|
 | [docs/recovery.md](docs/recovery.md) | 復旧ガイド（日本語）。サインインできない、配列がおかしい、などのときの戻し方 |
+| [docs/install-guide.ja.md](docs/install-guide.ja.md) | インストール、自動更新、手での署名の確かめ方、終了コード |
 | [docs/design/m2-engine.md](docs/design/m2-engine.md) | M2 の設計（書き込み、ジャーナル、回復、helper との通信、CLI） |
+| [docs/design/m5b-updater.md](docs/design/m5b-updater.md) | M5b の設計（自動更新、署名、検証、インストールの流れ） |
+| [docs/maintainer/release-signing.ja.md](docs/maintainer/release-signing.ja.md) | メンテナー向け: 鍵、署名、公開、鍵の点検、事故の対応 |
 | [docs/research/m0-results.md](docs/research/m0-results.md) | M0 の実機での検証結果 |
 
 ## ライセンス
@@ -171,11 +185,19 @@ Today this means hand-editing the registry (each device's `Device Parameters` an
 | M2 | Writes and safety net (journal, recovery, helper, write commands) | Done; the reboot tests (R8-R10) come later (design: [docs/design/m2-engine.md](docs/design/m2-engine.md), Japanese) |
 | M3 | GUI (Slint) (design: [docs/design/m3-gui.md](docs/design/m3-gui.md), Japanese) | Done |
 | M4 | Background features (drift detection and notification) | Planned |
-| M5 | Distribution (NSIS installer, GitHub Releases, auto-update) | Installer and release builds done; auto-update planned |
+| M5 | Distribution (NSIS installer, GitHub Releases, auto-update) | Installer and release builds done; auto-update (M5b, design: [docs/design/m5b-updater.md](docs/design/m5b-updater.md), Japanese) in progress, from v0.2.0 |
 
 ### Install
 
 Download `MKLM-Setup-<version>-x64.exe` (or `-arm64.exe` for ARM PCs) from [GitHub Releases](https://github.com/SHIN-DATA-CENTER/multi-keyboard-layout-manager/releases) and run it. See [docs/install-guide.ja.md](docs/install-guide.ja.md) (English summary at the end) for the unsigned-download warnings and uninstalling.
+
+#### Automatic updates (from v0.2.0)
+
+- Once a day MKLM checks GitHub for a new version and downloads it (you can turn this off in Settings). It sends only its version and x64/ARM64.
+- Downloads are verified against `latest.json`, signed offline by the maintainer with minisign, and its SHA-256. Revoked keys, replayed older manifests (rollback) and downgrades are refused.
+- **It installs only when you press "Update now".** In the UAC prompt, click "Show more details" and check that the program is `C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe` before you answer "Yes". MKLM closes and reopens by itself; keyboard settings are not touched.
+- v0.1.0 has no updater: install v0.2.0 by hand once.
+- `mklm-cli update --check` and `mklm-cli update --status` check and report (the CLI never installs). Exit codes, silent installs (`/S`) and verifying signatures by hand: [docs/install-guide.ja.md](docs/install-guide.ja.md). The maintainer's signing and publishing steps: [docs/maintainer/release-signing.ja.md](docs/maintainer/release-signing.ja.md) (Japanese).
 
 ### Build
 
@@ -188,6 +210,8 @@ cargo build --release
 This produces `mklm.exe` (GUI), `mklm-cli.exe` and `mklm-helper.exe` in `target\release\`. **Keep the three in the same folder**: the GUI and the CLI start the `mklm-helper.exe` next to them, elevated through UAC, and the helper performs every write.
 
 The installer needs NSIS 3.12 or later: `powershell -ExecutionPolicy Bypass -File installer\build-installer.ps1 -Arch x64` writes `dist\MKLM-Setup-<version>-x64.exe` and `SHA256SUMS`. Pushing a tag such as `v0.1.0` makes GitHub Actions build the x64 and ARM64 installers and attach them to a draft release (`.github/workflows/release.yml`).
+
+Releases are signed and published with `cargo xtask` (`xtask/`), which handles public data only and never touches a secret key (the official `minisign` signs offline). See [docs/maintainer/release-signing.ja.md](docs/maintainer/release-signing.ja.md) (Japanese).
 
 ### Usage
 
@@ -249,7 +273,10 @@ After the restart and sign-in, a confirmation (`mklm-cli post-reboot`) opens; ch
 | Document | Contents |
 |---|---|
 | [docs/recovery.md](docs/recovery.md) | Recovery guide (Japanese): what to do when you cannot sign in or a layout is wrong |
+| [docs/install-guide.ja.md](docs/install-guide.ja.md) | Installing, automatic updates, verifying signatures by hand, exit codes (English summary at the end) |
 | [docs/design/m2-engine.md](docs/design/m2-engine.md) | M2 design (Japanese): writes, journal, recovery, helper protocol, CLI |
+| [docs/design/m5b-updater.md](docs/design/m5b-updater.md) | M5b design (Japanese): automatic updates, signatures, verification, the install flow |
+| [docs/maintainer/release-signing.ja.md](docs/maintainer/release-signing.ja.md) | For the maintainer (Japanese): keys, signing, publishing, key drills, incidents |
 | [docs/research/m0-results.md](docs/research/m0-results.md) | M0 results on real hardware (Japanese) |
 
 ### License

@@ -16,7 +16,7 @@
 
 mod base64;
 #[cfg(all(debug_assertions, mklm_update_dev))]
-mod dev;
+mod dev; // the development key and DEV_MARKER (design m5b A.10)
 pub mod fetch;
 pub mod gate;
 pub mod keys;
@@ -30,7 +30,7 @@ pub mod url;
 pub mod verify;
 pub mod version;
 #[cfg(all(windows, feature = "winhttp"))]
-pub mod winhttp; // the development key and DEV_MARKER (design m5b A.10)
+pub mod winhttp;
 
 pub use keys::{AnchorEntry, AnchorsFile, KeyError, KeyFingerprint, KeyId, KeyRole, TrustAnchors};
 pub use manifest::{Arch, Manifest, ManifestAsset, Sha256Digest, Sha256Stream};
