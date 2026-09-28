@@ -7,6 +7,9 @@
 //!   UTF-8), and the build ID (design m2 E.3) both as `env!("MKLM_BUILD_ID")` and as the
 //!   VERSIONINFO string `MKLMBuildId`, computed by apps/build_id.rs exactly as the CLI and the
 //!   helper do: the GUI launches the helper, which accepts only its own build;
+//! - embeds the executable's icon (design m3 F.7): `mklm.ico`, made here from the drawing the
+//!   window and the tray use (src/icon_image.rs), so the two never differ and no binary file is
+//!   kept in the repository;
 //! - links like the other executables: `/DEPENDENTLOADFLAG:0x800` and the hybrid CRT.
 
 use std::env;
@@ -16,14 +19,22 @@ use std::path::{Path, PathBuf};
 #[path = "../build_id.rs"]
 mod build_id;
 
+#[path = "src/icon_image.rs"]
+mod icon_image;
+
 const RC_FILE: &str = "res/mklm.rc";
 const MANIFEST_FILE: &str = "res/mklm.exe.manifest";
+const ICON_SOURCE: &str = "src/icon_image.rs";
 /// Generated into OUT_DIR, which embed-resource adds to the include path.
 const VERSION_HEADER: &str = "mklm-version.rch";
+/// Generated into OUT_DIR too; res/mklm.rc names it without a path (rc.exe searches the include
+/// path for it).
+const ICON_FILE: &str = "mklm.ico";
 
 fn main() {
     println!("cargo:rerun-if-changed={RC_FILE}");
     println!("cargo:rerun-if-changed={MANIFEST_FILE}");
+    println!("cargo:rerun-if-changed={ICON_SOURCE}");
     println!("cargo:rerun-if-changed=translations");
 
     let config = slint_build::CompilerConfiguration::new()
@@ -43,6 +54,7 @@ fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
     fs::write(out_dir.join(VERSION_HEADER), version_header(&build_id))
         .expect("failed to write the version header");
+    fs::write(out_dir.join(ICON_FILE), icon_image::ico_file()).expect("failed to write the icon");
     embed_resource::compile(RC_FILE, embed_resource::NONE)
         .manifest_required()
         .expect("failed to compile res/mklm.rc");

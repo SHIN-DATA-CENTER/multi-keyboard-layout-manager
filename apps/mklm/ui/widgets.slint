@@ -4,6 +4,16 @@ import { Palette, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { BadgeVm, ChoiceVm, KeyTestVm, Tone } from "structs.slint";
 
+// Whether an overlay (a dialog) is open over the page (design m3 E.1). Rust sets it together with
+// the overlay (src/app.rs), so both change before the next frame. While it is open, the page's
+// controls are disabled — every button, check box, combo box and focus scope of a page binds
+// `enabled` to `!Modal.open` — so that Tab cannot leave the dialog for the page behind it; the
+// dialog's frame swallows clicks and the wheel. Slint has no inert subtree, hence the binding on
+// each control.
+export global Modal {
+    in-out property <bool> open: false;
+}
+
 // A coloured label. Screen readers get `vm.accessible-text` (design m3 E.3).
 export component Badge inherits Rectangle {
     in property <BadgeVm> vm;
@@ -28,19 +38,30 @@ export component Badge inherits Rectangle {
 // The title of a page (design m3 E.1, E.2). It takes the focus when the page opens, so that a
 // screen reader reads the new page's title and the focus never disappears with the old page
 // (pages are rebuilt by `if`; review U16 d). Tab moves on to the page's first control.
+//
+// A page opened under a dialog leaves the focus to the dialog. When the dialog closes, its
+// controls are gone with it and the focus comes back here: Slint cannot tell which control had
+// the focus before the dialog opened, and the page's title is a well-defined place to go on from.
 export component PageHeader inherits VerticalLayout {
     in property <string> title;
     in property <string> subtitle;
     in property <bool> focus-on-open: true;
+    private property <bool> page-active: !Modal.open;
+    changed page-active => {
+        if (self.page-active && root.focus-on-open) {
+            heading.focus();
+        }
+    }
     spacing: 4px;
 
     heading := FocusScope {
+        enabled: !Modal.open;
         min-height: heading-layout.preferred-height;
         accessible-role: AccessibleRole.text;
         accessible-label: root.title;
         accessible-description: root.subtitle;
         init => {
-            if (root.focus-on-open) {
+            if (root.focus-on-open && !Modal.open) {
                 self.focus();
             }
         }
@@ -123,11 +144,13 @@ export component RadioList inherits Rectangle {
     in property <[ChoiceVm]> choices;
     in-out property <int> selected: -1;
     in property <string> label;
+    // Off under a dialog (design m3 E.1).
+    in property <bool> enabled: !Modal.open;
     callback chosen(int);
     min-height: list.preferred-height + 8px;
 
     function pick(index: int) {
-        if (index >= 0 && index < root.choices.length && root.choices[index].enabled) {
+        if (root.enabled && index >= 0 && index < root.choices.length && root.choices[index].enabled) {
             root.selected = index;
             root.chosen(index);
         }
@@ -149,6 +172,7 @@ export component RadioList inherits Rectangle {
     }
 
     group := FocusScope {
+        enabled: root.enabled;
         accessible-role: AccessibleRole.radio-group;
         accessible-label: root.label;
         key-pressed(event) => {
@@ -180,7 +204,7 @@ export component RadioList inherits Rectangle {
                 accessible-label: choice.text;
                 accessible-description: choice.detail;
                 accessible-checked: index == root.selected;
-                accessible-enabled: choice.enabled;
+                accessible-enabled: choice.enabled && root.enabled;
 
                 // The focus ring, outside the fill: on the selected choice (or the first).
                 Rectangle {
@@ -194,7 +218,7 @@ export component RadioList inherits Rectangle {
                 }
 
                 TouchArea {
-                    enabled: choice.enabled;
+                    enabled: choice.enabled && root.enabled;
                     clicked => {
                         root.pick(index);
                         group.focus();
@@ -217,7 +241,7 @@ export component RadioList inherits Rectangle {
                         Text {
                             text: choice.text;
                             font-size: Theme.font-body;
-                            color: !choice.enabled ? Theme.text-secondary : (index == root.selected ? Theme.selected-text : Theme.text);
+                            color: !choice.enabled ? Theme.text-disabled : (index == root.selected ? Theme.selected-text : Theme.text);
                             wrap: word-wrap;
                             accessible-role: AccessibleRole.none;
                         }
@@ -242,6 +266,8 @@ export component KeyTestArea inherits Rectangle {
     in property <KeyTestVm> vm;
     // The accessible description: the countdown passes its whole instruction (design m3 E.3).
     in property <string> description: vm.prompt;
+    // On a page, off under a dialog (design m3 E.1); a dialog's own key test sets it to true.
+    in property <bool> enabled: !Modal.open;
     // (text, shift)
     callback key-pressed(string, bool);
     out property <bool> focused: scope.has-focus;
@@ -256,6 +282,7 @@ export component KeyTestArea inherits Rectangle {
     }
 
     scope := FocusScope {
+        enabled: root.enabled;
         accessible-role: AccessibleRole.text-input;
         accessible-label: @tr("Key test");
         accessible-description: root.description;
@@ -311,6 +338,8 @@ export component KeyTestArea inherits Rectangle {
 // for does not press a button), and Esc stops identifying.
 export component CaptureArea inherits Rectangle {
     in property <string> text;
+    // Off under a dialog (design m3 E.1).
+    in property <bool> enabled: !Modal.open;
     callback escape();
     min-height: label.preferred-height + 16px;
     border-radius: 6px;
@@ -323,6 +352,7 @@ export component CaptureArea inherits Rectangle {
     }
 
     scope := FocusScope {
+        enabled: root.enabled;
         accessible-role: AccessibleRole.text-input;
         accessible-label: @tr("Identify by key press");
         accessible-description: root.text;
@@ -349,21 +379,39 @@ export component CaptureArea inherits Rectangle {
     }
 }
 
-// The frame of an overlay dialog (design m3 B.6, E.1, E.4): swallows clicks on the page behind
-// it; Esc that no part of the dialog handles calls `escape` (the countdown: revert). Dialogs are
-// built of three parts: the title (here), a `DialogBody` that scrolls, and a `DialogButtons` row
-// that always stays visible, so no button is ever drawn outside the frame at 200 % and a large
-// text size (review U11).
+// The frame of an overlay dialog (design m3 B.6, E.1, E.4): swallows clicks and the wheel on the
+// page behind it (whose controls are off meanwhile, `Modal`); Esc that no part of the dialog
+// handles calls `escape` (the countdown: revert). Dialogs are built of three parts: the title
+// (here), a `DialogBody` that scrolls, and a `DialogButtons` row that always stays visible, so no
+// button is ever drawn outside the frame at 200 % and a large text size (review U11).
+//
+// When the dialog opens, its frame takes the focus (design m3 E.1): a screen reader reads the
+// title and `description`, Esc works at once, Tab goes on to the dialog's controls, and Enter or
+// Space confirm nothing by accident (a UAC prompt starts only from a button the user chose). The
+// countdown gives the focus to its key test instead (`focus-on-open: false`).
 export component DialogFrame inherits Rectangle {
     in property <string> title;
+    // What is read with the title when the dialog takes the focus.
+    in property <string> description;
+    in property <bool> focus-on-open: true;
     callback escape();
     background: #00000080;
-    accessible-role: AccessibleRole.groupbox;
-    accessible-label: root.title;
 
-    TouchArea { }
+    TouchArea {
+        scroll-event(event) => {
+            accept
+        }
+    }
 
     keys := FocusScope {
+        accessible-role: AccessibleRole.groupbox;
+        accessible-label: root.title;
+        accessible-description: root.description;
+        init => {
+            if (root.focus-on-open) {
+                self.focus();
+            }
+        }
         key-pressed(event) => {
             if (event.text == Key.Escape) {
                 root.escape();
@@ -379,8 +427,9 @@ export component DialogFrame inherits Rectangle {
             height: min(parent.height - 24px, inner.preferred-height);
             background: Theme.window-background;
             border-radius: 8px;
-            border-width: 1px;
-            border-color: Theme.border;
+            // The frame itself shows the focus while it has it (design m3 E.1).
+            border-width: keys.has-focus ? Theme.focus-width : 1px;
+            border-color: keys.has-focus ? Theme.focus-ring : Theme.border;
 
             inner := VerticalLayout {
                 padding: 16px;
@@ -396,6 +445,64 @@ export component DialogFrame inherits Rectangle {
                 @children
             }
         }
+    }
+}
+
+// What the Windows prompt for an unsigned program says and what to check on it (plan 3.5 step
+// 2; M2 R12: explain first, then prompt; review U18). The standalone page before the first change
+// shows it, and so does the settings page before its first prompt. T-APPLY-1 checks the text
+// against the real prompt.
+export component UacExplanation inherits VerticalLayout {
+    spacing: 8px;
+
+    Body {
+        text: @tr("The next screen asks \"Do you want to allow this app from an unknown publisher to make changes to your device?\". MKLM is not code-signed yet, so the verified publisher shows as \"Unknown\". Check that mklm-helper.exe is shown in the middle of the screen, then choose Yes.");
+    }
+
+    // A text mock of the prompt (review U18).
+    Rectangle {
+        border-width: 1px;
+        border-color: Theme.border;
+        border-radius: 6px;
+        min-height: mock.preferred-height;
+        accessible-role: AccessibleRole.groupbox;
+        accessible-label: @tr("What the Windows prompt looks like");
+        mock := VerticalLayout {
+            padding: 12px;
+            spacing: 4px;
+            Caption {
+                text: @tr("User Account Control");
+            }
+
+            Body {
+                text: @tr("Do you want to allow this app from an unknown publisher to make changes to your device?");
+                font-weight: 600;
+            }
+
+            Body {
+                text: "mklm-helper.exe";
+            }
+
+            Caption {
+                text: @tr("Verified publisher: Unknown");
+            }
+
+            Caption {
+                text: @tr("File origin: Hard drive on this computer");
+            }
+
+            Caption {
+                text: @tr("[Yes] [No]");
+            }
+        }
+    }
+
+    Body {
+        text: @tr("On an account that is not an administrator, Windows asks for an administrator's password or PIN instead.");
+    }
+
+    Caption {
+        text: @tr("Nothing is changed if you choose No.");
     }
 }
 

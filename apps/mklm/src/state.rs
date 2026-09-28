@@ -72,6 +72,11 @@ pub mod wizard;
 pub use journal_pages::{JournalEffect, JournalMsg, JournalPages};
 pub use wizard::{WizardMsg, WizardState};
 
+/// The settings page (WP-U7): the longer countdown, "restore on uninstall", restoring everything.
+pub mod settings_page;
+
+pub use settings_page::{SettingsMsg, SettingsPageState};
+
 /// The page in the main area (matches `Screen` in ui/structs.slint). Twelve pages: the change
 /// page covers assignment, detection and the apply method (review U14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -166,6 +171,10 @@ pub struct ChangeDraft {
     pub members: Vec<String>,
     /// "MKLM 導入前に戻す…": the page previews the restore of this device.
     pub restore: bool,
+    /// With `restore`: "すべてのキーボードを MKLM 導入前に戻す…" from the settings page
+    /// (`RestoreScope::All`, design m3 B.14). `members` are the keyboards it puts back, known once
+    /// prepared.
+    pub restore_all: bool,
     /// "今すぐ反映…" (design m3 B.12; review U8): no layout to choose, only how — a live reset
     /// through `Request::Recover`, or not now. `name` lists the devices, `members` holds every
     /// collection of them (the apply method's default and the result's "今の状態" look at these).
@@ -202,6 +211,7 @@ impl ChangeDraft {
             detection: Detection::for_keyboards(members.clone()),
             members,
             restore: false,
+            restore_all: false,
             apply_now: false,
             choice: None,
             method: None,
@@ -362,6 +372,8 @@ pub struct AppState {
     /// The first-run wizard while it is open (design m3 B.1): at start while
     /// `settings.wizard.completed` is false, or from Settings.
     pub wizard: Option<WizardState>,
+    /// What the settings page keeps (WP-U7).
+    pub settings_page: SettingsPageState,
 }
 
 /// Something that happened (a user action, a worker's answer, a watcher).
@@ -505,6 +517,8 @@ pub enum AppMsg {
     AutostartRead(Box<AutostartReport>),
     /// The first-run wizard (design m3 B.1; WP-U2).
     Wizard(WizardMsg),
+    /// The settings page (WP-U7).
+    Settings(SettingsMsg),
 }
 
 /// Something `app.rs` must do.
@@ -549,6 +563,9 @@ pub enum Effect {
     /// the I/O worker (the wizard's step 3, design m3 B.1, J.9); answered by
     /// `WizardMsg::ForeignRead`.
     ReadNonKeyboardValues(Vec<mklm_core::KeyboardDevice>),
+    /// Read "restore on uninstall" (HKLM, unelevated) on the I/O worker (design m3 B.14);
+    /// answered by `SettingsMsg::MachineSettingsRead`.
+    ReadMachineSettings,
     ShowWindow,
     HideWindow,
     Quit,
@@ -692,6 +709,10 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             if page == Page::Settings {
                 // The switch shows the value itself, which Task Manager may have changed.
                 effects.insert(0, Effect::Autostart(AutostartTask::Read));
+            }
+            // "restore on uninstall" is read again whenever the settings page opens.
+            for effect in settings_page::entered(state, page).into_iter().rev() {
+                effects.insert(0, effect);
             }
             effects
         }
@@ -934,6 +955,10 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
                     vec![Effect::Render]
                 }
                 Page::Change => {
+                    // The restore preview of everything came from the settings page.
+                    if let Some(effects) = settings_page::cancel_restore_all(state) {
+                        return effects;
+                    }
                     leave_change(state);
                     vec![Effect::Read, Effect::Render]
                 }
@@ -1119,6 +1144,7 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             vec![Effect::Render]
         }
         AppMsg::Wizard(msg) => wizard::handle(state, msg),
+        AppMsg::Settings(msg) => settings_page::handle(state, msg),
     }
 }
 
@@ -1331,6 +1357,15 @@ fn replan(draft: &mut ChangeDraft) {
         draft.plan = None;
         return;
     };
+    if draft.restore_all {
+        draft.plan = Some(crate::vm::change::plan_restore_scope(
+            &prepared.snapshot,
+            &prepared.journal,
+            &mklm_core::RestoreScope::All,
+            draft.resolved_method(),
+        ));
+        return;
+    }
     let Some(target) = crate::vm::change::target_instance(&prepared.snapshot, &draft.members)
     else {
         draft.plan = None;
@@ -1382,6 +1417,12 @@ fn change_prepared(
         }
     };
     let blocker = prepared.blocker.clone();
+    if draft.restore_all {
+        // The keyboards the restore puts back: the apply method's default looks at them, and
+        // the result names them.
+        draft.members =
+            crate::vm::change::restore_all_members(&prepared.snapshot, &prepared.journal);
+    }
     draft.method_default = Some(crate::vm::change::default_apply_method(
         &activity,
         &draft.members,
@@ -1423,7 +1464,7 @@ fn draft_targets(state: &AppState) -> Vec<SessionTarget> {
         return Vec::new();
     };
     let snapshot = draft_snapshot(state, draft);
-    if draft.apply_now {
+    if draft.apply_now || draft.restore_all {
         let Some(snapshot) = snapshot else {
             return Vec::new();
         };
@@ -1460,6 +1501,12 @@ fn start_request(
         // UAC prompt is up, does nothing.
         return Vec::new();
     }
+    // The keep-or-revert time of the settings (20 or 60 s, design m3 B.14; WP-E3).
+    let (request, apply) = crate::vm::settings::with_countdown(
+        request,
+        apply,
+        crate::vm::change::countdown_seconds(&state.settings),
+    );
     let session = state.next_session;
     state.next_session += 1;
     state.session = SessionPhase::Launching { id: session };
@@ -1577,6 +1624,8 @@ fn session_ended(state: &mut AppState, outcome: SessionOutcome) -> Vec<Effect> {
     );
     // A conflict resolution the helper refused for INV-PS2 is explained on its page.
     journal_pages::session_ended(state, &outcome.report);
+    // A saved machine setting is read again for the settings page.
+    let reread = settings_page::session_ended(state);
     state.outcome = Some(outcome);
     // The RunOnce rule already ran on the worker (design m3 A.2.3).
     let mut effects = if abandoned {
@@ -1589,6 +1638,7 @@ fn session_ended(state: &mut AppState, outcome: SessionOutcome) -> Vec<Effect> {
         state.result_read_pending = true;
         vec![Effect::ReadForResult, Effect::Render]
     };
+    effects.extend(reread);
     if state.quit_pending {
         effects.push(Effect::Quit);
     }
@@ -3373,7 +3423,11 @@ mod tests {
         let mut state = AppState::default();
         assert_eq!(
             update(&mut state, AppMsg::Navigate(Page::Settings)),
-            vec![Effect::Autostart(AutostartTask::Read), Effect::Render]
+            vec![
+                Effect::ReadMachineSettings,
+                Effect::Autostart(AutostartTask::Read),
+                Effect::Render
+            ]
         );
         assert_eq!(
             update(&mut state, AppMsg::AutostartToggled(false)),

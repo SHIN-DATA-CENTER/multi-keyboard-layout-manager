@@ -1,0 +1,91 @@
+== just opened: nothing read yet ==
+autostart: ☐
+autostart available: false
+long countdown: ☐
+show hidden: ☐
+uninstall: Put the keyboards back when MKLM is uninstalled: unknown
+uninstall note: Checking…
+can change: false
+
+== read: starts at sign-in, restores on uninstall ==
+autostart: ☑
+autostart available: true
+long countdown: ☐
+show hidden: ☐
+uninstall: Put the keyboards back when MKLM is uninstalled: on
+uninstall note: Uninstalling MKLM puts every keyboard's settings back to what they were before MKLM. This setting applies to every user of this PC.
+can change: true
+
+== turning "restore on uninstall" off, before the first prompt ==
+autostart: ☑
+autostart available: true
+long countdown: ☐
+show hidden: ☐
+uninstall: Put the keyboards back when MKLM is uninstalled: on
+uninstall note: Uninstalling MKLM puts every keyboard's settings back to what they were before MKLM. This setting applies to every user of this PC.
+can change: true
+confirm: Leave the keyboards as they are when MKLM is uninstalled
+confirm text: Uninstalling MKLM will leave the keyboards as MKLM last set them; they will not go back to what they were before MKLM. This setting applies to every user of this PC, so saving it needs an administrator's permission. No keyboard's layout changes now.
+uac: (the whole explanation)
+button: Turn off (Windows asks next)
+
+== turning it on again, longer countdown, hidden keyboards shown ==
+autostart: ☐
+autostart available: false
+long countdown: ☑
+show hidden: ☑
+uninstall: Put the keyboards back when MKLM is uninstalled: off
+uninstall note: Uninstalling MKLM leaves the keyboards' settings as they are. This setting applies to every user of this PC.
+can change: true
+confirm: Put the keyboards back when MKLM is uninstalled
+confirm text: Uninstalling MKLM will put every keyboard's settings back to what they were before MKLM. This setting applies to every user of this PC, so saving it needs an administrator's permission. No keyboard's layout changes now.
+uac: Windows asks for permission next (the publisher shows as "Unknown"). Check that it names mklm-helper.exe, then choose Yes.
+button: Turn on (Windows asks next)
+
+== sign-in start turned off in Task Manager, setting unreadable ==
+autostart: ☐
+autostart available: false
+autostart note: Turned off in Windows' startup settings. You can turn it on under Startup apps in Task Manager
+long countdown: ☐
+show hidden: ☐
+uninstall: Put the keyboards back when MKLM is uninstalled: unknown
+uninstall note: This setting could not be read, so it cannot be changed now. Open the settings page again to read it again.
+can change: false
+
+== an elevated MKLM: no prompt to explain ==
+autostart: ☐
+autostart available: true
+autostart note: The sign-in start setting could not be changed
+long countdown: ☐
+show hidden: ☐
+uninstall: Put the keyboards back when MKLM is uninstalled: on
+uninstall note: Uninstalling MKLM puts every keyboard's settings back to what they were before MKLM. This setting applies to every user of this PC.
+can change: true
+confirm: Leave the keyboards as they are when MKLM is uninstalled
+confirm text: Uninstalling MKLM will leave the keyboards as MKLM last set them; they will not go back to what they were before MKLM. This setting applies to every user of this PC, so saving it needs an administrator's permission. No keyboard's layout changes now.
+button: Turn off
+
+== about ==
+version: Version 0.1.0 (build 0123456789abcdef)
+licence: Slint: Slint Royalty-free License 2.0
+licence: windows-rs (windows, windows-registry): MIT License or Apache License 2.0
+licence: serde, serde_json: MIT License or Apache License 2.0
+licence: toml: MIT License or Apache License 2.0
+
+== restore everything (the M2 journal of the development machine), as it is ==
+keyboards: 0
+title: Put every keyboard back to before MKLM
+summary: Everything is as it was before MKLM; there is nothing to put back.
+all users: ⓘ This setting applies to every user of this PC.
+uac: Windows asks for permission next (the publisher shows as "Unknown"). Check that it names mklm-helper.exe, then choose Yes.
+button: Put back (Windows asks next)
+can apply: false
+
+== restore everything (the M2 journal of the development machine), the Keychron set to JIS ==
+keyboards: 1
+title: Put every keyboard back to before MKLM
+warning: 2 values were changed outside MKLM; you choose what to do with them before anything is put back.
+all users: ⓘ This setting applies to every user of this PC.
+uac: Windows asks for permission next (the publisher shows as "Unknown"). Check that it names mklm-helper.exe, then choose Yes.
+button: Put back (Windows asks next)
+can apply: true

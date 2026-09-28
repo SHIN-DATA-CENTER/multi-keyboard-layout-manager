@@ -4,12 +4,17 @@
 // or light by AppWindow.apply-color-scheme (never "unknown", plan 3.7).
 //
 // std-widgets take their colours from Palette, which cannot be overridden; our own components
-// (badges, list rows, banners, the key test area, dialogs) use these tokens, which follow the
-// system colours while high contrast is on (design m3 C.2).
+// (badges, list rows, banners, the key test area, dialogs, the navigation, the choices) use these
+// tokens, which follow the system colours while high contrast is on (design m3 C.2): a border
+// instead of a fill, a 3px focus ring, GrayText for what cannot be chosen. For v1 the std-widgets
+// keep the Palette compromise of design m3 C.2 (dark or light after the high-contrast
+// background); replacing them is left for later (design m3 J.3).
 //
 // Font sizes are multiples of `font-scale`, Windows' "Text size" (design m3 E.4): Slint does not
-// apply it by itself. Whether the std-widgets follow `default-font-size` is checked in T-A11Y-4
-// (design m3 J.3).
+// apply it by itself. The window's `default-font-size` is `font-body`, and the fluent std-widgets
+// size their text from it (their text is the default font size, `1rem`), so buttons, check boxes
+// and combo boxes grow with the text size too; T-A11Y-4 confirms it on the real screen (design m3
+// J.3).
 
 import { Palette } from "std-widgets.slint";
 import { Tone } from "structs.slint";
@@ -41,6 +46,8 @@ export global Theme {
     out property <brush> surface: high-contrast ? hc-window : Palette.alternate-background;
     out property <brush> text: high-contrast ? hc-window-text : Palette.foreground;
     out property <brush> text-secondary: high-contrast ? hc-window-text : (dark ? #ffffffc9 : #00000099);
+    // What cannot be chosen now (a disabled choice): GrayText in high contrast.
+    out property <brush> text-disabled: high-contrast ? hc-gray-text : (dark ? #ffffff8a : #00000073);
     out property <brush> border: high-contrast ? hc-window-text : Palette.border;
     out property <brush> focus-ring: high-contrast ? hc-highlight : Palette.accent-background;
     out property <brush> accent: high-contrast ? hc-highlight : Palette.accent-background;

@@ -5,7 +5,7 @@ import { Button, CheckBox } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { CheckRowVm, KeyTestVm, Tone } from "../structs.slint";
 import {
-    Banner, Body, Caption, DialogBody, DialogButtons, KeyTestArea, PageHeader,
+    Banner, Body, Caption, DialogBody, DialogButtons, KeyTestArea, Modal, PageHeader,
 } from "../widgets.slint";
 
 export component RestartScreen inherits VerticalLayout {
@@ -61,6 +61,7 @@ export component RestartScreen inherits VerticalLayout {
             alignment: start;
             Button {
                 text: @tr("Open the sign-in options");
+                enabled: !Modal.open;
                 clicked => {
                     root.open-settings-page(5);
                 }
@@ -68,6 +69,7 @@ export component RestartScreen inherits VerticalLayout {
         }
         if root.ready: CheckBox {
             text: @tr("I know how to sign in if a keyboard types differently");
+            enabled: !Modal.open;
             checked <=> root.acknowledged;
         }
         if root.ready: Caption {
@@ -98,6 +100,7 @@ export component RestartScreen inherits VerticalLayout {
         alignment: stretch;
         if root.can-undo: Button {
             text: @tr("Undo the change…");
+            enabled: !Modal.open;
             clicked => {
                 root.undo();
             }
@@ -108,7 +111,7 @@ export component RestartScreen inherits VerticalLayout {
 
         Button {
             text: @tr("Later");
-            enabled: !root.restarting;
+            enabled: !root.restarting && !Modal.open;
             clicked => {
                 root.later();
             }
@@ -117,7 +120,7 @@ export component RestartScreen inherits VerticalLayout {
         if root.ready: Button {
             text: @tr("Restart now");
             primary: true;
-            enabled: root.acknowledged && !root.restarting;
+            enabled: root.acknowledged && !root.restarting && !Modal.open;
             clicked => {
                 root.restart-now(root.acknowledged);
             }
@@ -240,6 +243,7 @@ export component PostRebootScreen inherits VerticalLayout {
         }
         if root.empty-note == "": CheckBox {
             text: @tr("Show the technical details");
+            enabled: !Modal.open;
             checked <=> root.show-details;
         }
         if root.show-details: VerticalLayout {
@@ -262,6 +266,7 @@ export component PostRebootScreen inherits VerticalLayout {
     DialogButtons {
         Button {
             text: root.empty-note != "" ? @tr("Close") : @tr("Decide later");
+            enabled: !Modal.open;
             clicked => {
                 root.later();
             }
@@ -269,6 +274,7 @@ export component PostRebootScreen inherits VerticalLayout {
 
         if root.empty-note == "": Button {
             text: root.revert-text != "" ? root.revert-text : @tr("Revert");
+            enabled: !Modal.open;
             clicked => {
                 root.revert();
             }
@@ -276,7 +282,7 @@ export component PostRebootScreen inherits VerticalLayout {
         if root.empty-note == "": Button {
             text: @tr("Keep");
             primary: true;
-            enabled: root.can-keep;
+            enabled: root.can-keep && !Modal.open;
             clicked => {
                 root.keep();
             }

@@ -336,11 +336,27 @@ pub fn plan_restore(
     target: &str,
     method: ApplyMethod,
 ) -> DraftPlan {
-    let scope = RestoreScope::Device {
-        instance_id: target.to_string(),
-    };
+    plan_restore_scope(
+        snapshot,
+        journal,
+        &RestoreScope::Device {
+            instance_id: target.to_string(),
+        },
+        method,
+    )
+}
+
+/// Plans a restore to the values before MKLM of `scope`: one device (the change page's "MKLM
+/// 導入前に戻す…"), or everything (the settings page's "すべてのキーボードを MKLM 導入前に戻す…",
+/// design m3 B.14).
+pub fn plan_restore_scope(
+    snapshot: &SystemSnapshot,
+    journal: &mklm_core::Journal,
+    scope: &RestoreScope,
+    method: ApplyMethod,
+) -> DraftPlan {
     let preview = |options: &ApplyOptions| {
-        preview_restore(snapshot, journal, &scope, ConflictPolicy::Report, options)
+        preview_restore(snapshot, journal, scope, ConflictPolicy::Report, options)
     };
     let live_options = ApplyMethod::Live.options();
     let live = match preview(&live_options) {
@@ -367,6 +383,47 @@ pub fn plan_restore(
         },
         Err(error) => DraftPlan::refused(error),
     }
+}
+
+/// The keyboards a restore of everything puts back (instance IDs, with every collection of their
+/// devices): the ones whose values it writes or finds changed outside MKLM. The apply method's
+/// default looks at them (design m3 B.5), and the result names them (design m3 B.17).
+pub fn restore_all_members(snapshot: &SystemSnapshot, journal: &mklm_core::Journal) -> Vec<String> {
+    let Ok(preview) = preview_restore(
+        snapshot,
+        journal,
+        &RestoreScope::All,
+        ConflictPolicy::Report,
+        &ApplyMethod::Live.options(),
+    ) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = Vec::new();
+    for row in preview.writes.iter().chain(&preview.conflicts) {
+        if let WriteTarget::Device { instance_id } = &row.target
+            && !ids.iter().any(|id| id.eq_ignore_ascii_case(instance_id))
+        {
+            ids.push(instance_id.clone());
+        }
+    }
+    crate::vm::keyboards::device_members(&assess(snapshot), &ids)
+}
+
+/// `Request::RestoreBaseline` for a ready restore preview of `scope`; `None` when the preview
+/// refuses the order (INV-PS2).
+fn restore_request(
+    scope: RestoreScope,
+    preview: &RestorePreview,
+    apply: ApplyOptions,
+) -> Option<Request> {
+    if preview.order.is_err() {
+        return None;
+    }
+    Some(Request::RestoreBaseline(RestoreBaselineRequest {
+        scope,
+        on_conflict: ConflictPolicy::Report,
+        apply,
+    }))
 }
 
 /// The request for a ready plan, and the options a recovery after a lost helper uses: `None`
@@ -397,18 +454,13 @@ pub fn change_request(
             }],
             expected: Some(expected(migration)),
         }),
-        Planned::Restore(preview) => {
-            if preview.order.is_err() {
-                return None;
-            }
-            Request::RestoreBaseline(RestoreBaselineRequest {
-                scope: RestoreScope::Device {
-                    instance_id: target.to_string(),
-                },
-                on_conflict: ConflictPolicy::Report,
-                apply: plan.options,
-            })
-        }
+        Planned::Restore(preview) => restore_request(
+            RestoreScope::Device {
+                instance_id: target.to_string(),
+            },
+            preview,
+            plan.options,
+        )?,
         Planned::Refused(_) => return None,
     };
     Some((request, plan.options))
@@ -425,6 +477,17 @@ pub fn draft_request(draft: &ChangeDraft) -> Option<(Request, ApplyOptions)> {
     }
     let prepared = draft.prepared.as_ref()?;
     let plan = draft.plan.as_ref()?;
+    if draft.restore_all {
+        // Everything (design m3 B.14): no target keyboard.
+        let Planned::Restore(preview) = &plan.planned else {
+            return None;
+        };
+        if plan.nothing_to_change {
+            return None;
+        }
+        return restore_request(RestoreScope::All, preview, plan.options)
+            .map(|request| (request, plan.options));
+    }
     let target = target_instance(&prepared.snapshot, &draft.members)?;
     change_request(&target, draft.choice, plan)
 }
@@ -576,9 +639,16 @@ pub(crate) fn plan_lines(
 
 /// The restore preview's parts of the page (design m2 D.5, m3 B.4).
 pub fn restore_page(preview: &RestorePreview, lang: Lang) -> ChangePage {
+    // Only values changed outside MKLM: the warning below says what happens, not "nothing to put
+    // back".
+    let only_conflicts = preview.writes.is_empty() && !preview.conflicts.is_empty();
     let mut page = ChangePage {
         restore: true,
-        summary: i18n::restore_summary(preview.writes.len(), lang),
+        summary: if only_conflicts {
+            String::new()
+        } else {
+            i18n::restore_summary(preview.writes.len(), lang)
+        },
         lines: preview
             .writes
             .iter()
@@ -633,7 +703,9 @@ pub fn change_page(ctx: &ChangeContext<'_>) -> ChangePage {
             ..ChangePage::default()
         },
     };
-    page.title = if draft.restore {
+    page.title = if draft.restore_all {
+        i18n::restore_all_title(lang)
+    } else if draft.restore {
         i18n::restore_title(&draft.name, lang)
     } else {
         i18n::change_title(&draft.name, lang)
@@ -1440,6 +1512,66 @@ mod tests {
         assert_eq!(preview.conflicts.len(), 1);
         let page = restore_page(preview, Lang::Ja);
         assert!(page.warnings[0].starts_with("MKLM 以外が変更した値が 1 件あります"));
+    }
+
+    #[test]
+    fn the_restore_preview_of_everything() {
+        // "すべてのキーボードを MKLM 導入前に戻す…" from the settings page (design m3 B.14).
+        let snapshot = fixtures::dev_machine();
+        let journal = keychron_baselines();
+        // The keyboards it puts back: the Keychron (every collection of its device).
+        let members = restore_all_members(&snapshot, &journal);
+        assert!(
+            members.iter().any(|id| id.eq_ignore_ascii_case(KEYCHRON)),
+            "{members:?}"
+        );
+        assert!(
+            !members.iter().any(|id| id.starts_with("ACPI")),
+            "{members:?}"
+        );
+        assert!(restore_all_members(&snapshot, &Journal::default()).is_empty());
+        let plan = plan_restore_scope(&snapshot, &journal, &RestoreScope::All, ApplyMethod::Live);
+        let draft = ChangeDraft {
+            restore: true,
+            restore_all: true,
+            plan: Some(plan),
+            method_default: Some(MethodDefault {
+                method: ApplyMethod::Live,
+                only_keyboard_warning: false,
+            }),
+            prepared: Some(PreparedChange {
+                journal: journal.clone(),
+                ..prepared(snapshot.clone())
+            }),
+            ..ChangeDraft::new(String::new(), "すべてのキーボード".into(), members)
+        };
+        let ja = page(&draft, Lang::Ja);
+        assert_eq!(ja.title, "すべてのキーボードを MKLM 導入前に戻す");
+        assert!(ja.restore && ja.choices.is_empty() && ja.can_apply);
+        assert_eq!(ja.summary, "2 件の値を MKLM 導入前の値に戻します。");
+        assert_eq!(
+            draft_request(&draft),
+            Some((
+                Request::RestoreBaseline(RestoreBaselineRequest {
+                    scope: RestoreScope::All,
+                    on_conflict: ConflictPolicy::Report,
+                    apply: ApplyMethod::Live.options(),
+                }),
+                ApplyMethod::Live.options()
+            ))
+        );
+        // Nothing recorded: nothing to send.
+        let nothing = ChangeDraft {
+            plan: Some(plan_restore_scope(
+                &snapshot,
+                &Journal::default(),
+                &RestoreScope::All,
+                ApplyMethod::Live,
+            )),
+            ..draft.clone()
+        };
+        assert_eq!(draft_request(&nothing), None);
+        assert!(!page(&nothing, Lang::En).can_apply);
     }
 
     #[test]

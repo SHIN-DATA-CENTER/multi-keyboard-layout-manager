@@ -1,13 +1,16 @@
-// Version information and application manifest of mklm.exe, compiled by build.rs.
+// Version information, application manifest and icon of mklm.exe, compiled by build.rs.
 // build.rs generates mklm-version.rch (MKLM_VERSION_NUM, MKLM_VERSION_STR, MKLM_FILEFLAGS,
-// MKLM_BUILD_ID_STR) in OUT_DIR, which embed-resource puts on the include path.
-// The executable's icon is added in WP-U7 (design m3 F.7).
+// MKLM_BUILD_ID_STR) and mklm.ico (src/icon_image.rs, design m3 F.7) in OUT_DIR, which
+// embed-resource puts on the include path.
 #pragma code_page(65001)
 
 #include <winresrc.h>
 #include "mklm-version.rch"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "mklm.exe.manifest"
+
+// The first icon group: Explorer and the taskbar show it for mklm.exe.
+1 ICON "mklm.ico"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION MKLM_VERSION_NUM

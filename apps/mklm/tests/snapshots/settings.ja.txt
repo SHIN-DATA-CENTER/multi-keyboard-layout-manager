@@ -1,0 +1,91 @@
+== just opened: nothing read yet ==
+autostart: ☐
+autostart available: false
+long countdown: ☐
+show hidden: ☐
+uninstall: アンインストール時にキーボードの設定を元に戻す: 不明
+uninstall note: 確かめています…
+can change: false
+
+== read: starts at sign-in, restores on uninstall ==
+autostart: ☑
+autostart available: true
+long countdown: ☐
+show hidden: ☐
+uninstall: アンインストール時にキーボードの設定を元に戻す: オン
+uninstall note: MKLM をアンインストールするとき、すべてのキーボードの設定を MKLM 導入前に戻します。この設定は、この PC のすべてのユーザーに適用されます。
+can change: true
+
+== turning "restore on uninstall" off, before the first prompt ==
+autostart: ☑
+autostart available: true
+long countdown: ☐
+show hidden: ☐
+uninstall: アンインストール時にキーボードの設定を元に戻す: オン
+uninstall note: MKLM をアンインストールするとき、すべてのキーボードの設定を MKLM 導入前に戻します。この設定は、この PC のすべてのユーザーに適用されます。
+can change: true
+confirm: アンインストール時にキーボードの設定を元に戻さないようにします
+confirm text: MKLM をアンインストールしても、キーボードの設定は MKLM で最後に設定したまま残り、MKLM 導入前には戻りません。この設定は PC のすべてのユーザーに適用されるため、保存には管理者の許可が必要です。キーボードの配列は今は変わりません。
+uac: (the whole explanation)
+button: オフにする（次に Windows の確認が出ます）
+
+== turning it on again, longer countdown, hidden keyboards shown ==
+autostart: ☐
+autostart available: false
+long countdown: ☑
+show hidden: ☑
+uninstall: アンインストール時にキーボードの設定を元に戻す: オフ
+uninstall note: MKLM をアンインストールしても、キーボードの設定は今のまま残ります。この設定は、この PC のすべてのユーザーに適用されます。
+can change: true
+confirm: アンインストール時にキーボードの設定を元に戻すようにします
+confirm text: MKLM をアンインストールするとき、すべてのキーボードの設定を MKLM 導入前に戻します。この設定は PC のすべてのユーザーに適用されるため、保存には管理者の許可が必要です。キーボードの配列は今は変わりません。
+uac: 次に Windows の確認画面が出ます（発行元は「不明」）。mklm-helper.exe であることを確かめて「はい」を押してください。
+button: オンにする（次に Windows の確認が出ます）
+
+== sign-in start turned off in Task Manager, setting unreadable ==
+autostart: ☐
+autostart available: false
+autostart note: Windows のスタートアップ設定で無効になっています。タスク マネージャーの「スタートアップ アプリ」で有効にできます
+long countdown: ☐
+show hidden: ☐
+uninstall: アンインストール時にキーボードの設定を元に戻す: 不明
+uninstall note: この設定を読み取れなかったため、今は変更できません。設定のページを開き直すと、もう一度読み取ります。
+can change: false
+
+== an elevated MKLM: no prompt to explain ==
+autostart: ☐
+autostart available: true
+autostart note: 自動起動の設定を変更できませんでした
+long countdown: ☐
+show hidden: ☐
+uninstall: アンインストール時にキーボードの設定を元に戻す: オン
+uninstall note: MKLM をアンインストールするとき、すべてのキーボードの設定を MKLM 導入前に戻します。この設定は、この PC のすべてのユーザーに適用されます。
+can change: true
+confirm: アンインストール時にキーボードの設定を元に戻さないようにします
+confirm text: MKLM をアンインストールしても、キーボードの設定は MKLM で最後に設定したまま残り、MKLM 導入前には戻りません。この設定は PC のすべてのユーザーに適用されるため、保存には管理者の許可が必要です。キーボードの配列は今は変わりません。
+button: オフにする
+
+== about ==
+version: バージョン 0.1.0（ビルド 0123456789abcdef）
+licence: Slint: Slint Royalty-free License 2.0
+licence: windows-rs (windows, windows-registry): MIT ライセンスまたは Apache License 2.0
+licence: serde, serde_json: MIT ライセンスまたは Apache License 2.0
+licence: toml: MIT ライセンスまたは Apache License 2.0
+
+== restore everything (the M2 journal of the development machine), as it is ==
+keyboards: 0
+title: すべてのキーボードを MKLM 導入前に戻す
+summary: MKLM 導入前の値のままです。戻すものはありません。
+all users: ⓘ この設定は、この PC のすべてのユーザーに適用されます。
+uac: 次に Windows の確認画面が出ます（発行元は「不明」）。mklm-helper.exe であることを確かめて「はい」を押してください。
+button: 元に戻す（次に Windows の確認が出ます）
+can apply: false
+
+== restore everything (the M2 journal of the development machine), the Keychron set to JIS ==
+keyboards: 1
+title: すべてのキーボードを MKLM 導入前に戻す
+warning: MKLM 以外が変更した値が 2 件あります。戻す前に、その値をどうするかを選びます。
+all users: ⓘ この設定は、この PC のすべてのユーザーに適用されます。
+uac: 次に Windows の確認画面が出ます（発行元は「不明」）。mklm-helper.exe であることを確かめて「はい」を押してください。
+button: 元に戻す（次に Windows の確認が出ます）
+can apply: true

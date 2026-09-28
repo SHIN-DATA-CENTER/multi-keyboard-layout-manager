@@ -13,6 +13,7 @@ pub mod recovery;
 pub mod restart;
 pub mod result;
 pub mod session;
+pub mod settings;
 pub mod status;
 #[cfg(test)]
 pub(crate) mod test_journal;

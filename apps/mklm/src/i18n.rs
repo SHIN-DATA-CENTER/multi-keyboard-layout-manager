@@ -1981,6 +1981,172 @@ pub fn autostart_note(note: AutostartNote, lang: Lang) -> String {
     }
 }
 
+// --- Settings and About (design m3 B.14, B.15; WP-U7) ---
+
+/// What the settings page knows of "restore the keyboards when MKLM is uninstalled" (plan 3.13):
+/// machine-wide, read unelevated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UninstallRestore {
+    On,
+    Off,
+    /// Not read yet.
+    Reading,
+    /// It could not be read: "変更…" is off (the new value would be a guess).
+    Unreadable,
+}
+
+/// The setting's line on the settings page: "アンインストール時にキーボードの設定を元に戻す: オン".
+pub fn uninstall_restore_status(value: UninstallRestore, lang: Lang) -> String {
+    let state = match (value, lang) {
+        (UninstallRestore::On, Lang::Ja) => "オン",
+        (UninstallRestore::On, Lang::En) => "on",
+        (UninstallRestore::Off, Lang::Ja) => "オフ",
+        (UninstallRestore::Off, Lang::En) => "off",
+        (UninstallRestore::Reading | UninstallRestore::Unreadable, Lang::Ja) => "不明",
+        (UninstallRestore::Reading | UninstallRestore::Unreadable, Lang::En) => "unknown",
+    };
+    match lang {
+        Lang::Ja => format!("アンインストール時にキーボードの設定を元に戻す: {state}"),
+        Lang::En => format!("Put the keyboards back when MKLM is uninstalled: {state}"),
+    }
+}
+
+/// What the setting means now, under its line.
+pub fn uninstall_restore_note(value: UninstallRestore, lang: Lang) -> String {
+    match value {
+        UninstallRestore::On => pick(
+            lang,
+            "MKLM をアンインストールするとき、すべてのキーボードの設定を MKLM 導入前に戻します。この設定は、この PC のすべてのユーザーに適用されます。",
+            "Uninstalling MKLM puts every keyboard's settings back to what they were before MKLM. This setting applies to every user of this PC.",
+        ),
+        UninstallRestore::Off => pick(
+            lang,
+            "MKLM をアンインストールしても、キーボードの設定は今のまま残ります。この設定は、この PC のすべてのユーザーに適用されます。",
+            "Uninstalling MKLM leaves the keyboards' settings as they are. This setting applies to every user of this PC.",
+        ),
+        UninstallRestore::Reading => checking_now(lang),
+        UninstallRestore::Unreadable => pick(
+            lang,
+            "この設定を読み取れなかったため、今は変更できません。設定のページを開き直すと、もう一度読み取ります。",
+            "This setting could not be read, so it cannot be changed now. Open the settings page again to read it again.",
+        ),
+    }
+}
+
+/// The confirmation's title for the new value `on`.
+pub fn uninstall_confirm_title(on: bool, lang: Lang) -> String {
+    if on {
+        pick(
+            lang,
+            "アンインストール時にキーボードの設定を元に戻すようにします",
+            "Put the keyboards back when MKLM is uninstalled",
+        )
+    } else {
+        pick(
+            lang,
+            "アンインストール時にキーボードの設定を元に戻さないようにします",
+            "Leave the keyboards as they are when MKLM is uninstalled",
+        )
+    }
+}
+
+/// What the new value `on` means, and why Windows asks.
+pub fn uninstall_confirm_text(on: bool, lang: Lang) -> String {
+    let what = if on {
+        pick(
+            lang,
+            "MKLM をアンインストールするとき、すべてのキーボードの設定を MKLM 導入前に戻します。",
+            "Uninstalling MKLM will put every keyboard's settings back to what they were before MKLM.",
+        )
+    } else {
+        pick(
+            lang,
+            "MKLM をアンインストールしても、キーボードの設定は MKLM で最後に設定したまま残り、MKLM 導入前には戻りません。",
+            "Uninstalling MKLM will leave the keyboards as MKLM last set them; they will not go back to what they were before MKLM.",
+        )
+    };
+    let why = pick(
+        lang,
+        "この設定は PC のすべてのユーザーに適用されるため、保存には管理者の許可が必要です。キーボードの配列は今は変わりません。",
+        "This setting applies to every user of this PC, so saving it needs an administrator's permission. No keyboard's layout changes now.",
+    );
+    format!("{what}{}{why}", if lang == Lang::Ja { "" } else { " " })
+}
+
+/// The confirmation's button; "（次に Windows の確認が出ます）" unless the GUI runs elevated.
+pub fn uninstall_confirm_button(on: bool, prompt: bool, lang: Lang) -> String {
+    match (on, prompt) {
+        (true, true) => pick(
+            lang,
+            "オンにする（次に Windows の確認が出ます）",
+            "Turn on (Windows asks next)",
+        ),
+        (true, false) => pick(lang, "オンにする", "Turn on"),
+        (false, true) => pick(
+            lang,
+            "オフにする（次に Windows の確認が出ます）",
+            "Turn off (Windows asks next)",
+        ),
+        (false, false) => pick(lang, "オフにする", "Turn off"),
+    }
+}
+
+/// The result of `Request::SetMachineSettings` (design m3 B.17): what is saved now.
+pub fn uninstall_restore_saved(on: bool, lang: Lang) -> String {
+    if on {
+        pick(
+            lang,
+            "保存しました。MKLM をアンインストールするとき、キーボードの設定を MKLM 導入前に戻します。",
+            "Saved. Uninstalling MKLM will put the keyboards back to what they were before MKLM.",
+        )
+    } else {
+        pick(
+            lang,
+            "保存しました。MKLM をアンインストールしても、キーボードの設定は今のまま残ります。",
+            "Saved. Uninstalling MKLM will leave the keyboards as they are.",
+        )
+    }
+}
+
+/// "すべてのキーボードを MKLM 導入前に戻す" (design m3 B.14): the change page's title for
+/// `RestoreScope::All`.
+pub fn restore_all_title(lang: Lang) -> String {
+    pick(
+        lang,
+        "すべてのキーボードを MKLM 導入前に戻す",
+        "Put every keyboard back to before MKLM",
+    )
+}
+
+/// The keyboards of a restore of everything, as one name.
+pub fn every_keyboard(lang: Lang) -> String {
+    pick(lang, "すべてのキーボード", "Every keyboard")
+}
+
+/// About's version line: "バージョン 0.1.0（ビルド 0123abcd…）" (design m3 B.15).
+pub fn about_version(version: &str, build_id: &str, lang: Lang) -> String {
+    match lang {
+        Lang::Ja => format!("バージョン {version}（ビルド {build_id}）"),
+        Lang::En => format!("Version {version} (build {build_id})"),
+    }
+}
+
+/// The main third-party components and their licences (design m3 B.15), until M5 embeds the full
+/// list that cargo-about generates. Names stay as their authors write them.
+pub fn third_party_components(lang: Lang) -> Vec<String> {
+    let either = pick(
+        lang,
+        "MIT ライセンスまたは Apache License 2.0",
+        "MIT License or Apache License 2.0",
+    );
+    vec![
+        "Slint: Slint Royalty-free License 2.0".to_string(),
+        format!("windows-rs (windows, windows-registry): {either}"),
+        format!("serde, serde_json: {either}"),
+        format!("toml: {either}"),
+    ]
+}
+
 /// A problem that stops MKLM before or instead of its window (design m3 F.6). Shown in a message
 /// box: release builds have no console.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

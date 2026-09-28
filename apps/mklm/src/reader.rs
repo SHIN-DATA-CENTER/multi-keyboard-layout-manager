@@ -1,10 +1,10 @@
 //! The I/O worker (design m3 A.4): one long-lived thread for every blocking call that is not a
 //! helper session — enumerating keyboards (hundreds of milliseconds), reading the journal, saving
-//! settings, the RunOnce rule, the autostart value, opening a settings page or the recovery files
-//! folder, restarting the PC (design m3 B.8, B.11), and the preparation of a change
-//! (`PrepareChange`, design m3 B.5). Tasks run in order; repeated reads that queue up are merged,
-//! and of several queued preparations only the last runs (the page dropped the others). Results
-//! go back with `slint::invoke_from_event_loop`.
+//! settings, the RunOnce rule, the autostart value, reading the machine-wide settings, opening a
+//! settings page or the recovery files folder, restarting the PC (design m3 B.8, B.11, B.14), and
+//! the preparation of a change (`PrepareChange`, design m3 B.5). Tasks run in order; repeated
+//! reads that queue up are merged, and of several queued preparations only the last runs (the
+//! page dropped the others). Results go back with `slint::invoke_from_event_loop`.
 //!
 //! Writes (settings, the RunOnce rule, the autostart value) are counted from the moment they are
 //! queued until they are done, so that quitting — and the end of the Windows session — can wait a
@@ -26,7 +26,9 @@ use crate::app::post;
 use crate::autostart::{self, AutostartTask};
 use crate::log;
 use crate::settings::{Settings, SettingsStore};
-use crate::state::{AppMsg, JournalMsg, PrepareFailure, PreparedChange, SystemRead, WizardMsg};
+use crate::state::{
+    AppMsg, JournalMsg, PrepareFailure, PreparedChange, SettingsMsg, SystemRead, WizardMsg,
+};
 use crate::vm::wizard::ForeignValues;
 
 /// A job for the I/O worker.
@@ -61,6 +63,9 @@ pub enum IoTask {
     /// (`mklm_win::read_non_keyboard_values`, read only; the wizard's step 3, design m3 B.1, J.9),
     /// answered by `WizardMsg::ForeignRead`.
     ReadNonKeyboardValues(Vec<mklm_core::KeyboardDevice>),
+    /// "restore on uninstall" (`mklm_win::machine_settings::read_machine_settings`, an HKLM read
+    /// that needs no elevation), answered by `SettingsMsg::MachineSettingsRead` (design m3 B.14).
+    ReadMachineSettings,
 }
 
 impl IoTask {
@@ -75,7 +80,8 @@ impl IoTask {
             | IoTask::PrepareChange { .. }
             | IoTask::OpenSettingsPage(_)
             | IoTask::OpenRecoveryFolder
-            | IoTask::ReadNonKeyboardValues(_) => false,
+            | IoTask::ReadNonKeyboardValues(_)
+            | IoTask::ReadMachineSettings => false,
         }
     }
 }
@@ -201,6 +207,15 @@ fn run(tasks: Receiver<IoTask>, mut store: Option<SettingsStore>) {
                 IoTask::ReadNonKeyboardValues(keyboards) => {
                     let found = read_non_keyboard_values(&keyboards);
                     post(AppMsg::Wizard(WizardMsg::ForeignRead(found)));
+                }
+                IoTask::ReadMachineSettings => {
+                    let read = mklm_win::machine_settings::read_machine_settings()
+                        .map(|settings| settings.restore_on_uninstall)
+                        .map_err(|error| error.to_string());
+                    if let Err(error) = &read {
+                        log::warn(format!("reading the machine settings failed: {error}"));
+                    }
+                    post(AppMsg::Settings(SettingsMsg::MachineSettingsRead(read)));
                 }
             }
             if writes {
@@ -379,6 +394,8 @@ mod tests {
             .writes()
         );
         assert!(!IoTask::OpenSettingsPage(SettingsPage::Taskbar).writes());
+        // The GUI never writes the machine settings itself (the helper does).
+        assert!(!IoTask::ReadMachineSettings.writes());
     }
 
     #[test]

@@ -4,10 +4,12 @@
 
 import { Button, Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { Modal } from "widgets.slint";
 import {
     BadgeVm, ChangeVm, ChoiceVm, CheckRowVm, ConflictKeyboardVm, CountdownVm, JournalRowVm,
     KeyboardRowVm, KeyTestVm, Overlay, PlanLineVm, ProgressVm, ReconnectVm, RecoveryItemVm,
-    RecoveryPageVm, ResultVm, Screen, StatusVm, Tone, WizardKeyboardVm, WizardVm,
+    RecoveryPageVm, ResultVm, Screen, StatusVm, Tone, UninstallRestoreVm, WizardKeyboardVm,
+    WizardVm,
 } from "structs.slint";
 import { MainScreen } from "screens/main.slint";
 import { WizardScreen } from "screens/wizard.slint";
@@ -21,9 +23,10 @@ import {
     AboutScreen, ConflictScreen, ImeHelpScreen, JournalScreen, RecoveryScreen, SettingsScreen,
 } from "screens/other.slint";
 
-export { Theme, Screen, Overlay, Tone }
+export { Theme, Screen, Overlay, Tone, Modal }
 
-// One entry of the navigation rail (design m3 B.0, E.1).
+// One entry of the navigation rail (design m3 B.0, E.1). Off while a flow or a dialog runs: dimmed,
+// or in high contrast (where dimming would lower the contrast) drawn in GrayText.
 component NavItem inherits Rectangle {
     in property <string> text;
     in property <bool> selected;
@@ -34,13 +37,14 @@ component NavItem inherits Rectangle {
     background: selected ? Theme.accent : transparent;
     border-width: fs.has-focus ? Theme.focus-width : 0px;
     border-color: Theme.focus-ring;
-    opacity: enabled ? 1 : 0.5;
+    opacity: enabled || Theme.high-contrast ? 1 : 0.5;
 
     fs := FocusScope {
         enabled: root.enabled;
         accessible-role: AccessibleRole.tab;
         accessible-label: root.text;
         accessible-item-selected: root.selected;
+        accessible-enabled: root.enabled;
         accessible-action-default => {
             root.activated();
         }
@@ -63,7 +67,7 @@ component NavItem inherits Rectangle {
             width: parent.width - 16px;
             text: root.text;
             font-size: Theme.font-body;
-            color: root.selected ? Theme.accent-text : Theme.text;
+            color: root.selected ? Theme.accent-text : (!root.enabled && Theme.high-contrast ? Theme.text-disabled : Theme.text);
             vertical-alignment: center;
             wrap: word-wrap;
         }
@@ -243,17 +247,21 @@ export component AppWindow inherits Window {
     in property <bool> settings-autostart-available: true;
     in property <string> settings-autostart-note;
     in-out property <bool> settings-long-countdown;
-    in property <bool> settings-restore-on-uninstall: true;
-    in property <string> settings-restore-note;
+    // "アンインストール時にキーボードの設定を元に戻す" (machine-wide, through the helper).
+    in property <UninstallRestoreVm> settings-uninstall;
     callback theme-selected(int);
     callback language-selected(int);
     callback autostart-toggled(bool);
     callback long-countdown-toggled(bool);
-    callback change-restore-on-uninstall();
+    // "変更…", then the confirmation's "キャンセル" and its button (the only one that prompts).
+    callback uninstall-change();
+    callback uninstall-cancel();
+    callback uninstall-confirm();
     callback restore-all();
     callback run-wizard();
     in property <string> about-version;
-    in property <string> about-licences;
+    // One line per main third-party component: name and licence (design m3 B.15).
+    in property <[string]> about-licences;
 
     HorizontalLayout {
         // The navigation rail (design m3 B.0): 160 px when the window is narrow (large scale), up
@@ -566,8 +574,8 @@ export component AppWindow inherits Window {
                 autostart-available: root.settings-autostart-available;
                 autostart-note: root.settings-autostart-note;
                 long-countdown <=> root.settings-long-countdown;
-                restore-on-uninstall: root.settings-restore-on-uninstall;
-                restore-note: root.settings-restore-note;
+                show-hidden <=> root.show-hidden;
+                uninstall: root.settings-uninstall;
                 theme-selected(index) => {
                     root.theme-selected(index);
                 }
@@ -580,8 +588,17 @@ export component AppWindow inherits Window {
                 long-countdown-toggled(on) => {
                     root.long-countdown-toggled(on);
                 }
-                change-restore-on-uninstall => {
-                    root.change-restore-on-uninstall();
+                show-hidden-toggled(on) => {
+                    root.show-hidden-toggled(on);
+                }
+                uninstall-change => {
+                    root.uninstall-change();
+                }
+                uninstall-cancel => {
+                    root.uninstall-cancel();
+                }
+                uninstall-confirm => {
+                    root.uninstall-confirm();
                 }
                 restore-all => {
                     root.restore-all();

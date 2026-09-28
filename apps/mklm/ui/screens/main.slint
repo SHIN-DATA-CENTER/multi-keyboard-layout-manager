@@ -10,7 +10,7 @@
 import { Button, CheckBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import { KeyboardRowVm, StatusVm, Tone } from "../structs.slint";
-import { Badge, Banner, Body, CaptureArea, Caption, PageHeader } from "../widgets.slint";
+import { Badge, Banner, Body, CaptureArea, Caption, Modal, PageHeader } from "../widgets.slint";
 
 component StatusItem inherits HorizontalLayout {
     in property <string> label;
@@ -70,6 +70,7 @@ component KeyboardRow inherits Rectangle {
     // Right click, or Shift+F10 / the menu key on the focused row: the key reaches the area
     // because the row's FocusScope rejects it (design m3 B.2).
     ContextMenuArea {
+        enabled: !Modal.open;
         Menu {
             MenuItem {
                 title: @tr("Change…");
@@ -97,6 +98,7 @@ component KeyboardRow inherits Rectangle {
         }
 
         focus := FocusScope {
+            enabled: !Modal.open;
             accessible-role: AccessibleRole.list-item;
             accessible-label: root.vm.accessible-summary;
             accessible-description: @tr("Shift+F10 opens the menu (hide or show the keyboard).");
@@ -177,7 +179,7 @@ component KeyboardRow inherits Rectangle {
                     alignment: start;
                     Button {
                         text: @tr("Change…");
-                        enabled: root.vm.can-assign;
+                        enabled: root.vm.can-assign && !Modal.open;
                         accessible-label: root.vm.assign-label;
                         clicked => {
                             root.assign();
@@ -186,6 +188,7 @@ component KeyboardRow inherits Rectangle {
 
                     if root.vm.apply-now: Button {
                         text: @tr("Apply now…");
+                        enabled: !Modal.open;
                         clicked => {
                             root.apply-now();
                         }
@@ -281,6 +284,7 @@ export component MainScreen inherits FocusScope {
 
             if root.status.banner-action != "": Button {
                 text: root.status.banner-action;
+                enabled: !Modal.open;
                 clicked => {
                     root.banner-action();
                 }
@@ -291,6 +295,7 @@ export component MainScreen inherits FocusScope {
             alignment: start;
             Button {
                 text: root.identify-active ? @tr("Stop identifying") : @tr("Identify by key press");
+                enabled: !Modal.open;
                 clicked => {
                     root.toggle-identify();
                 }
@@ -298,6 +303,7 @@ export component MainScreen inherits FocusScope {
 
             Button {
                 text: @tr("Refresh");
+                enabled: !Modal.open;
                 clicked => {
                     root.refresh();
                 }
@@ -305,6 +311,7 @@ export component MainScreen inherits FocusScope {
 
             CheckBox {
                 text: @tr("Show hidden and disconnected keyboards");
+                enabled: !Modal.open;
                 checked <=> root.show-hidden;
                 toggled => {
                     root.show-hidden-toggled(self.checked);
