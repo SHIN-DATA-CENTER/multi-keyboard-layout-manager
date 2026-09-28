@@ -16,7 +16,7 @@ jobs:
   test:
     name: fmt, clippy, test (x64) + clippy (ARM64)
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -36,3 +36,50 @@ jobs:
 
       - name: cargo clippy (ARM64)
         run: cargo clippy --workspace --all-targets --locked --target aarch64-pc-windows-msvc -- -D warnings
+
+      # Design m5b F.3 and A.10: the development-only update overrides (loopback URLs, plain HTTP,
+      # the development key) compile only with this cfg and debug assertions. Their tests run
+      # here, in a target folder of their own, and the development builds must carry the marker:
+      # the positive control without which release.yml's "marker absent" check proves nothing
+      # (FIX-VERIFICATION-3).
+      - name: Development-cfg tests and the marker's positive control (design m5b F.3, A.10)
+        shell: pwsh
+        env:
+          RUSTFLAGS: --cfg mklm_update_dev
+          CARGO_TARGET_DIR: target\dev-update
+        run: |
+          cargo test -p mklm-update --features winhttp --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p mklm-win --features net --test net_proxy --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build -p mklm -p mklm-cli -p mklm-helper --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($exe in 'mklm.exe', 'mklm-cli.exe', 'mklm-helper.exe') {
+            & ./installer/find-marker.ps1 -Expect Present -Path "target/dev-update/debug/$exe"
+            if ($LASTEXITCODE -ne 0) { throw "$exe of the development build lacks the marker" }
+          }
+
+      # Design m5b A.9: the helper verifies updates but never fetches them. Its own dependency
+      # tree (not the workspace's unified one) has no network feature.
+      - name: The helper has no network code (design m5b A.9)
+        shell: pwsh
+        run: |
+          $tree = cargo tree -p mklm-helper -e features --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $found = $tree | Select-String -SimpleMatch -Pattern 'mklm-win feature "net"', 'mklm-update feature "winhttp"', 'Win32_Networking_WinHttp'
+          if ($found) {
+            $found | ForEach-Object { Write-Host $_.Line }
+            throw 'mklm-helper depends on network code'
+          }
+
+      # Design m5b D.9.3: the NSIS script's rules (silent installs never stop at a dialog, every
+      # refusal has an exit code, the two-stage replacement, no process-name lookups), and the
+      # Pester tests of the installer scripts (Windows PowerShell, whichever Pester it has: the
+      # tests use Describe / It / throw only, which Pester 3.4 and 5 share).
+      - name: NSIS script rules and the installer scripts' tests (design m5b D.9.3, F.2)
+        shell: powershell
+        run: |
+          ./installer/check-nsi.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $result = Invoke-Pester -Path installer/tests -PassThru
+          if ($result.FailedCount -gt 0 -or $result.TotalCount -eq 0) { exit 1 }

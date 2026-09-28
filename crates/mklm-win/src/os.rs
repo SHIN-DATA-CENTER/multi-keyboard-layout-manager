@@ -1,17 +1,23 @@
 //! Operating system facts: build number, UBR, native architecture and Remote Desktop.
 
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+
 use mklm_core::OsInfo;
 use windows::Wdk::System::SystemServices::RtlGetVersion;
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::SystemInformation::{
     IMAGE_FILE_MACHINE, IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
     IMAGE_FILE_MACHINE_ARMNT, IMAGE_FILE_MACHINE_I386, IMAGE_FILE_MACHINE_UNKNOWN, OSVERSIONINFOW,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+use windows::Win32::UI::Shell::{FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
 use windows_registry::LOCAL_MACHINE;
 
 use crate::error::{Error, ReadIssue, ReadIssueKind, win32_code};
 use crate::reg::{open_read, read_dword};
+use crate::sys::win32;
 
 /// Key holding `UBR`, relative to `HKEY_LOCAL_MACHINE`.
 const CURRENT_VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
@@ -99,11 +105,24 @@ pub(crate) fn machine_name(machine: IMAGE_FILE_MACHINE) -> String {
 pub const INSTALL_SUBDIR: &str = r"SHIN DATA CENTER\MKLM";
 
 /// `SHGetKnownFolderPath(FOLDERID_ProgramFiles)` + `INSTALL_SUBDIR`.
+///
+/// For a 64-bit process (x64 or ARM64, the only builds) this is `%ProgramFiles%` of the machine,
+/// the folder NSIS's `$PROGRAMFILES64` names; never taken from the environment.
 pub fn fixed_install_dir() -> Result<std::path::PathBuf, Error> {
-    Err(Error::Win32 {
-        function: "fixed_install_dir (m5b skeleton)",
-        code: 50,
-    }) // Skeleton (M5b): WP-H
+    // SAFETY: FOLDERID_ProgramFiles is a static GUID; no token. The returned string is freed below.
+    let text = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, None) }
+        .map_err(|error| win32("SHGetKnownFolderPath", &error))?;
+    // SAFETY: on success `text` is a NUL-terminated string.
+    let program_files = std::path::PathBuf::from(OsString::from_wide(unsafe { text.as_wide() }));
+    // SAFETY: allocated by SHGetKnownFolderPath with CoTaskMemAlloc; freed once, after the copy.
+    unsafe { CoTaskMemFree(Some(text.0.cast_const().cast())) };
+    if !program_files.is_absolute() {
+        return Err(Error::Insecure {
+            path: program_files.display().to_string(),
+            reason: "%ProgramFiles% is not an absolute path".to_string(),
+        });
+    }
+    Ok(program_files.join(INSTALL_SUBDIR))
 }
 
 /// The native machine of this PC (design m5b C.7: shown by the GUI only).
@@ -116,10 +135,17 @@ pub enum NativeMachine {
 
 /// `IsWow64Process2(GetCurrentProcess())`'s native machine.
 pub fn native_machine() -> Result<NativeMachine, Error> {
-    Err(Error::Win32 {
-        function: "native_machine (m5b skeleton)",
-        code: 50,
-    }) // Skeleton (M5b): WP-H
+    let mut process = IMAGE_FILE_MACHINE_UNKNOWN;
+    let mut native = IMAGE_FILE_MACHINE_UNKNOWN;
+    // SAFETY: GetCurrentProcess returns a pseudo handle that needs no closing; both out pointers
+    // are valid for the call.
+    unsafe { IsWow64Process2(GetCurrentProcess(), &mut process, Some(&mut native)) }
+        .map_err(|error| win32("IsWow64Process2", &error))?;
+    Ok(match native {
+        IMAGE_FILE_MACHINE_AMD64 => NativeMachine::X64,
+        IMAGE_FILE_MACHINE_ARM64 => NativeMachine::Arm64,
+        other => NativeMachine::Other(other.0),
+    })
 }
 
 /// Architecture this binary was built for.
@@ -141,5 +167,33 @@ mod tests {
         assert_eq!(machine_name(IMAGE_FILE_MACHINE_AMD64), "x64");
         assert_eq!(machine_name(IMAGE_FILE_MACHINE_ARM64), "arm64");
         assert_eq!(machine_name(IMAGE_FILE_MACHINE(0x1234)), "0x1234");
+    }
+
+    #[test]
+    fn the_install_folder_is_under_program_files() {
+        let dir = fixed_install_dir().expect("install folder");
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert!(dir.ends_with(r"SHIN DATA CENTER\MKLM"), "{}", dir.display());
+        let program_files = dir
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("parent");
+        assert!(program_files.is_dir(), "{}", program_files.display());
+        // Not the 32-bit folder, whatever the process.
+        assert!(
+            !program_files.to_string_lossy().contains("(x86)"),
+            "{}",
+            program_files.display()
+        );
+    }
+
+    #[test]
+    fn the_native_machine_is_known() {
+        let native = native_machine().expect("IsWow64Process2");
+        // Design m5b I.6: an x64 build under emulation on ARM64 reports ARM64.
+        match std::env::consts::ARCH {
+            "aarch64" => assert_eq!(native, NativeMachine::Arm64),
+            _ => assert!(matches!(native, NativeMachine::X64 | NativeMachine::Arm64)),
+        }
     }
 }

@@ -80,11 +80,19 @@ pub struct PipeServer {
     path: String,
 }
 
-/// `path` must be `\\.\pipe\<name>` with a non-empty name without `\` or NUL.
+/// `path` must be `\\.\pipe\<name>` with a name of 1 to 200 printable ASCII characters, without
+/// `\` or `/`, and not `.` or `..` (design m5b SECURITY-7: no path tricks, whoever made the name).
 fn check_pipe_path(path: &str) -> Result<(), Error> {
-    let valid = path
-        .strip_prefix(PIPE_PREFIX)
-        .is_some_and(|name| !name.is_empty() && name.len() <= 200 && !name.contains(['\\', '\0']));
+    let valid = path.strip_prefix(PIPE_PREFIX).is_some_and(|name| {
+        !name.is_empty()
+            && name.len() <= 200
+            && name != "."
+            && name != ".."
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+            && !name.contains(['\\', '/'])
+    });
     if valid {
         Ok(())
     } else {
@@ -777,6 +785,41 @@ mod tests {
         let mut buffer = vec![0u8; len];
         connection.read_exact(&mut buffer).expect("read");
         String::from_utf8(buffer).expect("UTF-8")
+    }
+
+    /// Design m5b SECURITY-7, F.2: only plain printable ASCII names below `\\.\pipe\`.
+    #[test]
+    fn pipe_paths_are_plain_names() {
+        for path in [
+            r"\\.\pipe\SHINDATACENTER.MKLM.0f8c2d4e-5b6a-4c3d-9e8f-a0b1c2d3e4f5",
+            r"\\.\pipe\SHINDATACENTER.MKLM.Instance.1.S-1-5-21-1-2-3-1001",
+            r"\\.\pipe\a",
+            r"\\.\pipe\...",
+        ] {
+            assert_eq!(check_pipe_path(path), Ok(()), "{path}");
+        }
+        let long = format!(r"\\.\pipe\{}", "a".repeat(201));
+        for path in [
+            "",
+            r"\\.\pipe\",
+            r"\\.\pipe\.",
+            r"\\.\pipe\..",
+            r"\\.\pipe\a\b",
+            r"\\.\pipe\a/b",
+            r"\\.\pipe\/",
+            r"\\.\pipe\a\0b",
+            "\\\\.\\pipe\\a\u{0}b",
+            "\\\\.\\pipe\\a\tb",
+            "\\\\.\\pipe\\a\u{7f}",
+            "\\\\.\\pipe\\SHINDATACENTER.MKLM.Instance.１",
+            "\\\\.\\pipe\\é",
+            r"\\server\pipe\x",
+            r"\\.\PIPE\x",
+            r"\\.\pipe",
+            &long,
+        ] {
+            assert!(check_pipe_path(path).is_err(), "{path:?}");
+        }
     }
 
     #[test]

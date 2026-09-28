@@ -8,11 +8,25 @@
 ; - Start menu shortcut and an "Apps" (ARP) entry with Publisher "SHIN DATA CENTER".
 ; - Refuses Windows older than 11 24H2 (build 26100), 32-bit Windows, and the ARM64 package on x64.
 ; - Upgrade in place: quits a running MKLM first; refuses while mklm-helper.exe is changing settings.
+;   The running MKLM is found by the path of the installed files only, never by a process name
+;   (design m5b RELIABILITY-12: the update runner is a renamed copy of the helper elsewhere).
+; - The three executables are written as <name>.new next to the old ones and then swapped in by
+;   renames; any failure puts the old ones back (design m5b D.9.2). Documents are written first.
+; - Every refusal and failure ends with a fixed exit code (SetErrorLevel right before Quit), and
+;   every MessageBox has a /SD default, so that a silent (/S) run never stops at a dialog and its
+;   caller (the update runner, a script) can tell what happened (design m5b D.9.1):
+;   0 done, 1 cancelled by the user, 2 aborted by the script, 20-24, 26, 27 below (nothing
+;   replaced), 25 and 3010 the uninstaller's.
+; - A silent upgrade runs nothing but "mklm.exe --quit": neither the uninstaller nor
+;   "mklm-helper.exe --uninstall-restore" (design m5b D.9.5).
 ; - Uninstall: optionally puts the keyboard values back to their state before MKLM (per the
 ;   "restore on uninstall" machine setting, asked interactively), then removes the files.
 ; - Writes nothing under HKLM\SOFTWARE\SHIN DATA CENTER: those keys are created by the helper with
 ;   a protected DACL that it verifies (design m2 G.1); keys created here with inherited ACLs would
 ;   fail that check.
+;
+; installer\check-nsi.ps1 checks these rules statically (CI); installer\smoke-test.ps1 runs the
+; installer on a throwaway CI machine.
 
 Unicode true
 ManifestDPIAware true
@@ -47,6 +61,19 @@ SetCompressor /SOLID lzma
 !define RUN_VALUE "SHINDATACENTER.MKLM"
 !define MIN_BUILD 26100
 !define REPO_URL "https://github.com/SHIN-DATA-CENTER/multi-keyboard-layout-manager"
+
+; Exit codes (design m5b D.9.1), mirrored by mklm_update::run::nsis_exit and checked against it by
+; crates/mklm-update/tests/nsis_exit_codes.rs. Each one means that nothing was replaced.
+!define MKLM_EXIT_OS_TOO_OLD 20
+!define MKLM_EXIT_WRONG_ARCH 21
+!define MKLM_EXIT_HELPER_RUNNING 22
+!define MKLM_EXIT_CLI_RUNNING 23
+!define MKLM_EXIT_GUI_RUNNING 24
+!define MKLM_EXIT_FILES_IN_USE 26
+!define MKLM_EXIT_FILE_WRITE 27
+; uninstaller-only: un.onInit. The uninstaller runs a copy of itself from %TEMP%, so this code only
+; reaches a caller that started it with _?= (not in mklm_update::run::nsis_exit).
+!define MKLM_EXIT_BAD_INSTALL_DIR 25
 
 !include "MUI2.nsh"
 !include "x64.nsh"
@@ -115,6 +142,10 @@ LangString ASK_RESTORE ${LANG_JAPANESE} "キーボードの設定を、MKLM を�
 LangString ASK_RESTORE ${LANG_ENGLISH} "Put the keyboard settings back to how they were before MKLM?$\r$\n$\r$\nYes: undo the values MKLM changed (values changed outside MKLM are left alone).$\r$\nNo: keep the current settings and remove only MKLM."
 LangString RESTORE_FAILED ${LANG_JAPANESE} "キーボードの設定を元に戻せませんでした（終了コード $1）。MKLM の削除は続けます。元に戻す方法は %ProgramData%\SHIN DATA CENTER\MKLM\Recovery にある README.txt を見てください。"
 LangString RESTORE_FAILED ${LANG_ENGLISH} "The keyboard settings could not be put back (exit code $1). Removing MKLM continues. See README.txt in %ProgramData%\SHIN DATA CENTER\MKLM\Recovery for how to put them back."
+LangString FILES_IN_USE ${LANG_JAPANESE} "別のプログラムが MKLM のファイルを開いているため、ファイルを置き換えられませんでした。何も変更していません。しばらくしてから、もう一度実行してください。"
+LangString FILES_IN_USE ${LANG_ENGLISH} "Another program has MKLM's files open, so they could not be replaced. Nothing was changed. Wait a moment, then run this again."
+LangString FILE_WRITE_FAILED ${LANG_JAPANESE} "新しいファイルを書き込めませんでした。ディスクの空きとウイルス対策ソフトを確かめてください。何も変更していません。"
+LangString FILE_WRITE_FAILED ${LANG_ENGLISH} "The new files could not be written. Check the free disk space and your antivirus software. Nothing was changed."
 
 ; --- shared helpers (installer and uninstaller) --------------------------------------------------
 
@@ -143,19 +174,22 @@ FunctionEnd
 !insertmacro IS_LOCKED_FN "un."
 
 ; Refuses while the installed helper runs; asks a running GUI to quit (single-instance "quit") and,
-; if it is still there, lets the user close it (Retry) or give up (Cancel -> Quit).
+; if it is still there, lets the user close it (Retry) or give up (Cancel -> Quit). Silent: Cancel.
+; Only the installed paths count (no process names: design m5b RELIABILITY-12).
 !macro CLOSE_MKLM_FN prefix
 Function ${prefix}CloseMklm
   Push "$INSTDIR\mklm-helper.exe"
   Call ${prefix}IsLocked
   ${If} $R9 == 1
     MessageBox MB_OK|MB_ICONSTOP "$(HELPER_BUSY)" /SD IDOK
+    SetErrorLevel ${MKLM_EXIT_HELPER_RUNNING}
     Quit
   ${EndIf}
   Push "$INSTDIR\mklm-cli.exe"
   Call ${prefix}IsLocked
   ${If} $R9 == 1
     MessageBox MB_OK|MB_ICONSTOP "$(CLI_BUSY)" /SD IDOK
+    SetErrorLevel ${MKLM_EXIT_CLI_RUNNING}
     Quit
   ${EndIf}
   Push "$INSTDIR\mklm.exe"
@@ -181,6 +215,7 @@ Function ${prefix}CloseMklm
       ${ExitDo}
     ${EndIf}
     MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(CLOSE_MKLM)" /SD IDCANCEL IDRETRY retry
+    SetErrorLevel ${MKLM_EXIT_GUI_RUNNING}
     Quit
     retry:
   ${Loop}
@@ -189,6 +224,85 @@ FunctionEnd
 !insertmacro CLOSE_MKLM_FN ""
 !insertmacro CLOSE_MKLM_FN "un."
 
+; --- the two-stage replacement of the executables (design m5b D.9.2) ------------------------------
+
+; The *.new and *.old copies an earlier, interrupted attempt may have left.
+!macro DELETE_LEFTOVERS
+  Delete "$INSTDIR\mklm-helper.exe.new"
+  Delete "$INSTDIR\mklm-cli.exe.new"
+  Delete "$INSTDIR\mklm.exe.new"
+  Delete "$INSTDIR\mklm-helper.exe.old"
+  Delete "$INSTDIR\mklm-cli.exe.old"
+  Delete "$INSTDIR\mklm.exe.old"
+!macroend
+
+!macro DELETE_NEW
+  Delete "$INSTDIR\mklm-helper.exe.new"
+  Delete "$INSTDIR\mklm-cli.exe.new"
+  Delete "$INSTDIR\mklm.exe.new"
+!macroend
+
+; One executable: the current file (if any) becomes <name>.old, then <name>.new takes its name.
+; When the second rename fails, the first is undone at once. $R6 counts the executables swapped
+; completely; on a failure SwapFailed puts those back and ends the installer.
+!macro SWAP_ONE name
+  StrCpy $R7 0
+  ${If} ${FileExists} "$INSTDIR\${name}"
+    ClearErrors
+    Rename "$INSTDIR\${name}" "$INSTDIR\${name}.old"
+    ${If} ${Errors}
+      StrCpy $R7 1
+    ${EndIf}
+  ${EndIf}
+  ${If} $R7 == 0
+    ClearErrors
+    Rename "$INSTDIR\${name}.new" "$INSTDIR\${name}"
+    ${If} ${Errors}
+      StrCpy $R7 1
+      ${If} ${FileExists} "$INSTDIR\${name}.old"
+        Rename "$INSTDIR\${name}.old" "$INSTDIR\${name}"
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+  ${If} $R7 == 1
+    Call SwapFailed
+  ${EndIf}
+  IntOp $R6 $R6 + 1
+!macroend
+
+; Undoes one completed swap: the new file goes, and the .old copy (if there was an old file) takes
+; its name again.
+!macro UNSWAP name
+  Delete "$INSTDIR\${name}"
+  ${If} ${FileExists} "$INSTDIR\${name}.old"
+    Rename "$INSTDIR\${name}.old" "$INSTDIR\${name}"
+  ${EndIf}
+!macroend
+
+; mklm-helper.exe, mklm-cli.exe, mklm.exe, in that order (a rename fails when another process holds
+; the file open without FILE_SHARE_DELETE; the update runner checked that condition just before).
+Function SwapExecutables
+  StrCpy $R6 0
+  !insertmacro SWAP_ONE "mklm-helper.exe"
+  !insertmacro SWAP_ONE "mklm-cli.exe"
+  !insertmacro SWAP_ONE "mklm.exe"
+FunctionEnd
+
+; A swap failed: the completed ones go back in reverse order, the remaining .new files are deleted,
+; and the installer ends with MKLM_EXIT_FILES_IN_USE. Nothing is left replaced.
+Function SwapFailed
+  ${If} $R6 >= 2
+    !insertmacro UNSWAP "mklm-cli.exe"
+  ${EndIf}
+  ${If} $R6 >= 1
+    !insertmacro UNSWAP "mklm-helper.exe"
+  ${EndIf}
+  !insertmacro DELETE_NEW
+  MessageBox MB_OK|MB_ICONSTOP "$(FILES_IN_USE)" /SD IDOK
+  SetErrorLevel ${MKLM_EXIT_FILES_IN_USE}
+  Quit
+FunctionEnd
+
 ; --- installer ------------------------------------------------------------------------------------
 
 Function .onInit
@@ -196,22 +310,26 @@ Function .onInit
   ; Always Program Files (admin-only writable): /D= (and winget --location) must not move the
   ; elevated helper, or the tools the uninstaller runs elevated, to a folder users can write.
   StrCpy $INSTDIR "$PROGRAMFILES64\SHIN DATA CENTER\MKLM"
+  ; Refusals end with SetErrorLevel + Quit (not Abort), like every other one (design m5b D.9.1).
   !if "${ARCH}" == "arm64"
     ${IfNot} ${IsNativeARM64}
       MessageBox MB_OK|MB_ICONSTOP "$(WRONG_ARCH_ARM64)" /SD IDOK
-      Abort
+      SetErrorLevel ${MKLM_EXIT_WRONG_ARCH}
+      Quit
     ${EndIf}
   !else
     ${IfNot} ${IsNativeAMD64}
     ${AndIfNot} ${IsNativeARM64}
       MessageBox MB_OK|MB_ICONSTOP "$(WRONG_ARCH_32)" /SD IDOK
-      Abort
+      SetErrorLevel ${MKLM_EXIT_WRONG_ARCH}
+      Quit
     ${EndIf}
   !endif
   ReadRegStr $0 HKLM "SOFTWARE\Microsoft\Windows NT\CurrentVersion" "CurrentBuildNumber"
   ${If} $0 < ${MIN_BUILD}
     MessageBox MB_OK|MB_ICONSTOP "$(OLD_WINDOWS)" /SD IDOK
-    Abort
+    SetErrorLevel ${MKLM_EXIT_OS_TOO_OLD}
+    Quit
   ${EndIf}
   Call CloseMklm
 FunctionEnd
@@ -223,12 +341,39 @@ Section "MKLM" SecMain
   Call CloseMklm
   SetShellVarContext all
   SetOutPath "$INSTDIR"
-  File "${SRCDIR}\mklm.exe"
-  File "${SRCDIR}\mklm-cli.exe"
-  File "${SRCDIR}\mklm-helper.exe"
+
+  ; 1. Documents first: a failure here aborts (exit 2) before any executable is touched.
+  AllowSkipFiles off
   File /oname=LICENSE.txt "${ROOT}\LICENSE"
   File /oname=recovery.md "${ROOT}\docs\recovery.md"
   File /oname=install-guide.md "${ROOT}\docs\install-guide.ja.md"
+
+  ; 2. The new executables next to the old ones. Nothing is replaced yet. A failed write sets the
+  ;    error flag (skipping is harmless here, before anything is replaced) and ends with 27.
+  !insertmacro DELETE_LEFTOVERS
+  AllowSkipFiles on
+  ClearErrors
+  File "/oname=$INSTDIR\mklm-helper.exe.new" "${SRCDIR}\mklm-helper.exe"
+  File "/oname=$INSTDIR\mklm-cli.exe.new" "${SRCDIR}\mklm-cli.exe"
+  File "/oname=$INSTDIR\mklm.exe.new" "${SRCDIR}\mklm.exe"
+  AllowSkipFiles off
+  ${If} ${Errors}
+    !insertmacro DELETE_NEW
+    MessageBox MB_OK|MB_ICONSTOP "$(FILE_WRITE_FAILED)" /SD IDOK
+    SetErrorLevel ${MKLM_EXIT_FILE_WRITE}
+    Quit
+  ${EndIf}
+
+  ; 3. Swap by renames (same volume; CloseMklm made sure nothing runs). On any failure the swapped
+  ;    ones are put back, then exit 26.
+  Call SwapExecutables
+
+  ; 4. The old copies. A leftover (still open somewhere) is removed by the next install
+  ;    (DELETE_LEFTOVERS); nothing is scheduled for the next restart.
+  Delete "$INSTDIR\mklm-helper.exe.old"
+  Delete "$INSTDIR\mklm-cli.exe.old"
+  Delete "$INSTDIR\mklm.exe.old"
+
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   CreateShortcut "$SMPROGRAMS\${PRODUCT}.lnk" "$INSTDIR\mklm.exe" "" "$INSTDIR\mklm.exe" 0
@@ -264,6 +409,7 @@ Function un.onInit
   ; The uninstaller runs the tools in $INSTDIR elevated: only the Program Files copy is trusted.
   ${If} "$INSTDIR" != "$PROGRAMFILES64\SHIN DATA CENTER\MKLM"
     MessageBox MB_OK|MB_ICONSTOP "$(NOT_INSTALLED_HERE)" /SD IDOK
+    SetErrorLevel ${MKLM_EXIT_BAD_INSTALL_DIR}
     Quit
   ${EndIf}
   Call un.CloseMklm
@@ -283,11 +429,12 @@ Section "Uninstall"
     StrCpy $2 0
   ${EndIf}
   ${IfNot} ${Silent}
+    ; /SD keeps the machine setting (never reached silently: every MessageBox has one, D.9.3).
     ${If} $2 == 1
-      MessageBox MB_YESNO|MB_ICONQUESTION "$(ASK_RESTORE)" IDYES +2
+      MessageBox MB_YESNO|MB_ICONQUESTION "$(ASK_RESTORE)" /SD IDYES IDYES +2
       StrCpy $2 0
     ${Else}
-      MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "$(ASK_RESTORE)" IDNO +2
+      MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "$(ASK_RESTORE)" /SD IDNO IDNO +2
       StrCpy $2 1
     ${EndIf}
   ${EndIf}
@@ -321,6 +468,8 @@ Section "Uninstall"
   Delete /REBOOTOK "$INSTDIR\mklm.exe"
   Delete /REBOOTOK "$INSTDIR\mklm-cli.exe"
   Delete /REBOOTOK "$INSTDIR\mklm-helper.exe"
+  ; Leftovers of an interrupted two-stage replacement (design m5b D.9.2).
+  !insertmacro DELETE_LEFTOVERS
   Delete "$INSTDIR\LICENSE.txt"
   Delete "$INSTDIR\recovery.md"
   Delete "$INSTDIR\install-guide.md"

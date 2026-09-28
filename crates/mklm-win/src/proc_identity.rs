@@ -21,11 +21,21 @@ use windows::Wdk::System::SystemInformation::{
 };
 use windows::Win32::Foundation::{FILETIME, HANDLE, STATUS_INFO_LENGTH_MISMATCH, UNICODE_STRING};
 use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GETFINALPATHNAMEBYHANDLE_FLAGS, GetFinalPathNameByHandleW, OPEN_EXISTING, SYNCHRONIZE,
+    VOLUME_NAME_NT,
+};
+use windows::Win32::System::RemoteDesktop::{
+    WTS_PROCESS_INFOW, WTSEnumerateProcessesW, WTSFreeMemory,
+};
 use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, GetProcessTimes};
-use windows::core::PWSTR;
+use windows::core::{PCWSTR, PWSTR};
 
 use crate::error::Error;
-use crate::sys::{nt_check, win32};
+use crate::security::sid_to_string;
+use crate::sys::{last_error, nt_check, own, raw, wide_os, win32};
 
 /// `SystemProcessIdInformation`.
 const SYSTEM_PROCESS_ID_INFORMATION: SYSTEM_INFORMATION_CLASS = SYSTEM_INFORMATION_CLASS(88);
@@ -40,8 +50,8 @@ struct SystemProcessIdInformation {
     image_name: UNICODE_STRING,
 }
 
-/// The fixed head of `SYSTEM_PROCESS_INFORMATION`, up to `UniqueProcessId`. Only used for its
-/// field offsets; entries are parsed from the byte buffer.
+/// The fixed head of `SYSTEM_PROCESS_INFORMATION`, up to `SessionId`. Only used for its field
+/// offsets; entries are parsed from the byte buffer.
 #[repr(C)]
 #[allow(dead_code, reason = "the kernel's layout; only some fields are read")]
 struct ProcessEntryHead {
@@ -57,14 +67,29 @@ struct ProcessEntryHead {
     image_name: UNICODE_STRING,
     base_priority: i32,
     unique_process_id: HANDLE,
+    inherited_from_unique_process_id: HANDLE,
+    handle_count: u32,
+    session_id: u32,
 }
 
 // The documented x64 / ARM64 offsets of the fields this module reads.
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(offset_of!(ProcessEntryHead, create_time) == 32);
+    assert!(offset_of!(ProcessEntryHead, image_name) == 56);
     assert!(offset_of!(ProcessEntryHead, unique_process_id) == 80);
+    assert!(offset_of!(ProcessEntryHead, session_id) == 100);
 };
+
+/// One process of `SystemProcessInformation`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessEntry {
+    pid: u32,
+    create_time: u64,
+    session_id: u32,
+    /// The image's file name (`ImageName`, no directory); `None` for the idle process.
+    image_name: Option<String>,
+}
 
 /// This process's PID and creation time (`GetProcessTimes` on the pseudo handle; the same
 /// `CreateTime` that `SystemProcessInformation` reports).
@@ -106,6 +131,14 @@ pub fn process_liveness(process: &ProcessIdentity) -> Liveness {
 
 /// `(PID, CreateTime)` of every process.
 fn process_table() -> Result<Vec<(u32, u64)>, Error> {
+    Ok(process_entries()?
+        .into_iter()
+        .map(|entry| (entry.pid, entry.create_time))
+        .collect())
+}
+
+/// Every process of `SystemProcessInformation`.
+fn process_entries() -> Result<Vec<ProcessEntry>, Error> {
     const FUNCTION: &str = "NtQuerySystemInformation(SystemProcessInformation)";
     let mut size: usize = 512 * 1024;
     for _ in 0..MAX_ATTEMPTS {
@@ -128,9 +161,11 @@ fn process_table() -> Result<Vec<(u32, u64)>, Error> {
             continue;
         }
         nt_check(FUNCTION, status)?;
+        // The image names point into `buffer`: their offsets are taken relative to its address.
+        let base = buffer.as_ptr() as usize;
         let bytes: Vec<u8> = buffer.iter().flat_map(|word| word.to_ne_bytes()).collect();
         let used = (returned as usize).min(bytes.len());
-        return parse_process_table(&bytes[..used]).ok_or_else(|| Error::UnexpectedData {
+        return parse_process_entries(&bytes[..used], base).ok_or_else(|| Error::UnexpectedData {
             path: "SystemProcessInformation".to_string(),
         });
     }
@@ -140,11 +175,27 @@ fn process_table() -> Result<Vec<(u32, u64)>, Error> {
     })
 }
 
-/// Walks the `NextEntryOffset` chain; `None` when an entry does not fit in `bytes`.
+/// [`parse_process_entries`] without the image names.
+#[cfg(test)]
 fn parse_process_table(bytes: &[u8]) -> Option<Vec<(u32, u64)>> {
+    Some(
+        parse_process_entries(bytes, 0)?
+            .into_iter()
+            .map(|entry| (entry.pid, entry.create_time))
+            .collect(),
+    )
+}
+
+/// Walks the `NextEntryOffset` chain; `None` when an entry does not fit in `bytes`. `base` is the
+/// address the kernel wrote to: `ImageName.Buffer` points at `base + offset` of its text, which
+/// must lie within `bytes` (else the name is `None`).
+fn parse_process_entries(bytes: &[u8], base: usize) -> Option<Vec<ProcessEntry>> {
     let head = size_of::<ProcessEntryHead>();
     let pid_offset = offset_of!(ProcessEntryHead, unique_process_id);
     let time_offset = offset_of!(ProcessEntryHead, create_time);
+    let session_offset = offset_of!(ProcessEntryHead, session_id);
+    let name_offset = offset_of!(ProcessEntryHead, image_name);
+    let name_buffer_offset = name_offset + offset_of!(UNICODE_STRING, Buffer);
     let mut table = Vec::new();
     let mut offset = 0usize;
     loop {
@@ -154,13 +205,46 @@ fn parse_process_table(bytes: &[u8]) -> Option<Vec<(u32, u64)>> {
             i64::from_ne_bytes(entry.get(time_offset..time_offset + 8)?.try_into().ok()?);
         let pid_bytes = entry.get(pid_offset..pid_offset + size_of::<usize>())?;
         let pid = usize::from_ne_bytes(pid_bytes.try_into().ok()?);
+        let session_id = u32::from_ne_bytes(
+            entry
+                .get(session_offset..session_offset + 4)?
+                .try_into()
+                .ok()?,
+        );
+        let name_len =
+            u16::from_ne_bytes(entry.get(name_offset..name_offset + 2)?.try_into().ok()?);
+        let name_pointer = usize::from_ne_bytes(
+            entry
+                .get(name_buffer_offset..name_buffer_offset + size_of::<usize>())?
+                .try_into()
+                .ok()?,
+        );
+        let image_name = image_name(bytes, base, name_pointer, usize::from(name_len));
         // PIDs are multiples of 4 below 2^32; a HANDLE-sized field only carries them.
-        table.push((u32::try_from(pid).ok()?, create_time as u64));
+        table.push(ProcessEntry {
+            pid: u32::try_from(pid).ok()?,
+            create_time: create_time as u64,
+            session_id,
+            image_name,
+        });
         if next == 0 {
             return Some(table);
         }
         offset = offset.checked_add(next)?;
     }
+}
+
+/// The UTF-16 text of `len` bytes at address `pointer`, when it lies within `bytes` (which was
+/// written at address `base`).
+fn image_name(bytes: &[u8], base: usize, pointer: usize, len: usize) -> Option<String> {
+    if pointer == 0 || len == 0 || !len.is_multiple_of(2) {
+        return None;
+    }
+    let start = pointer.checked_sub(base)?;
+    let text = bytes.get(start..start.checked_add(len)?)?;
+    let (units, _) = text.as_chunks::<2>();
+    let units: Vec<u16> = units.iter().map(|pair| u16::from_ne_bytes(*pair)).collect();
+    String::from_utf16(&units).ok()
 }
 
 /// NT image path of a running process (`SystemProcessIdInformation`), e.g.
@@ -232,16 +316,57 @@ pub fn same_image_directory(pid: u32) -> Result<bool, Error> {
 // ---- M5b additions (design m5b H.3, D.7, D.8; WP-H) ----
 
 /// PID → identity with its creation time (SystemProcessInformation); `None` if gone.
-#[allow(unused_variables)] // Skeleton (M5b)
 pub fn process_identity(pid: u32) -> Result<Option<ProcessIdentity>, Error> {
-    Err(skeleton("process_identity (m5b skeleton)")) // Skeleton (M5b): WP-H
+    Ok(process_table()?
+        .into_iter()
+        .find(|&(found, _)| found == pid)
+        .map(|(pid, creation_time)| ProcessIdentity { pid, creation_time }))
 }
 
 /// NT path of a file (`GetFinalPathNameByHandleW(VOLUME_NAME_NT)`), for comparing with
 /// `process_image_nt_path`.
-#[allow(unused_variables)] // Skeleton (M5b)
 pub fn file_nt_path(path: &std::path::Path) -> Result<String, Error> {
-    Err(skeleton("file_nt_path (m5b skeleton)")) // Skeleton (M5b): WP-H
+    let share = FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0);
+    let wide = wide_os(path.as_os_str());
+    // SAFETY: `wide` is NUL-terminated and outlives the call; the handle asks for attributes only
+    // (FILE_FLAG_BACKUP_SEMANTICS lets a directory be opened too).
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0,
+            share,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+    }
+    .map_err(|error| win32("CreateFileW", &error))?;
+    // SAFETY: CreateFileW succeeded, so `handle` is an open handle this process owns.
+    let handle = unsafe { own(handle) };
+    let mut buffer = vec![0u16; 512];
+    for _ in 0..4 {
+        // SAFETY: `handle` is open; the slice tells the API how many units it may write.
+        let len = unsafe {
+            GetFinalPathNameByHandleW(
+                raw(&handle),
+                &mut buffer,
+                GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_NT.0),
+            )
+        } as usize;
+        if len == 0 {
+            return Err(last_error("GetFinalPathNameByHandleW"));
+        }
+        if len < buffer.len() {
+            buffer.truncate(len);
+            return String::from_utf16(&buffer).map_err(|_| Error::UnexpectedData {
+                path: path.display().to_string(),
+            });
+        }
+        // Too small: `len` is the size needed, including the NUL.
+        buffer = vec![0u16; len + 1];
+    }
+    Err(last_error("GetFinalPathNameByHandleW"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,9 +378,44 @@ pub struct ImageProcess {
 }
 
 /// Every process whose image NT path equals one of `nt_paths` (case-insensitive).
-#[allow(unused_variables)] // Skeleton (M5b)
+///
+/// Only processes whose image *file name* matches one of the paths' file names are asked for
+/// their full path (`SystemProcessIdInformation`), so a lookup costs one process-table read and a
+/// few queries. A process that ends in between is skipped.
 pub fn processes_with_images(nt_paths: &[String]) -> Result<Vec<ImageProcess>, Error> {
-    Err(skeleton("processes_with_images (m5b skeleton)")) // Skeleton (M5b): WP-H
+    let file_names: Vec<&str> = nt_paths
+        .iter()
+        .map(|path| path.rsplit('\\').next().unwrap_or(path))
+        .collect();
+    let mut found = Vec::new();
+    for entry in process_entries()? {
+        let Some(name) = entry.image_name.as_deref() else {
+            continue;
+        };
+        if !file_names
+            .iter()
+            .any(|wanted| equal_ignoring_case(name, wanted))
+        {
+            continue;
+        }
+        let Ok(image) = process_image_nt_path(entry.pid) else {
+            continue;
+        };
+        if let Some(path_index) = nt_paths
+            .iter()
+            .position(|path| equal_ignoring_case(&image, path))
+        {
+            found.push(ImageProcess {
+                identity: ProcessIdentity {
+                    pid: entry.pid,
+                    creation_time: entry.create_time,
+                },
+                path_index,
+                session_id: entry.session_id,
+            });
+        }
+    }
+    Ok(found)
 }
 
 /// One row of `WTSEnumerateProcessesW(WTS_CURRENT_SERVER_HANDLE)`.
@@ -266,25 +426,83 @@ pub struct ProcessUser {
     pub user_sid: Option<String>,
 }
 
+/// Frees the `WTSEnumerateProcessesW` array.
+struct WtsMemory(*mut WTS_PROCESS_INFOW);
+
+impl Drop for WtsMemory {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: the array was allocated by WTSEnumerateProcessesW and is freed once.
+            unsafe { WTSFreeMemory(self.0.cast()) };
+        }
+    }
+}
+
 /// PID → session and user SID of every process (design m5b D.8 step 2; FIX-VERIFICATION-5).
 /// Whether `pUserSid` is filled for other users' processes when called from an elevated,
 /// non-SYSTEM process is unverified (design m5b I.12).
 pub fn process_users() -> Result<std::collections::HashMap<u32, ProcessUser>, Error> {
-    Err(skeleton("process_users (m5b skeleton)")) // Skeleton (M5b): WP-H
+    let mut rows: *mut WTS_PROCESS_INFOW = std::ptr::null_mut();
+    let mut count = 0u32;
+    // SAFETY: the local server (None is WTS_CURRENT_SERVER_HANDLE); version 1; both out pointers
+    // are valid. The array is freed by `WtsMemory`.
+    unsafe { WTSEnumerateProcessesW(None, 0, 1, &mut rows, &mut count) }
+        .map_err(|error| win32("WTSEnumerateProcessesW", &error))?;
+    let memory = WtsMemory(rows);
+    if memory.0.is_null() {
+        return Ok(std::collections::HashMap::new());
+    }
+    // SAFETY: WTSEnumerateProcessesW returned `count` rows at `rows`, alive until `memory` drops
+    // at the end of this function.
+    let rows = unsafe { std::slice::from_raw_parts(memory.0, count as usize) };
+    let mut users = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let user_sid = if row.pUserSid.0.is_null() {
+            None
+        } else {
+            sid_to_string(row.pUserSid).ok()
+        };
+        users.insert(
+            row.ProcessId,
+            ProcessUser {
+                session_id: row.SessionId,
+                user_sid,
+            },
+        );
+    }
+    Ok(users)
 }
 
-/// Polls `process_liveness` every 250 ms; true when all are gone within `timeout`.
-#[allow(unused_variables)] // Skeleton (M5b)
+/// How often [`wait_for_exit`] looks.
+const EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Polls `process_liveness` every 250 ms; true when all are gone within `timeout`. A liveness that
+/// cannot be read counts as alive (the wait never ends early on a doubt).
 pub fn wait_for_exit(
     processes: &[ProcessIdentity],
     timeout: std::time::Duration,
 ) -> Result<bool, Error> {
-    Err(skeleton("wait_for_exit (m5b skeleton)")) // Skeleton (M5b): WP-H
-}
-
-/// What the WP-0 skeleton returns (design m5b G.2): `ERROR_NOT_SUPPORTED`.
-fn skeleton(function: &'static str) -> Error {
-    Error::Win32 { function, code: 50 }
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let table = process_table();
+        let gone = match &table {
+            Ok(table) => processes
+                .iter()
+                .all(|process| !table.contains(&(process.pid, process.creation_time))),
+            Err(_) => false,
+        };
+        if gone {
+            return Ok(true);
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return match table {
+                Ok(_) => Ok(false),
+                Err(error) => Err(error),
+            };
+        }
+        std::thread::sleep(remaining.min(EXIT_POLL));
+    }
 }
 
 /// Directory part of an NT image path (without the last `\`); `None` without one.
@@ -295,7 +513,7 @@ fn image_directory(path: &str) -> Option<&str> {
 }
 
 /// Ordinal comparison ignoring case, as the file system compares names.
-fn equal_ignoring_case(a: &str, b: &str) -> bool {
+pub(crate) fn equal_ignoring_case(a: &str, b: &str) -> bool {
     let a: Vec<u16> = a.encode_utf16().collect();
     let b: Vec<u16> = b.encode_utf16().collect();
     // SAFETY: both slices are valid UTF-16 buffers with their lengths.
@@ -403,6 +621,86 @@ mod tests {
             r"\Device\HarddiskVolume3\MKLM",
             r"\Device\HarddiskVolume4\MKLM"
         ));
+    }
+
+    // ---- M5b additions ----
+
+    #[test]
+    fn identities_and_images_of_this_process() {
+        let me = current_process_identity().expect("own identity");
+        assert_eq!(process_identity(me.pid), Ok(Some(me)));
+        assert_eq!(process_identity(0xFFFF_FFF3), Ok(None));
+        let exe = std::env::current_exe().expect("test executable");
+        let file = file_nt_path(&exe).expect("NT path of the test executable");
+        let image = process_image_nt_path(me.pid).expect("own image path");
+        assert!(file.starts_with(r"\Device\"), "{file}");
+        assert!(equal_ignoring_case(&file, &image), "{file} / {image}");
+        assert!(file_nt_path(&exe.with_file_name("mklm no such file.exe")).is_err());
+        // This process runs its own image, in its token's session; nothing runs a missing file.
+        let found = processes_with_images(&[
+            r"\Device\HarddiskVolume99\no\such\mklm.exe".to_string(),
+            file.to_uppercase(),
+        ])
+        .expect("process lookup");
+        let mine: Vec<_> = found.iter().filter(|p| p.identity == me).collect();
+        assert_eq!(mine.len(), 1, "{found:?}");
+        assert_eq!(mine[0].path_index, 1);
+        let users = process_users().expect("WTSEnumerateProcessesW");
+        let row = users.get(&me.pid).expect("this process is listed");
+        assert_eq!(row.session_id, mine[0].session_id);
+        assert_eq!(
+            row.user_sid.as_deref(),
+            Some(crate::elevation::current_user_sid().expect("SID").as_str())
+        );
+    }
+
+    #[test]
+    fn waiting_for_processes_to_exit() {
+        let exe = std::env::current_exe().expect("test executable");
+        let mut child = Command::new(exe)
+            .args(["--list", "--exact", "no such test"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start child");
+        let identity = ProcessIdentity {
+            pid: child.id(),
+            creation_time: creation_time(&child),
+        };
+        child.wait().expect("child exits");
+        assert_eq!(
+            wait_for_exit(&[identity], std::time::Duration::from_secs(5)),
+            Ok(true)
+        );
+        assert_eq!(wait_for_exit(&[], std::time::Duration::ZERO), Ok(true));
+        let me = current_process_identity().expect("own identity");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            wait_for_exit(&[identity, me], std::time::Duration::from_millis(300)),
+            Ok(false)
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn image_names_are_read_within_the_buffer_only() {
+        let text: Vec<u8> = "mklm.exe"
+            .encode_utf16()
+            .flat_map(u16::to_ne_bytes)
+            .collect();
+        let mut bytes = vec![0u8; 16];
+        bytes.extend_from_slice(&text);
+        let base = 0x1000;
+        assert_eq!(
+            image_name(&bytes, base, base + 16, text.len()).as_deref(),
+            Some("mklm.exe")
+        );
+        assert_eq!(image_name(&bytes, base, 0, text.len()), None);
+        assert_eq!(image_name(&bytes, base, base + 16, 0), None);
+        assert_eq!(image_name(&bytes, base, base + 16, 3), None);
+        assert_eq!(image_name(&bytes, base, base - 2, 4), None);
+        assert_eq!(image_name(&bytes, base, base + 16, text.len() + 2), None);
     }
 
     #[test]

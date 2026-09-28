@@ -9,9 +9,13 @@
 //!   it is terminated (the policy is `mklm_engine::SessionEnd`; this module only delivers the
 //!   messages).
 //!
-//! The window never blocks the end of the session: it answers `TRUE` to `WM_QUERYENDSESSION`
-//! after the handler returns. The handler runs on the window's thread and may wait a bounded time
-//! (the engine's revert on the request thread goes on meanwhile).
+//! The helper's window never blocks the end of the session: it answers `TRUE` to
+//! `WM_QUERYENDSESSION` after the handler returns. The handler runs on the window's thread and may
+//! wait a bounded time (the engine's revert on the request thread goes on meanwhile).
+//!
+//! The update runner (M5b, design m5b D.7; RELIABILITY-3) asks to be told first
+//! ([`shut_down_first`], 0x3FF) and uses [`SessionEndWindow::spawn_with_answer`]: while its
+//! installer runs, it answers `FALSE` and shows a reason ([`SessionEndWindow::set_block_reason`]).
 //!
 //! Not part of the GUI's `ui` module: the helper links no UI toolkit and does not enable the `gui`
 //! feature. Only `Win32_UI_WindowsAndMessaging` is used, like the GUI's shell window.
@@ -21,17 +25,20 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Globalization::GetUserDefaultUILanguage;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Shutdown::{ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy};
 use windows::Win32::System::Threading::SetProcessShutdownParameters;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
-    PostMessageW, PostQuitMessage, RegisterClassW, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY,
-    WM_ENDSESSION, WM_QUERYENDSESSION, WNDCLASSW, WS_EX_TOOLWINDOW,
+    PostMessageW, PostQuitMessage, RegisterClassW, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+    SendMessageTimeoutW, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ENDSESSION,
+    WM_QUERYENDSESSION, WNDCLASSW, WS_EX_TOOLWINDOW,
 };
 use windows::core::{PCWSTR, w};
 
-use crate::error::Error;
-use crate::sys::win32;
+use crate::error::{Error, win32_code};
+use crate::sys::{last_error, win32};
 
 /// Shutdown level of the helper: the lowest of the range applications may use (0x100-0x3FF).
 /// Processes with a higher level are shut down first; the GUI and the CLI keep the default 0x280,
@@ -60,7 +67,8 @@ pub enum SessionEndEvent {
     EndSession { ending: bool },
 }
 
-type Handler = Box<dyn Fn(SessionEndEvent)>;
+/// The handler and its answer to `WM_QUERYENDSESSION` (`spawn`'s handlers always allow).
+type Handler = Box<dyn Fn(SessionEndEvent) -> QueryAnswer>;
 
 thread_local! {
     /// The handler of the window on this thread (one window per thread).
@@ -71,6 +79,12 @@ const CLASS_NAME: PCWSTR = w!("SHINDATACENTER.MKLM.SessionEnd");
 /// Private message: destroy the window and end its thread. `WM_CLOSE` is ignored (e.g. `taskkill`
 /// without /F sends it to every top-level window), so only the owner ends it.
 const WM_APP_QUIT: u32 = WM_APP + 1;
+/// Private message (M5b): `ShutdownBlockReasonCreate` with the NUL-terminated text at `wParam`, or
+/// `ShutdownBlockReasonDestroy` when it is 0, on the window's own thread. Sent synchronously, so the
+/// text outlives the call. Answers 1 on success.
+const WM_APP_BLOCK_REASON: u32 = WM_APP + 2;
+/// How long [`SessionEndWindow::set_block_reason`] waits for the window's thread.
+const BLOCK_REASON_TIMEOUT_MS: u32 = 5_000;
 
 /// A hidden top-level window on its own message thread that reports session-end messages to a
 /// handler. Dropping it destroys the window and joins the thread.
@@ -85,6 +99,15 @@ impl SessionEndWindow {
     /// Starts the thread and creates the window. `handler` runs on that thread, inside the
     /// window procedure; it may block for a bounded time (the session waits for it).
     pub fn spawn(handler: impl Fn(SessionEndEvent) + Send + 'static) -> Result<Self, Error> {
+        Self::start(move |event| {
+            handler(event);
+            QueryAnswer::Allow
+        })
+    }
+
+    fn start(
+        handler: impl Fn(SessionEndEvent) -> QueryAnswer + Send + 'static,
+    ) -> Result<Self, Error> {
         let (ready, created) = mpsc::channel::<Result<isize, Error>>();
         let thread = thread::Builder::new()
             .name("mklm-session-end".into())
@@ -124,12 +147,19 @@ impl SessionEndWindow {
 /// H2: the highest application level, so that it hears of the session end first.
 pub const RUNNER_SHUTDOWN_LEVEL: u32 = 0x3FF;
 
+/// The Windows display language of the user this process runs as (`GetUserDefaultUILanguage`,
+/// e.g. `0x0411` for Japanese): the update runner picks the language of its block reason with it
+/// (the helper has no UI toolkit and no `gui` feature).
+pub fn user_ui_language() -> u16 {
+    // SAFETY: GetUserDefaultUILanguage has no preconditions.
+    unsafe { GetUserDefaultUILanguage() }
+}
+
 /// `SetProcessShutdownParameters(RUNNER_SHUTDOWN_LEVEL, SHUTDOWN_NORETRY)`.
 pub fn shut_down_first() -> Result<(), Error> {
-    Err(Error::Win32 {
-        function: "shut_down_first (m5b skeleton)",
-        code: 50,
-    }) // Skeleton (M5b): WP-H
+    // SAFETY: a plain Win32 call about the current process, without pointers.
+    unsafe { SetProcessShutdownParameters(RUNNER_SHUTDOWN_LEVEL, SHUTDOWN_NORETRY) }
+        .map_err(|error| win32("SetProcessShutdownParameters", &error))
 }
 
 /// The update runner's answer to `WM_QUERYENDSESSION`.
@@ -140,24 +170,62 @@ pub enum QueryAnswer {
 }
 
 impl SessionEndWindow {
-    /// Like `spawn`, but the handler's answer to `QueryEndSession` is returned to Windows.
-    #[allow(unused_variables)] // Skeleton (M5b)
+    /// Like `spawn`, but the handler's answer to `QueryEndSession` is returned to Windows
+    /// (`Block` answers `FALSE`: Windows then shows the reason set with
+    /// [`set_block_reason`](Self::set_block_reason) and lets the user decide).
     pub fn spawn_with_answer(
         handler: impl Fn(SessionEndEvent) -> QueryAnswer + Send + 'static,
     ) -> Result<SessionEndWindow, Error> {
-        Err(Error::Win32 {
-            function: "SessionEndWindow::spawn_with_answer (m5b skeleton)",
-            code: 50,
-        }) // Skeleton (M5b): WP-H
+        Self::start(handler)
     }
 
     /// `ShutdownBlockReasonCreate` / `Destroy` on the window's own thread (posted to it).
-    #[allow(unused_variables)] // Skeleton (M5b)
+    ///
+    /// Sent with `SendMessageTimeoutW` (5 s), so the text stays valid while the window's thread
+    /// uses it; Microsoft Learn: the reason must be set from the thread that created the window.
     pub fn set_block_reason(&self, reason: Option<&str>) -> Result<(), Error> {
-        Err(Error::Win32 {
-            function: "SessionEndWindow::set_block_reason (m5b skeleton)",
-            code: 50,
-        }) // Skeleton (M5b): WP-H
+        let text: Option<Vec<u16>> = reason.map(|reason| {
+            reason
+                .encode_utf16()
+                .filter(|&unit| unit != 0)
+                .chain(std::iter::once(0))
+                .collect()
+        });
+        let pointer = text.as_ref().map_or(0, |text| text.as_ptr() as usize);
+        let hwnd = HWND(self.hwnd as *mut core::ffi::c_void);
+        let mut answer = 0usize;
+        // SAFETY: a message to this value's own window; `pointer` is 0 or points at `text`, a
+        // NUL-terminated string that stays valid while the window's thread may use it: until the
+        // synchronous call returns, and forever when it timed out (the text is leaked then, as
+        // the message may still be handled later).
+        let sent = unsafe {
+            SendMessageTimeoutW(
+                hwnd,
+                WM_APP_BLOCK_REASON,
+                WPARAM(pointer),
+                LPARAM(0),
+                SMTO_BLOCK | SMTO_ABORTIFHUNG,
+                BLOCK_REASON_TIMEOUT_MS,
+                Some(&mut answer),
+            )
+        };
+        if sent.0 == 0 {
+            let error = last_error("SendMessageTimeoutW");
+            std::mem::forget(text);
+            return Err(error);
+        }
+        if answer == 1 {
+            Ok(())
+        } else {
+            Err(Error::Win32 {
+                function: if reason.is_some() {
+                    "ShutdownBlockReasonCreate"
+                } else {
+                    "ShutdownBlockReasonDestroy"
+                },
+                code: u32::try_from(answer).unwrap_or(u32::MAX),
+            })
+        }
     }
 }
 
@@ -232,12 +300,28 @@ fn create_window() -> Result<HWND, Error> {
     .map_err(|error| win32("CreateWindowExW", &error))
 }
 
-fn emit(event: SessionEndEvent) {
+fn emit(event: SessionEndEvent) -> QueryAnswer {
     HANDLER.with(|h| {
-        if let Some(handler) = h.borrow().as_ref() {
-            handler(event);
-        }
-    });
+        h.borrow()
+            .as_ref()
+            .map_or(QueryAnswer::Allow, |handler| handler(event))
+    })
+}
+
+/// `WM_APP_BLOCK_REASON` on the window's thread: 1 on success, else the Win32 error code.
+fn block_reason(hwnd: HWND, text: usize) -> LRESULT {
+    let result = if text == 0 {
+        // SAFETY: the window belongs to this thread.
+        unsafe { ShutdownBlockReasonDestroy(hwnd) }
+    } else {
+        // SAFETY: the window belongs to this thread; `text` points at a NUL-terminated string the
+        // sender keeps alive while it waits for this synchronous message.
+        unsafe { ShutdownBlockReasonCreate(hwnd, PCWSTR(text as *const u16)) }
+    };
+    match result {
+        Ok(()) => LRESULT(1),
+        Err(error) => LRESULT(isize::try_from(win32_code(&error)).unwrap_or(2).max(2)),
+    }
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -248,12 +332,16 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_QUERYENDSESSION => {
-            emit(SessionEndEvent::QueryEndSession);
-            // Never block the end of the session (design m3 F.5).
-            return LRESULT(1);
+            // The helper's windows never block the end of the session (design m3 F.5); the
+            // update runner's blocks it while its installer runs (design m5b D.7, RELIABILITY-3).
+            return match emit(SessionEndEvent::QueryEndSession) {
+                QueryAnswer::Allow => LRESULT(1),
+                QueryAnswer::Block => LRESULT(0),
+            };
         }
+        WM_APP_BLOCK_REASON => return block_reason(hwnd, wparam.0),
         WM_ENDSESSION => {
-            emit(SessionEndEvent::EndSession {
+            let _ = emit(SessionEndEvent::EndSession {
                 ending: wparam.0 != 0,
             });
             return LRESULT(0);
@@ -341,4 +429,46 @@ mod tests {
     /// lowest one applications may use.
     const _: () = assert!(HELPER_SHUTDOWN_LEVEL < 0x280 && HELPER_SHUTDOWN_LEVEL >= 0x100);
     const _: () = assert!(SHUTDOWN_NORETRY == 1);
+    /// The update runner hears of the end first: above the GUI's 0x280 and NSIS's default, at the
+    /// top of the application range (design m5b D.7, RELIABILITY-3).
+    const _: () = assert!(RUNNER_SHUTDOWN_LEVEL == 0x3FF && RUNNER_SHUTDOWN_LEVEL > 0x280);
+
+    /// The update runner's window answers `WM_QUERYENDSESSION` as its handler says, and sets and
+    /// clears the block reason on its own thread (design m5b D.7). Nothing ends a session here:
+    /// the messages only reach this process's own window.
+    #[test]
+    fn the_runner_window_can_block() {
+        let block = Arc::new(Mutex::new(false));
+        let answer = Arc::clone(&block);
+        let window = SessionEndWindow::spawn_with_answer(move |event| {
+            let blocking = answer.lock().map(|b| *b).unwrap_or(false);
+            match event {
+                SessionEndEvent::QueryEndSession if blocking => QueryAnswer::Block,
+                _ => QueryAnswer::Allow,
+            }
+        })
+        .expect("the hidden window");
+        let hwnd = window.hwnd();
+        let query = || {
+            // SAFETY: a window of this process; SendMessageW waits for its thread to handle it.
+            unsafe {
+                SendMessageW(
+                    hwnd,
+                    WM_QUERYENDSESSION,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(ENDSESSION_LOGOFF as isize)),
+                )
+            }
+        };
+        assert_eq!(query(), LRESULT(1));
+        *block.lock().unwrap() = true;
+        window
+            .set_block_reason(Some("test: blocked while the update runs"))
+            .expect("reason set");
+        assert_eq!(query(), LRESULT(0), "blocked while installing");
+        window.set_block_reason(None).expect("reason cleared");
+        *block.lock().unwrap() = false;
+        assert_eq!(query(), LRESULT(1));
+        drop(window);
+    }
 }

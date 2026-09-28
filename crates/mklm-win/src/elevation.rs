@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use windows::Win32::Foundation::{
-    ERROR_CANCELLED, ERROR_INVALID_HANDLE, ERROR_RESOURCE_TYPE_NOT_FOUND, HANDLE, HWND,
+    ERROR_CANCELLED, ERROR_INVALID_HANDLE, ERROR_RESOURCE_TYPE_NOT_FOUND, FILETIME, HANDLE, HWND,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::{
@@ -21,18 +21,20 @@ use windows::Win32::Storage::FileSystem::{
     GetFileVersionInfoSizeExW, VerQueryValueW,
 };
 use windows::Win32::System::Com::{
-    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
 use windows::Win32::System::Console::GetConsoleWindow;
 use windows::Win32::System::Environment::GetCommandLineW;
-use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW};
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CreateProcessW, GetCurrentProcess, GetExitCodeProcess, GetProcessId,
-    OpenProcessToken, PROCESS_INFORMATION, STARTUPINFOW, WaitForSingleObject,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+    GetCurrentProcess, GetExitCodeProcess, GetProcessId, GetProcessTimes, OpenProcessToken,
+    PROCESS_INFORMATION, ResumeThread, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::{
+    FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX64, KF_FLAG_DEFAULT,
     SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
-    ShellExecuteExW,
+    SHGetKnownFolderPath, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 use windows::core::{PCWSTR, PWSTR};
@@ -311,15 +313,112 @@ pub struct CleanEnvironment {
     pub vars: Vec<(String, String)>,
 }
 
+/// The variables of [`runner_environment`], and nothing else.
+pub const RUNNER_ENVIRONMENT_NAMES: [&str; 10] = [
+    "ComSpec",
+    "PATH",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramW6432",
+    "SystemDrive",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "windir",
+];
+
 /// SystemRoot, windir, SystemDrive, ComSpec, PATH (System32; Windows; System32\Wbem),
 /// ProgramData, ProgramFiles, ProgramW6432 from the system, and TEMP = TMP = `temp_dir`
 /// (design m5b D.9.4). Nothing from this process's environment.
-#[allow(unused_variables)] // Skeleton (M5b)
+///
+/// The Windows folder comes from `GetSystemWindowsDirectoryW`, System32 from
+/// `GetSystemDirectoryW`, the others from `SHGetKnownFolderPath`; `temp_dir` must be absolute.
 pub fn runner_environment(temp_dir: &Path) -> Result<CleanEnvironment, Error> {
-    Err(Error::Win32 {
-        function: "runner_environment (m5b skeleton)",
-        code: 50,
-    }) // Skeleton (M5b): WP-H
+    let text = |path: &Path| -> Result<String, Error> {
+        path.to_str()
+            .map(str::to_string)
+            .ok_or_else(|| Error::UnexpectedData {
+                path: path.display().to_string(),
+            })
+    };
+    if !temp_dir.is_absolute() {
+        return Err(Error::Insecure {
+            path: temp_dir.display().to_string(),
+            reason: "TEMP must be an absolute path".to_string(),
+        });
+    }
+    let windows = text(&windows_directory()?)?;
+    let system32 = text(&system_directory()?)?;
+    let drive = windows
+        .get(..2)
+        .filter(|drive| drive.as_bytes()[0].is_ascii_alphabetic() && drive.ends_with(':'))
+        .ok_or_else(|| Error::UnexpectedData {
+            path: windows.clone(),
+        })?
+        .to_string();
+    let temp = text(temp_dir)?;
+    let vars = vec![
+        ("ComSpec".to_string(), format!(r"{system32}\cmd.exe")),
+        (
+            "PATH".to_string(),
+            format!(r"{system32};{windows};{system32}\Wbem"),
+        ),
+        (
+            "ProgramData".to_string(),
+            text(&known_folder(&FOLDERID_ProgramData)?)?,
+        ),
+        (
+            "ProgramFiles".to_string(),
+            text(&known_folder(&FOLDERID_ProgramFiles)?)?,
+        ),
+        (
+            "ProgramW6432".to_string(),
+            text(&known_folder(&FOLDERID_ProgramFilesX64)?)?,
+        ),
+        ("SystemDrive".to_string(), drive),
+        ("SystemRoot".to_string(), windows.clone()),
+        ("TEMP".to_string(), temp.clone()),
+        ("TMP".to_string(), temp),
+        ("windir".to_string(), windows),
+    ];
+    Ok(CleanEnvironment { vars })
+}
+
+/// The Windows folder (`GetSystemWindowsDirectoryW`: the shared one, also on a terminal server).
+fn windows_directory() -> Result<PathBuf, Error> {
+    let mut buffer = vec![0u16; 260];
+    for _ in 0..4 {
+        // SAFETY: the slice tells the API how much it may write.
+        let len = unsafe { GetSystemWindowsDirectoryW(Some(&mut buffer)) } as usize;
+        if len == 0 {
+            return Err(last_error("GetSystemWindowsDirectoryW"));
+        }
+        if len < buffer.len() {
+            buffer.truncate(len);
+            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
+        }
+        buffer = vec![0u16; len + 1];
+    }
+    Err(last_error("GetSystemWindowsDirectoryW"))
+}
+
+/// A known folder of the machine (`SHGetKnownFolderPath`, no token), absolute.
+fn known_folder(id: &windows::core::GUID) -> Result<PathBuf, Error> {
+    // SAFETY: `id` is a static known-folder GUID; no token. The returned string is freed below.
+    let text = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None) }
+        .map_err(|error| win32("SHGetKnownFolderPath", &error))?;
+    // SAFETY: on success `text` is a NUL-terminated string.
+    let path = PathBuf::from(OsString::from_wide(unsafe { text.as_wide() }));
+    // SAFETY: allocated by SHGetKnownFolderPath with CoTaskMemAlloc; freed once, after the copy.
+    unsafe { CoTaskMemFree(Some(text.0.cast_const().cast())) };
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(Error::Insecure {
+            path: path.display().to_string(),
+            reason: "a known folder is not an absolute path".to_string(),
+        })
+    }
 }
 
 /// `CREATE_UNICODE_ENVIRONMENT` block: sorted case-insensitively by name, `name=value\0` each,
@@ -367,43 +466,112 @@ pub struct SpawnedProcess {
 }
 
 impl SpawnedProcess {
+    /// PID and creation time (`GetProcessTimes` on the handle this value holds, so the PID
+    /// cannot have been reused).
     pub fn identity(&self) -> Result<mklm_core::ProcessIdentity, Error> {
-        Err(Error::Win32 {
-            function: "SpawnedProcess::identity (m5b skeleton)",
-            code: 50,
-        }) // Skeleton (M5b): WP-H
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: the process handle is open (owned by `self.process`); out pointers are valid.
+        unsafe {
+            GetProcessTimes(
+                self.process.raw_handle(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            )
+        }
+        .map_err(|error| win32("GetProcessTimes", &error))?;
+        Ok(mklm_core::ProcessIdentity {
+            pid: self.process.pid(),
+            creation_time: (u64::from(creation.dwHighDateTime) << 32)
+                | u64::from(creation.dwLowDateTime),
+        })
     }
 
+    /// `ResumeThread` of the primary thread of a process started suspended; the thread handle is
+    /// closed afterwards. A process that was not suspended has nothing to resume
+    /// (`ERROR_INVALID_HANDLE`).
     pub fn resume(&mut self) -> Result<(), Error> {
-        Err(Error::Win32 {
-            function: "SpawnedProcess::resume (m5b skeleton)",
-            code: 50,
-        }) // Skeleton (M5b): WP-H
+        let thread = self.thread.take().ok_or(Error::Win32 {
+            function: "ResumeThread",
+            code: ERROR_INVALID_HANDLE.0,
+        })?;
+        // SAFETY: `thread` is the open primary-thread handle CreateProcessW returned.
+        let previous = unsafe { ResumeThread(raw(&thread)) };
+        if previous == u32::MAX {
+            let error = last_error("ResumeThread");
+            self.thread = Some(thread);
+            return Err(error);
+        }
+        Ok(())
     }
 
-    #[allow(unused_variables)] // Skeleton (M5b)
+    /// `TerminateProcess` with `exit_code`.
     pub fn terminate(&self, exit_code: u32) -> Result<(), Error> {
-        Err(Error::Win32 {
-            function: "SpawnedProcess::terminate (m5b skeleton)",
-            code: 50,
-        }) // Skeleton (M5b): WP-H
+        // SAFETY: the process handle is open and has PROCESS_TERMINATE (CreateProcessW returns a
+        // handle with all access).
+        unsafe { TerminateProcess(self.process.raw_handle(), exit_code) }
+            .map_err(|error| win32("TerminateProcess", &error))
     }
 }
 
 /// `CreateProcessW` of the absolute `exe` (regular file, not a reparse point) with `parameters`,
 /// `env` as the whole environment, current directory System32, `CREATE_NO_WINDOW`, optionally
 /// `CREATE_SUSPENDED`; nothing inherited. No UAC (the caller is elevated).
-#[allow(unused_variables)] // Skeleton (M5b)
+///
+/// `CREATE_UNICODE_ENVIRONMENT` with the block of [`environment_block`]: the child sees `env` and
+/// nothing of this process's environment (design m5b D.9.4, SECURITY-6).
 pub fn spawn_clean(
     exe: &Path,
     parameters: &str,
     env: &CleanEnvironment,
     suspended: bool,
 ) -> Result<SpawnedProcess, Error> {
-    Err(Error::Win32 {
-        function: "spawn_clean (m5b skeleton)",
-        code: 50,
-    }) // Skeleton (M5b): WP-H
+    check_executable(exe)?;
+    let block = environment_block(&env.vars)?;
+    let application = wide_os(exe.as_os_str());
+    let mut command_line = command_line(exe.as_os_str(), parameters);
+    let directory = system_directory_wide()?;
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut flags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
+    if suspended {
+        flags |= CREATE_SUSPENDED;
+    }
+    let mut info = PROCESS_INFORMATION::default();
+    // SAFETY: the application name and directory are NUL-terminated; `command_line` is a
+    // writable NUL-terminated buffer, as CreateProcessW requires; `block` is a complete UTF-16
+    // environment block (double NUL) that outlives the call; `startup` has its size set and
+    // `info` is a valid out pointer. Nothing is inherited.
+    unsafe {
+        CreateProcessW(
+            PCWSTR(application.as_ptr()),
+            Some(PWSTR(command_line.as_mut_ptr())),
+            None,
+            None,
+            false,
+            flags,
+            Some(block.as_ptr().cast()),
+            PCWSTR(directory.as_ptr()),
+            &startup,
+            &mut info,
+        )
+    }
+    .map_err(|error| win32("CreateProcessW", &error))?;
+    // SAFETY: on success both handles are open and owned by the caller.
+    let (process, thread) = unsafe { (own(info.hProcess), own(info.hThread)) };
+    Ok(SpawnedProcess {
+        process: ElevatedProcess {
+            handle: process,
+            pid: info.dwProcessId,
+        },
+        thread: suspended.then_some(thread),
+    })
 }
 
 /// System32 (`GetSystemDirectoryW`): the launch directory of the helper (design A.6, E.1), and
@@ -818,6 +986,105 @@ mod tests {
             String::from_utf16(&environment_block(&vars(&[("A", "ü😀")])).unwrap()).unwrap(),
             "A=ü😀\0\0"
         );
+    }
+
+    /// Design m5b D.9.4, F.2 (SECURITY-6): the runner's environment is the fixed list, from the
+    /// system, with nothing of this process's (no user PATH, no __COMPAT_LAYER).
+    #[test]
+    fn the_runner_environment_is_the_fixed_list() {
+        let temp = std::env::temp_dir().join("mklm-run").join("tmp");
+        let env = runner_environment(&temp).expect("environment");
+        let names: Vec<&str> = env.vars.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, RUNNER_ENVIRONMENT_NAMES);
+        let value = |name: &str| {
+            env.vars
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default()
+        };
+        let system32 = system_directory().expect("System32");
+        let windows = system32
+            .parent()
+            .expect("Windows")
+            .to_string_lossy()
+            .into_owned();
+        assert!(value("SystemRoot").eq_ignore_ascii_case(&windows));
+        assert_eq!(value("windir"), value("SystemRoot"));
+        assert_eq!(value("SystemDrive"), value("SystemRoot")[..2]);
+        assert_eq!(value("TEMP"), temp.to_string_lossy());
+        assert_eq!(value("TMP"), value("TEMP"));
+        assert_eq!(
+            value("ComSpec"),
+            format!(r"{}\cmd.exe", system32.to_string_lossy())
+        );
+        let path = value("PATH");
+        assert_eq!(path.split(';').count(), 3, "{path}");
+        assert!(path.ends_with(r"\Wbem"), "{path}");
+        if let Ok(own) = std::env::var("PATH") {
+            assert_ne!(path, own);
+        }
+        assert!(value("ProgramData").len() > 3);
+        assert!(!value("ProgramFiles").contains("(x86)"));
+        assert!(!names.contains(&"__COMPAT_LAYER"));
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("USERPROFILE"))
+        );
+        // The block Windows gets from it.
+        let block = environment_block(&env.vars).expect("block");
+        assert_eq!(block.last(), Some(&0));
+        assert!(matches!(
+            runner_environment(Path::new(r"relative\tmp")),
+            Err(Error::Insecure { .. })
+        ));
+    }
+
+    /// The child sees the clean block only, starts in System32, and a suspended child runs only
+    /// once resumed (design m5b D.7 step 16).
+    #[test]
+    fn clean_children() {
+        let cmd = system_directory().expect("System32").join("cmd.exe");
+        let env = runner_environment(&std::env::temp_dir()).expect("environment");
+        // USERPROFILE is in this process's environment but not in the child's.
+        assert!(std::env::var_os("USERPROFILE").is_some());
+        let child = spawn_clean(
+            &cmd,
+            "/d /c if defined USERPROFILE (exit 9) else (if /i \"%CD%\"==\"%SystemRoot%\\System32\" (exit 4) else (exit 5))",
+            &env,
+            false,
+        )
+        .expect("spawn");
+        assert!(child.thread.is_none());
+        assert_eq!(child.process.wait(Duration::from_secs(30)), Ok(Some(4)));
+
+        let mut suspended = spawn_clean(&cmd, "/d /c exit 6", &env, true).expect("spawn");
+        let identity = suspended.identity().expect("identity");
+        assert_eq!(identity.pid, suspended.process.pid());
+        assert!(identity.creation_time > 0);
+        assert_eq!(
+            suspended.process.wait(Duration::from_millis(300)),
+            Ok(None),
+            "not running while suspended"
+        );
+        suspended.resume().expect("resume");
+        assert!(suspended.resume().is_err(), "resumed once");
+        assert_eq!(suspended.process.wait(Duration::from_secs(30)), Ok(Some(6)));
+
+        // A suspended child that never ran can be terminated.
+        let never = spawn_clean(&cmd, "/d /c exit 0", &env, true).expect("spawn");
+        never.terminate(1).expect("terminate");
+        assert_eq!(never.process.wait(Duration::from_secs(30)), Ok(Some(1)));
+
+        assert!(matches!(
+            spawn_clean(Path::new("cmd.exe"), "", &env, false),
+            Err(Error::Insecure { .. })
+        ));
+        let bad = CleanEnvironment {
+            vars: vec![("A=B".to_string(), "c".to_string())],
+        };
+        assert!(spawn_clean(&cmd, "/d /c exit 0", &bad, false).is_err());
     }
 
     #[test]

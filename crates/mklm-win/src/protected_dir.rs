@@ -91,9 +91,10 @@ const MAX_QUARANTINES: usize = 3;
 /// No data access (`FILE_LIST_DIRECTORY`, `FILE_TRAVERSE`, `FILE_ADD_FILE`, `DELETE`): those take
 /// part in the share-access check, and Users may open these folders, so any of them would let a
 /// standard user block the pin with a handle of their own (module docs).
-const PIN_ACCESS: u32 = READ_CONTROL.0 | FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0;
+pub(crate) const PIN_ACCESS: u32 = READ_CONTROL.0 | FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0;
 /// Share mode of the pins and of the lock file (whose handle does ask for data access).
-const PIN_SHARE: FILE_SHARE_MODE = FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0);
+pub(crate) const PIN_SHARE: FILE_SHARE_MODE =
+    FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0);
 /// Access of the short-lived handle that flushes a directory: `FlushFileBuffers` needs write
 /// access (`FILE_ADD_FILE` is `FILE_WRITE_DATA` on a directory).
 const FLUSH_ACCESS: u32 = FILE_ADD_FILE.0 | SYNCHRONIZE.0;
@@ -103,7 +104,7 @@ const BUSY_RETRY_FOR: Duration = Duration::from_secs(2);
 /// Pause between two of those attempts.
 const BUSY_RETRY_EVERY: Duration = Duration::from_millis(100);
 /// Open directories, and a reparse point as itself rather than its target.
-const NO_FOLLOW: FILE_FLAGS_AND_ATTRIBUTES =
+pub(crate) const NO_FOLLOW: FILE_FLAGS_AND_ATTRIBUTES =
     FILE_FLAGS_AND_ATTRIBUTES(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0);
 
 /// The directories MKLM uses.
@@ -168,6 +169,11 @@ pub struct ProtectedDir {
 impl ProtectedDir {
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Which directory this is (`crate::update_dir` requires `Updates`).
+    pub(crate) fn which(&self) -> DataDir {
+        self.which
     }
 
     /// Where squatted levels were moved to while this directory was prepared; the caller reports
@@ -289,8 +295,32 @@ pub fn verify_protected_dir(which: DataDir) -> Result<(PathBuf, Vec<OwnedHandle>
     Ok((path, handles))
 }
 
+/// [`verify_protected_dir`] as a [`ProtectedDir`], for the update runner (design m5b D.7 step 2):
+/// every level must exist and pass the validation; nothing is created, moved or quarantined.
+pub fn open_protected_dir(which: DataDir) -> Result<ProtectedDir, Error> {
+    let (path, handles) = verify_protected_dir(which)?;
+    Ok(ProtectedDir {
+        path,
+        handles,
+        quarantined: Vec::new(),
+        which,
+    })
+}
+
+/// A new directory with [`PRIVATE_DIR_SDDL`] (`CreateDirectoryW`); an existing entry of that name
+/// is an error (`ERROR_ALREADY_EXISTS`): the update run folders (design m5b D.5).
+pub(crate) fn create_private_directory(path: &Path) -> Result<(), Error> {
+    let sd = LocalSd::from_sddl(PRIVATE_DIR_SDDL)?;
+    let wide = wide_os(path.as_os_str());
+    let attributes = sd.attributes();
+    // SAFETY: `wide` is NUL-terminated; `attributes` points at `sd`; both outlive the call.
+    unsafe { CreateDirectoryW(PCWSTR(wide.as_ptr()), Some(&attributes)) }
+        .map_err(|error| win32("CreateDirectoryW", &error))
+}
+
 /// One level of [`verify_protected_dir`]: opened pinned and validated, never created or moved.
-fn verify_level(path: &Path) -> Result<OwnedHandle, Error> {
+/// Also each update run folder and its `tmp` (design m5b D.5).
+pub(crate) fn verify_level(path: &Path) -> Result<OwnedHandle, Error> {
     let handle = open(path, PIN_ACCESS, PIN_SHARE, None, OPEN_EXISTING, NO_FOLLOW)
         .map_err(|error| win32("CreateFileW", &error))?;
     validate(&handle, Kind::Directory, DIRECTORY_POLICY).map_err(|reason| Error::Insecure {
@@ -468,7 +498,7 @@ fn rename_by_handle(handle: &OwnedHandle, target: &Path) -> Result<(), Error> {
 }
 
 /// `CreateFileW` into an owned handle, keeping the `windows` error for inspection.
-fn open(
+pub(crate) fn open(
     path: &Path,
     access: u32,
     share: FILE_SHARE_MODE,
@@ -525,7 +555,7 @@ fn standard_info(handle: &OwnedHandle) -> Result<FILE_STANDARD_INFO, Error> {
 }
 
 /// ASCII letters, digits, `.`, `_` and `-`; not starting or ending with a dot.
-fn is_plain_file_name(name: &str) -> bool {
+pub(crate) fn is_plain_file_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && !name.starts_with('.')

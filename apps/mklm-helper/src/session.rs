@@ -108,6 +108,7 @@ mod windows_session {
     use mklm_engine::{
         DecisionPoll, Engine, EngineConfig, EngineError, EventSink, SessionEnd, SessionEndSink,
     };
+    use mklm_ipc::staging::{CallerOrder, StageFlowEnd, StageLink};
     use mklm_ipc::{
         CallerMessage, FrameError, FrameReader, FrameSequencer, HANDSHAKE_TIMEOUT,
         HEARTBEAT_INTERVAL, Hello, HelperArgs, HelperMessage, MESSAGE_TIMEOUT,
@@ -120,6 +121,7 @@ mod windows_session {
 
     use super::{dispatch, parse_args};
     use crate::exit;
+    use crate::update::{CallerInfo, TidyingHost};
 
     /// Oldest Windows build MKLM supports (Windows 11 24H2).
     const MIN_BUILD: u32 = 26100;
@@ -136,7 +138,8 @@ mod windows_session {
     /// Under the 5 s after which Windows treats an application as blocking the end of the session.
     const SESSION_END_WAIT: Duration = Duration::from_secs(3);
 
-    type WinEngine = Engine<WinRegistry, WinDevices, WinHost>;
+    /// The engine's host tidies the update records once it holds the lock (design m5b D.11).
+    type WinEngine = Engine<WinRegistry, WinDevices, TidyingHost>;
 
     /// Runs the session and maps its end to an exit code (`crate::exit`).
     ///
@@ -195,11 +198,14 @@ mod windows_session {
         let Some((reader, writer, sequencer, frames_in)) = handshake(&args) else {
             return exit::HANDSHAKE;
         };
+        // Who asked, for the `Run` record of an update (design m5b D.4 step 11): the pipe server
+        // with its creation time, and its session.
+        let caller = CallerInfo::of(args.caller_pid, reader.server_session_id().ok());
         let guard = Arc::new(SessionEnd::new());
         // Best effort, like the shutdown order: without the window a session end is still
         // covered by the pipe disconnect and by the recovery at the next start.
         let window = watch_session_end(&guard);
-        let code = serve(reader, writer, sequencer, frames_in, &guard);
+        let code = serve(reader, writer, sequencer, frames_in, &guard, caller);
         drop(window);
         code
     }
@@ -257,12 +263,18 @@ mod windows_session {
 
     /// Serves requests until the caller leaves; returns the exit code. Every request's sink goes
     /// through [`SessionEndSink`] (`guard`).
+    ///
+    /// Update messages (design m5b D.3): every message after `Welcome` passes
+    /// [`CallerOrder`] first (a `RecordTrust` only first, no stray installer chunk); a
+    /// `StageUpdate` runs H1 with the heartbeat on, and after `HandedOff` the session ends with
+    /// exit 0.
     fn serve(
         reader: PipeConnection,
         writer: PipeConnection,
         sequencer: FrameSequencer,
         frames_in: FrameReader,
         guard: &SessionEnd,
+        caller: CallerInfo,
     ) -> u8 {
         let busy = Arc::new(AtomicBool::new(false));
         let (frames, outbox) = mpsc::channel::<HelperMessage>();
@@ -278,6 +290,7 @@ mod windows_session {
         };
         let mut engine: Option<WinEngine> = None;
         let mut code = exit::OK;
+        let mut order = CallerOrder::new();
         loop {
             let message = match inbox.read(REQUEST_IDLE_TIMEOUT) {
                 Ok(message) => message,
@@ -288,6 +301,11 @@ mod windows_session {
                     break;
                 }
             };
+            if let Err(reason) = order.check(&message) {
+                let _ = frames.send(HelperMessage::Error(protocol_error(reason)));
+                code = exit::FAILURE;
+                break;
+            }
             match message {
                 CallerMessage::Request(request) => {
                     busy.store(true, Ordering::SeqCst);
@@ -319,18 +337,30 @@ mod windows_session {
                     code = exit::FAILURE;
                     break;
                 }
-                // Skeleton (M5b, WP-H: design m5b C.4, D.3, D.4): the order rule
-                // (`mklm_ipc::staging::CallerOrder`), the lock and the heartbeat around a stage are
-                // WP-H's. Until then both are answered without touching anything, and the session
-                // goes on.
+                // Design m5b C.4: verified and recorded under the lock (2 s at most); whatever
+                // the answer, the session goes on.
                 CallerMessage::RecordTrust(report) => {
                     let _ =
                         frames.send(HelperMessage::Update(crate::update::record_trust(&report)));
                 }
+                // Design m5b D.3, D.4: the heartbeat runs while H1 works (up to the 120 s wait
+                // for H2), so that the caller's receive deadline does not expire.
                 CallerMessage::StageUpdate(request) => {
-                    let _ = frames.send(HelperMessage::Update(crate::update::stage(&request)));
+                    busy.store(true, Ordering::SeqCst);
+                    let mut link = SessionLink {
+                        frames: &frames,
+                        inbox: &mut inbox,
+                    };
+                    let end = crate::update::stage(&request, &mut link, caller);
+                    busy.store(false, Ordering::SeqCst);
+                    match end {
+                        StageFlowEnd::Refused(_) => {}
+                        // H2 owns the run: this helper lets go of the lock (done) and exits 0.
+                        StageFlowEnd::HandedOff { .. } => break,
+                        StageFlowEnd::CallerLeft => break,
+                    }
                 }
-                // Only after `SendInstaller`, which the skeleton never sends.
+                // Only after `SendInstaller`, inside a stage: `CallerOrder` refused it above.
                 CallerMessage::InstallerChunk(_) => {
                     let _ = frames.send(HelperMessage::Error(protocol_error(
                         "an installer chunk without SendInstaller",
@@ -380,8 +410,9 @@ mod windows_session {
     fn engine_for(engine: &mut Option<WinEngine>) -> Result<&mut WinEngine, Box<ErrorInfo>> {
         if engine.is_none() {
             let config = EngineConfig::default();
-            let host =
-                WinHost::new().map_err(|error| Box::new(EngineError::Host(error).to_info()))?;
+            let host = WinHost::new()
+                .map(TidyingHost::new)
+                .map_err(|error| Box::new(EngineError::Host(error).to_info()))?;
             let devices = WinDevices::new().with_restart_timeout(config.restart_timeout);
             *engine = Some(Engine::new(WinRegistry::new(), devices, host, config));
         }
@@ -428,6 +459,29 @@ mod windows_session {
                 while outbox.recv().is_ok() {}
                 return;
             }
+        }
+    }
+
+    /// The pipe as H1 sees it during a stage (design m5b D.4): frames go out through the writer
+    /// thread (which adds the heartbeat), chunks come in through the inbox.
+    struct SessionLink<'a> {
+        frames: &'a Sender<HelperMessage>,
+        inbox: &'a mut Inbox,
+    }
+
+    impl StageLink for SessionLink<'_> {
+        fn send(&mut self, message: HelperMessage) -> Result<(), String> {
+            self.frames
+                .send(message)
+                .map_err(|_| "the pipe writer has ended".to_string())
+        }
+
+        fn recv(&mut self, timeout: Duration) -> Result<CallerMessage, FrameError> {
+            let message = self.inbox.read(timeout);
+            if !matches!(message, Ok(_) | Err(FrameError::Timeout)) {
+                self.inbox.gone = true;
+            }
+            message
         }
     }
 
