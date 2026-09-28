@@ -21,6 +21,8 @@ doctest = false
 mklm-core.workspace = true
 mklm-ipc.workspace = true
 mklm-engine.workspace = true
+# Verification only: never the `winhttp` feature, the helper has no network code (design m5b A.9).
+mklm-update.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 mklm-win.workspace = true

@@ -6,9 +6,11 @@ members = [
     "crates/mklm-ipc",
     "crates/mklm-engine",
     "crates/mklm-client",
+    "crates/mklm-update",
     "apps/mklm",
     "apps/mklm-cli",
     "apps/mklm-helper",
+    "xtask",
 ]
 exclude = ["prototypes"]
 
@@ -26,6 +28,7 @@ mklm-win = { path = "crates/mklm-win" }
 mklm-ipc = { path = "crates/mklm-ipc" }
 mklm-engine = { path = "crates/mklm-engine" }
 mklm-client = { path = "crates/mklm-client" }
+mklm-update = { path = "crates/mklm-update" }
 # windows-registry stays on 0.6.x until `windows` itself moves to 0.100 (avoids duplicate windows-result/strings/link).
 windows = "0.62.2"
 windows-registry = "0.6.1"
@@ -42,10 +45,19 @@ slint = { version = "~1.18", features = ["unstable-winit-030"] }
 slint-build = "~1.18"
 # settings.toml of the GUI (plan 3.7).
 toml = "1.1.6"
+# Update manifest signatures (design m5b B.1): exact pin, bumped deliberately.
+minisign-verify = "=0.3.0"
+# Throwaway test keys only (dev-dependency of mklm-update and xtask). Real keys are handled by the
+# official minisign binary alone (design m5b B.1, B.5).
+minisign = "0.10.0"
+sha2 = "0.11.0"
+semver = "1.0.28"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_debug_implementations = "warn"
+# The development-only update overrides (design m5b A.10): a misspelled cfg fails clippy -D warnings.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mklm_update_dev)'] }
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "warn"
@@ -53,3 +65,6 @@ undocumented_unsafe_blocks = "warn"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+# Explicit (design m5b A.10): the development update overrides also need debug_assertions, so a
+# release build never contains them even if `--cfg mklm_update_dev` were set by mistake.
+debug-assertions = false

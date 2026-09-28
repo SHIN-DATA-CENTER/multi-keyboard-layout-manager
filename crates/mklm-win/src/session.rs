@@ -275,6 +275,26 @@ pub fn unregister_post_reboot() -> Result<(), Error> {
     remove_user_value(RUN_ONCE_KEY, RUN_ONCE_VALUE)
 }
 
+// ---- M5b: the GUI's fallback relaunch after an update (design m5b D.10, D.13; WP-C) ----
+
+pub const AFTER_UPDATE_VALUE: &str = "SHINDATACENTER.MKLM.AfterUpdate";
+
+/// HKCU RunOnce `SHINDATACENTER.MKLM.AfterUpdate` = `command_line`.
+#[allow(unused_variables)] // Skeleton (M5b)
+pub fn register_after_update(command_line: &str) -> Result<(), Error> {
+    Err(Error::Win32 {
+        function: "register_after_update (m5b skeleton)",
+        code: 50,
+    }) // Skeleton (M5b): WP-C
+}
+
+pub fn unregister_after_update() -> Result<(), Error> {
+    Err(Error::Win32 {
+        function: "unregister_after_update (m5b skeleton)",
+        code: 50,
+    }) // Skeleton (M5b): WP-C
+}
+
 /// Writes the `REG_SZ` value `name` = `data` under `HKCU\<key>` (created if missing), or fails
 /// with `ERROR_INVALID_PARAMETER` before anything is written when `valid` is false. The only
 /// HKCU writer (design m2 K, m3 A.5).

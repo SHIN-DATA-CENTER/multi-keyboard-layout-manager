@@ -202,6 +202,43 @@ pub fn is_uninstall_restore(command_line: &str) -> bool {
     command_line_tail(command_line) == Some(UNINSTALL_RESTORE_ARG)
 }
 
+/// The helper's third fixed command line (M5b, design m5b D.7): H1 starts its copy
+/// `mklm-update-runner.exe --run-update <run-id>` (H2), which runs the installer.
+pub const RUN_UPDATE_FLAG: &str = "--run-update";
+/// Anchored. Plus: each number is `0` or has no leading zero, and is at most 65535.
+pub const RUN_UPDATE_PATTERN: &str =
+    r"^--run-update [0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}-[0-9a-f]{16}$";
+
+/// H2's parsed arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunUpdateArgs {
+    pub run_id: mklm_update::run::RunId,
+}
+
+impl RunUpdateArgs {
+    /// Parses the arguments part of the raw command line (see [`command_line_tail`]) and accepts
+    /// nothing but [`RUN_UPDATE_PATTERN`] with the number rule of `RunId`: one space, no quotes,
+    /// no other arguments.
+    pub fn parse(tail: &str) -> Result<RunUpdateArgs, ArgsError> {
+        let run_id = tail
+            .strip_prefix(RUN_UPDATE_FLAG)
+            .and_then(|rest| rest.strip_prefix(' '))
+            .ok_or(ArgsError::Malformed)?;
+        let run_id = mklm_update::run::RunId::parse(run_id).map_err(|_| ArgsError::Malformed)?;
+        Ok(RunUpdateArgs { run_id })
+    }
+
+    /// `--run-update <run-id>`: what `parse` accepts.
+    pub fn to_parameters(&self) -> String {
+        format!("{RUN_UPDATE_FLAG} {}", self.run_id.as_str())
+    }
+}
+
+/// A raw `GetCommandLineW` string → the arguments, when the tail is exactly the fixed form.
+pub fn run_update_args(command_line: &str) -> Option<RunUpdateArgs> {
+    command_line_tail(command_line).and_then(|tail| RunUpdateArgs::parse(tail).ok())
+}
+
 /// The helper's command line is not in the fixed format. Deliberately says nothing about which
 /// part failed: the helper logs it and exits.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -742,5 +779,122 @@ mod tests {
         }
         // Substituting a hex digit by another keeps the tail valid, so plenty are accepted.
         assert!(accepted > 100, "{accepted}");
+    }
+
+    // ---- `--run-update <run-id>` (design m5b D.7) ----
+
+    const RUN_TAIL: &str = "--run-update 0.2.1-3f9a0c2b7d1e4a65";
+
+    #[test]
+    fn run_update_arguments() {
+        let args = RunUpdateArgs::parse(RUN_TAIL).unwrap();
+        assert_eq!(args.run_id.as_str(), "0.2.1-3f9a0c2b7d1e4a65");
+        assert_eq!(args.to_parameters(), RUN_TAIL);
+        assert_eq!(
+            RunUpdateArgs::parse(&args.to_parameters()),
+            Ok(args.clone())
+        );
+        let line = format!(
+            r#""C:\ProgramData\SHIN DATA CENTER\MKLM\Updates\0.2.1-3f9a0c2b7d1e4a65\mklm-update-runner.exe" {RUN_TAIL}"#
+        );
+        assert_eq!(run_update_args(&line), Some(args));
+        for line in [
+            "mklm-update-runner.exe",
+            "mklm-update-runner.exe --run-update",
+            "mklm-update-runner.exe  --run-update 0.2.1-3f9a0c2b7d1e4a65",
+            "mklm-update-runner.exe --run-update 0.2.1-3f9a0c2b7d1e4a65 ",
+            "mklm-update-runner.exe \"--run-update 0.2.1-3f9a0c2b7d1e4a65\"",
+            "mklm-update-runner.exe --run-update=0.2.1-3f9a0c2b7d1e4a65",
+            "mklm-update-runner.exe --RUN-UPDATE 0.2.1-3f9a0c2b7d1e4a65",
+        ] {
+            assert_eq!(run_update_args(line), None, "{line:?}");
+        }
+    }
+
+    /// The three fixed command lines never select one another (design m5b F.2).
+    #[test]
+    fn the_fixed_command_lines_are_disjoint() {
+        let runner = format!("mklm-helper.exe {RUN_TAIL}");
+        assert!(!is_uninstall_restore(&runner));
+        assert!(HelperArgs::parse(RUN_TAIL).is_err());
+        assert!(RunUpdateArgs::parse(UNINSTALL_RESTORE_ARG).is_err());
+        assert!(RunUpdateArgs::parse(&valid_tail()).is_err());
+        assert_eq!(run_update_args("mklm-helper.exe --uninstall-restore"), None);
+        assert_eq!(
+            run_update_args(&format!("mklm-helper.exe {}", valid_tail())),
+            None
+        );
+    }
+
+    /// What `RunUpdateArgs::parse` must accept: the pattern, plus "each number is `0` or has no
+    /// leading zero, and is at most 65535" (design m5b D.7).
+    fn expected_run_update_accept(text: &str) -> bool {
+        let numbers_ok = || {
+            let run_id = text.rsplit(' ').next().unwrap_or_default();
+            let version = run_id.split('-').next().unwrap_or_default();
+            version.split('.').all(|number| {
+                (number == "0" || !number.starts_with('0'))
+                    && number.parse::<u32>().is_ok_and(|value| value <= 65_535)
+            })
+        };
+        mini_regex::is_match(RUN_UPDATE_PATTERN, text) && numbers_ok()
+    }
+
+    #[test]
+    fn run_update_parse_agrees_with_the_pattern() {
+        assert!(mini_regex::is_match(RUN_UPDATE_PATTERN, RUN_TAIL));
+        let alphabet = [
+            ' ', '\t', '\n', '"', '-', '.', '_', '/', '\\', '=', '+', '0', '1', '5', '9', 'a', 'f',
+            'g', 'A', 'F', 'é', '１', '\u{0}',
+        ];
+        let chars: Vec<char> = RUN_TAIL.chars().collect();
+        let mut inputs = vec![RUN_TAIL.to_string()];
+        for index in 0..=chars.len() {
+            for &c in &alphabet {
+                let mut inserted = chars.clone();
+                inserted.insert(index, c);
+                inputs.push(inserted.into_iter().collect());
+                if index < chars.len() {
+                    let mut replaced = chars.clone();
+                    replaced[index] = c;
+                    inputs.push(replaced.into_iter().collect());
+                }
+            }
+            if index < chars.len() {
+                let mut deleted = chars.clone();
+                deleted.remove(index);
+                inputs.push(deleted.into_iter().collect());
+            }
+        }
+        for version in [
+            "0.0.0",
+            "00.0.0",
+            "0.00.0",
+            "0.0.00",
+            "1.0.0",
+            "01.0.0",
+            "10.20.30",
+            "65535.65535.65535",
+            "65536.0.0",
+            "0.65536.0",
+            "0.0.65536",
+            "99999.0.0",
+            "100000.0.0",
+            "0.0",
+        ] {
+            inputs.push(format!("--run-update {version}-3f9a0c2b7d1e4a65"));
+        }
+
+        let mut accepted = 0;
+        for input in &inputs {
+            let expected = expected_run_update_accept(input);
+            let parsed = RunUpdateArgs::parse(input);
+            assert_eq!(parsed.is_ok(), expected, "{input:?}");
+            if let Ok(args) = parsed {
+                assert_eq!(&args.to_parameters(), input);
+                accepted += 1;
+            }
+        }
+        assert!(accepted > 50, "{accepted}");
     }
 }

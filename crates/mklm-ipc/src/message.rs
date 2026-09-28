@@ -5,6 +5,10 @@
 //! with caller → [`Decision`] allowed while a countdown or a confirmation wait runs; caller →
 //! `Bye` or a closed pipe ends it. See section E of docs/design/m2-engine.md.
 //!
+//! Protocol 3 (M5b, design m5b D.3) adds the update messages: an optional `RecordTrust` right
+//! after `Welcome`, and `StageUpdate` / `InstallerChunk` answered by `HelperMessage::Update`
+//! ([`crate::update`]). They are not [`Request`]s: an update does not use the engine.
+//!
 //! This module defines only what the pipe allows a caller to ask for. Events, decisions, results
 //! and request options are `mklm_core::report` types (re-exported here); the helper maps each
 //! [`Request`] explicitly onto an engine call (design review S5), so that nothing the engine can do
@@ -21,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::PROTOCOL_VERSION;
 use crate::args::Nonce;
+use crate::update::{InstallerChunk, StageUpdateRequest, TrustReport, UpdateMessage};
 
 pub use mklm_core::report::{
     ApplyOptions, ConflictInfo, ConflictPolicy, Decision, ErrorCode, ErrorInfo, Event,
@@ -39,7 +44,8 @@ pub struct Hello {
     /// `CARGO_PKG_VERSION` of the helper, for logs.
     pub helper_version: String,
     /// Build ID embedded by `build.rs` in both executables: the package version and a hash of the
-    /// sources of `mklm-core`, `mklm-ipc`, `mklm-engine` and `mklm-win`. The caller requires an
+    /// sources of `mklm-core`, `mklm-ipc`, `mklm-engine`, `mklm-win` and `mklm-update`, and of the
+    /// update trust anchors (apps/build_id.rs). The caller requires an
     /// exact match (design review S11); it also reads the same ID from the helper file's
     /// VERSIONINFO before launching it, so that a stale helper fails before the UAC prompt.
     pub build_id: String,
@@ -93,6 +99,10 @@ pub enum CallerMessage {
     Decision(Decision),
     /// Ends the session; the helper exits.
     Bye,
+    /// Only as the first message after `Welcome` (design m5b C.4, D.3; SECURITY-5).
+    RecordTrust(TrustReport),
+    StageUpdate(StageUpdateRequest),
+    InstallerChunk(InstallerChunk),
 }
 
 /// Frames the helper sends.
@@ -109,6 +119,8 @@ pub enum HelperMessage {
     Result(OperationResult),
     /// The request failed before or without a journal state change worth a result.
     Error(ErrorInfo),
+    /// The answers of an update session (design m5b D.3).
+    Update(UpdateMessage),
 }
 
 /// What the caller asks the helper to do. The helper re-enumerates the devices itself and trusts no

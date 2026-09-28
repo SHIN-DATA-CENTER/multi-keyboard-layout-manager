@@ -13,17 +13,20 @@
 //!   with `FILE_FLAG_FIRST_PIPE_INSTANCE`, `PIPE_REJECT_REMOTE_CLIENTS` and the plan's DACL
 //!   ([`instance_pipe_sddl`]). When creating it fails with `ERROR_ACCESS_DENIED` or
 //!   `ERROR_PIPE_BUSY` (the name is taken), the instance logs it and keeps running without the
-//!   pipe. It accepts exactly two commands, one per connection: `activate` and `quit`
-//!   ([`InstanceCommand`]), each within [`INSTANCE_READ_TIMEOUT`] (a client that connects and
-//!   stays silent is disconnected), and answers `ok` or `busy`.
+//!   pipe. It accepts exactly three commands, one per connection: `activate`, `quit` and (M5b,
+//!   the updater's only command) `quit-if-idle` ([`InstanceCommand`]), each within
+//!   [`INSTANCE_READ_TIMEOUT`] (a client that connects and stays silent is disconnected), and
+//!   answers `ok` or `busy`.
 //! - A second process connects (`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`) and verifies
 //!   the server before it trusts it ([`ServerIdentity`], [`is_our_instance`]): the server's
 //!   session (`GetNamedPipeServerSessionId`), the user SID of the server process's token
 //!   (`GetNamedPipeServerProcessId` → `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` →
 //!   `OpenProcessToken`) and its image (`QueryFullProcessImageNameW`) must all be this process's.
 //!   Only then does it call `AllowSetForegroundWindow` for that PID and send its command. On a
-//!   mismatch it sends nothing and runs as the instance itself. The M5 elevated sender (the
-//!   updater) must make the same checks.
+//!   mismatch it sends nothing and runs as the instance itself. The M5b elevated sender (the
+//!   update runner, [`quit_idle_instances`]) computes each GUI's pipe name from the running GUI
+//!   processes instead of enumerating pipes, checks the server likewise, and sends
+//!   `quit-if-idle` only (design m5b D.8).
 //!
 //! The instance answers after the client has read the reply: it writes the reply, then waits (at
 //! most [`INSTANCE_READ_TIMEOUT`] again) for the client to close its end before it disconnects,
@@ -92,8 +95,12 @@ pub fn is_our_instance(server: &ServerIdentity, ours: &ServerIdentity) -> bool {
 pub enum InstanceCommand {
     /// Show the window and bring it to the front (a second start, the RunOnce `--post-reboot`).
     Activate,
-    /// Quit cleanly (`mklm.exe --quit`: the M5 installer and updater).
+    /// Quit cleanly (`mklm.exe --quit`: the installer and the uninstaller).
     Quit,
+    /// `quit-if-idle\n` (13 bytes): quit only when nothing is going on, else answer `busy` and
+    /// change nothing (design m5b D.8, E.4.1; RELIABILITY-1, OPS-UX-TEST-4). The updater's only
+    /// command.
+    QuitIfIdle,
 }
 
 impl InstanceCommand {
@@ -102,14 +109,16 @@ impl InstanceCommand {
         match self {
             InstanceCommand::Activate => b"activate\n",
             InstanceCommand::Quit => b"quit\n",
+            InstanceCommand::QuitIfIdle => b"quit-if-idle\n",
         }
     }
 
-    /// Parses one received message; anything but the two exact commands is `None`.
+    /// Parses one received message; anything but the three exact commands is `None`.
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         match bytes {
             b"activate\n" => Some(InstanceCommand::Activate),
             b"quit\n" => Some(InstanceCommand::Quit),
+            b"quit-if-idle\n" => Some(InstanceCommand::QuitIfIdle),
             _ => None,
         }
     }
@@ -155,6 +164,92 @@ pub fn instance_mutex_name(user_sid: &str) -> String {
 /// The pipe path for `session_id` and `user_sid` (pipe names are machine-wide).
 pub fn instance_pipe_path(session_id: u32, user_sid: &str) -> String {
     format!(r"\\.\pipe\SHINDATACENTER.MKLM.Instance.{session_id}.{user_sid}")
+}
+
+// ---- M5b: the update runner's side (design m5b D.8; WP-H) ----
+
+/// How one GUI answered the update runner's `quit-if-idle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitAnswer {
+    Ok,
+    Busy,
+    /// The pipe's server is not `gui_nt_path` in the pipe's session: nothing was sent.
+    NotOurs,
+    NoAnswer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceQuit {
+    pub pipe: String,
+    /// The session in the pipe's name.
+    pub session_id: u32,
+    pub server_pid: Option<u32>,
+    pub answer: QuitAnswer,
+}
+
+/// The fixed part of an instance pipe's name, before `<session>.<SID>`.
+const INSTANCE_PIPE_NAME_PREFIX: &str = "SHINDATACENTER.MKLM.Instance.";
+
+/// `SHINDATACENTER.MKLM.Instance.<session>.<SID>` → (session, SID) when the whole name matches
+/// `^SHINDATACENTER\.MKLM\.Instance\.([0-9]{1,10})\.(S-1-5-21(-[0-9]{1,10}){4}|S-1-12-1(-[0-9]{1,10}){4})$`
+/// (SECURITY-7). Anything else: `None`, and the pipe is never opened.
+///
+/// The name is without the `\\.\pipe\` prefix. A session number that does not fit a `u32` is
+/// `None` too (no session has it).
+pub fn parse_instance_pipe_name(name: &str) -> Option<(u32, String)> {
+    let rest = name.strip_prefix(INSTANCE_PIPE_NAME_PREFIX)?;
+    let (session, sid) = rest.split_once('.')?;
+    if !is_decimal(session) {
+        return None;
+    }
+    let session = session.parse::<u32>().ok()?;
+    let sub_authorities = sid
+        .strip_prefix("S-1-5-21-")
+        .or_else(|| sid.strip_prefix("S-1-12-1-"))?;
+    let mut count = 0;
+    for part in sub_authorities.split('-') {
+        count += 1;
+        if !is_decimal(part) {
+            return None;
+        }
+    }
+    (count == 4).then(|| (session, sid.to_string()))
+}
+
+/// `[0-9]{1,10}`: ASCII digits only.
+fn is_decimal(text: &str) -> bool {
+    (1..=10).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Pure (FIX-VERIFICATION-5): for each GUI process (from `processes_with_images`) whose
+/// `process_users` row has a SID and the same session, `instance_pipe_path(session, sid)` —
+/// kept only if its name also passes `parse_instance_pipe_name`; at most `max_pipes`, in input
+/// order. Returns (pipe path, the GUI process).
+#[allow(unused_variables)] // Skeleton (M5b)
+pub fn instance_pipe_candidates(
+    guis: &[crate::proc_identity::ImageProcess],
+    users: &std::collections::HashMap<u32, crate::proc_identity::ProcessUser>,
+    max_pipes: usize,
+) -> Vec<(String, crate::proc_identity::ImageProcess)> {
+    Vec::new() // Skeleton (M5b): WP-H
+}
+
+/// Design m5b D.8 step 2: finds the processes running `gui_nt_path`, computes their pipe names
+/// with `instance_pipe_candidates` (never enumerates `\\.\pipe\`), opens each with
+/// `pipe::open_client` (SQOS identification, overlapped I/O), `per_pipe` each and `total` for all;
+/// the server must be that GUI's PID, pinned by a handle (or compared by identity before and
+/// after), running `gui_nt_path` in the pipe's session; sends `quit-if-idle` only.
+#[allow(unused_variables)] // Skeleton (M5b)
+pub fn quit_idle_instances(
+    gui_nt_path: &str,
+    per_pipe: Duration,
+    total: Duration,
+    max_pipes: usize,
+) -> Result<Vec<InstanceQuit>, Error> {
+    Err(Error::Win32 {
+        function: "quit_idle_instances (m5b skeleton)",
+        code: 50,
+    }) // Skeleton (M5b): WP-H
 }
 
 /// Which role this process has.
@@ -758,16 +853,104 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_commands_are_accepted() {
-        for command in [InstanceCommand::Activate, InstanceCommand::Quit] {
+    fn only_the_three_commands_are_accepted() {
+        for command in [
+            InstanceCommand::Activate,
+            InstanceCommand::Quit,
+            InstanceCommand::QuitIfIdle,
+        ] {
             assert_eq!(InstanceCommand::parse(command.wire()), Some(command));
             assert!(command.wire().len() <= MAX_INSTANCE_MESSAGE);
         }
-        for bad in [&b"activate"[..], b"ACTIVATE\n", b"quit\n\n", b"", b"show\n"] {
-            assert_eq!(InstanceCommand::parse(bad), None);
+        // The updater's command (design m5b D.8): 13 bytes.
+        assert_eq!(InstanceCommand::QuitIfIdle.wire(), b"quit-if-idle\n");
+        assert_eq!(InstanceCommand::QuitIfIdle.wire().len(), 13);
+        for bad in [
+            &b"activate"[..],
+            b"ACTIVATE\n",
+            b"quit\n\n",
+            b"",
+            b"show\n",
+            b"quit-if-idle",
+            b"quit-if-idle\n\n",
+            b"QUIT-IF-IDLE\n",
+            b"quit_if_idle\n",
+            b"quit-if-idle \n",
+            b"quit-if-idle\r\n",
+        ] {
+            assert_eq!(InstanceCommand::parse(bad), None, "{bad:?}");
         }
         for reply in [InstanceReply::Ok, InstanceReply::Busy] {
             assert_eq!(InstanceReply::parse(reply.wire()), Some(reply));
+        }
+    }
+
+    #[test]
+    fn instance_pipe_names_of_the_update_runner() {
+        let local = "S-1-5-21-1004336348-1177238915-682003330-1001";
+        let entra = "S-1-12-1-3915915452-1316434290-2451406996-2913412866";
+        for (name, expected) in [
+            (
+                format!("SHINDATACENTER.MKLM.Instance.1.{local}"),
+                Some((1, local)),
+            ),
+            (
+                format!("SHINDATACENTER.MKLM.Instance.4294967295.{entra}"),
+                Some((u32::MAX, entra)),
+            ),
+            (
+                "SHINDATACENTER.MKLM.Instance.0.S-1-5-21-0-0-0-0".to_string(),
+                Some((0, "S-1-5-21-0-0-0-0")),
+            ),
+            (
+                "SHINDATACENTER.MKLM.Instance.2.S-1-5-21-9999999999-1-2-3".to_string(),
+                Some((2, "S-1-5-21-9999999999-1-2-3")),
+            ),
+        ] {
+            assert_eq!(
+                parse_instance_pipe_name(&name),
+                expected.map(|(session, sid)| (session, sid.to_string())),
+                "{name}"
+            );
+        }
+        // What `instance_pipe_path` makes is what the runner accepts (without `\\.\pipe\`).
+        let path = instance_pipe_path(3, local);
+        assert_eq!(
+            parse_instance_pipe_name(path.strip_prefix(r"\\.\pipe\").unwrap()),
+            Some((3, local.to_string()))
+        );
+        for name in [
+            String::new(),
+            path.clone(),
+            format!("SHINDATACENTER.MKLM.Instance.1.{local}.x"),
+            format!("SHINDATACENTER.MKLM.Instance.1.{local}-5"),
+            format!("SHINDATACENTER.MKLM.Instance.1.{local}/x"),
+            format!("SHINDATACENTER.MKLM.Instance.1.{local}\\x"),
+            format!("SHINDATACENTER.MKLM.Instance.1.{local}\u{0}"),
+            format!("SHINDATACENTER.MKLM.Instance.1.{local} "),
+            format!("SHINDATACENTER.MKLM.Instance.1/../{local}"),
+            format!("SHINDATACENTER.MKLM.Instance...{local}"),
+            format!("SHINDATACENTER.MKLM.Instance..{local}"),
+            format!("SHINDATACENTER.MKLM.Instance.12345678901.{local}"),
+            format!("SHINDATACENTER.MKLM.Instance.4294967296.{local}"),
+            format!("SHINDATACENTER.MKLM.Instance.-1.{local}"),
+            format!("SHINDATACENTER.MKLM.Instance.+1.{local}"),
+            format!("SHINDATACENTER.MKLM.Instance.１.{local}"),
+            format!("shindatacenter.mklm.instance.1.{local}"),
+            format!("SHINDATACENTER.MKLM.Instance.1.{}", local.to_lowercase()),
+            "SHINDATACENTER.MKLM.Instance.1.S-1-5-18".to_string(),
+            "SHINDATACENTER.MKLM.Instance.1.S-1-5-21-1-2-3".to_string(),
+            "SHINDATACENTER.MKLM.Instance.1.S-1-5-21-1-2-3-4-5".to_string(),
+            "SHINDATACENTER.MKLM.Instance.1.S-1-5-21-1-2-3-12345678901".to_string(),
+            "SHINDATACENTER.MKLM.Instance.1.S-1-5-21-1--3-4".to_string(),
+            "SHINDATACENTER.MKLM.Instance.1.S-1-5-21-1-2-3-4é".to_string(),
+            "SHINDATACENTER.MKLM.Instance.1.S-1-12-2-1-2-3-4".to_string(),
+            "SHINDATACENTER.MKLM.Instance.1.S-1-5-32-544-1-2-3".to_string(),
+            "SHINDATACENTER.MKLM.1.S-1-5-21-1-2-3-4".to_string(),
+            "..".to_string(),
+            ".".to_string(),
+        ] {
+            assert_eq!(parse_instance_pipe_name(&name), None, "{name:?}");
         }
     }
 

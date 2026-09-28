@@ -299,6 +299,113 @@ fn check_executable(exe: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+// ---- M5b: the update runner's processes (design m5b D.4 step 18, D.7 step 16, D.9.4;
+// SECURITY-6; WP-H) ----
+
+/// `ERROR_INVALID_PARAMETER`.
+const INVALID_PARAMETER: u32 = 87;
+
+/// Name/value pairs of an explicit environment block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanEnvironment {
+    pub vars: Vec<(String, String)>,
+}
+
+/// SystemRoot, windir, SystemDrive, ComSpec, PATH (System32; Windows; System32\Wbem),
+/// ProgramData, ProgramFiles, ProgramW6432 from the system, and TEMP = TMP = `temp_dir`
+/// (design m5b D.9.4). Nothing from this process's environment.
+#[allow(unused_variables)] // Skeleton (M5b)
+pub fn runner_environment(temp_dir: &Path) -> Result<CleanEnvironment, Error> {
+    Err(Error::Win32 {
+        function: "runner_environment (m5b skeleton)",
+        code: 50,
+    }) // Skeleton (M5b): WP-H
+}
+
+/// `CREATE_UNICODE_ENVIRONMENT` block: sorted case-insensitively by name, `name=value\0` each,
+/// then `\0`. Names containing `=` or NUL, and values containing NUL, are refused. Pure.
+///
+/// Also refused: an empty name, and two names that differ only in case (one variable to
+/// Windows). The order is Windows': names compared upper-cased, as UTF-16 units. An empty list is
+/// the empty block `\0\0`.
+pub fn environment_block(vars: &[(String, String)]) -> Result<Vec<u16>, Error> {
+    let refused = || Error::Win32 {
+        function: "environment_block",
+        code: INVALID_PARAMETER,
+    };
+    let mut entries: Vec<(Vec<u16>, &str, &str)> = Vec::with_capacity(vars.len());
+    for (name, value) in vars {
+        if name.is_empty() || name.contains(['=', '\0']) || value.contains('\0') {
+            return Err(refused());
+        }
+        entries.push((name.to_uppercase().encode_utf16().collect(), name, value));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(refused());
+    }
+    let mut block = Vec::new();
+    for (_, name, value) in entries {
+        block.extend(name.encode_utf16());
+        block.push(u16::from(b'='));
+        block.extend(value.encode_utf16());
+        block.push(0);
+    }
+    if block.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    Ok(block)
+}
+
+/// A process started by `spawn_clean`.
+#[derive(Debug)]
+pub struct SpawnedProcess {
+    pub process: ElevatedProcess,
+    /// The primary thread, kept only when started suspended.
+    pub thread: Option<OwnedHandle>,
+}
+
+impl SpawnedProcess {
+    pub fn identity(&self) -> Result<mklm_core::ProcessIdentity, Error> {
+        Err(Error::Win32 {
+            function: "SpawnedProcess::identity (m5b skeleton)",
+            code: 50,
+        }) // Skeleton (M5b): WP-H
+    }
+
+    pub fn resume(&mut self) -> Result<(), Error> {
+        Err(Error::Win32 {
+            function: "SpawnedProcess::resume (m5b skeleton)",
+            code: 50,
+        }) // Skeleton (M5b): WP-H
+    }
+
+    #[allow(unused_variables)] // Skeleton (M5b)
+    pub fn terminate(&self, exit_code: u32) -> Result<(), Error> {
+        Err(Error::Win32 {
+            function: "SpawnedProcess::terminate (m5b skeleton)",
+            code: 50,
+        }) // Skeleton (M5b): WP-H
+    }
+}
+
+/// `CreateProcessW` of the absolute `exe` (regular file, not a reparse point) with `parameters`,
+/// `env` as the whole environment, current directory System32, `CREATE_NO_WINDOW`, optionally
+/// `CREATE_SUSPENDED`; nothing inherited. No UAC (the caller is elevated).
+#[allow(unused_variables)] // Skeleton (M5b)
+pub fn spawn_clean(
+    exe: &Path,
+    parameters: &str,
+    env: &CleanEnvironment,
+    suspended: bool,
+) -> Result<SpawnedProcess, Error> {
+    Err(Error::Win32 {
+        function: "spawn_clean (m5b skeleton)",
+        code: 50,
+    }) // Skeleton (M5b): WP-H
+}
+
 /// System32 (`GetSystemDirectoryW`): the launch directory of the helper (design A.6, E.1), and
 /// where the layout DLLs must be (plan 1.5).
 pub fn system_directory() -> Result<PathBuf, Error> {
@@ -677,5 +784,61 @@ mod tests {
         // The test executable has no VERSIONINFO at all.
         let exe = std::env::current_exe().expect("test executable");
         assert!(file_build_id(&exe).is_err());
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// Design m5b D.9.4, F.2 (SECURITY-6).
+    #[test]
+    fn environment_blocks() {
+        let block = environment_block(&vars(&[
+            ("windir", r"C:\Windows"),
+            ("TMP", r"C:\t"),
+            ("Path", r"C:\Windows\System32"),
+            ("ComSpec", ""),
+            ("ProgramW6432", "P"),
+            ("_X", "u"),
+            ("Temp", r"C:\t"),
+        ]))
+        .expect("block");
+        assert_eq!(
+            String::from_utf16(&block).unwrap(),
+            "ComSpec=\0Path=C:\\Windows\\System32\0ProgramW6432=P\0Temp=C:\\t\0TMP=C:\\t\0\
+             windir=C:\\Windows\0_X=u\0\0"
+        );
+        // Case-insensitive order: `Temp` before `TMP` (E < M), `windir` before `_X` (W < _ in
+        // upper case, as Windows compares).
+        assert_eq!(environment_block(&[]).unwrap(), vec![0, 0]);
+        assert_eq!(
+            String::from_utf16(&environment_block(&vars(&[("A", "ü😀")])).unwrap()).unwrap(),
+            "A=ü😀\0\0"
+        );
+    }
+
+    #[test]
+    fn environment_blocks_refuse_what_windows_would_misread() {
+        for pairs in [
+            vec![("A=B", "c")],
+            vec![("=C:", r"C:\")],
+            vec![("", "x")],
+            vec![("A\0B", "c")],
+            vec![("A", "b\0c")],
+            vec![("Path", "x"), ("PATH", "y")],
+            vec![("temp", "x"), ("TMP", "y"), ("TEMP", "z")],
+        ] {
+            assert_eq!(
+                environment_block(&vars(&pairs)),
+                Err(Error::Win32 {
+                    function: "environment_block",
+                    code: 87
+                }),
+                "{pairs:?}"
+            );
+        }
     }
 }

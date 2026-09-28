@@ -11,6 +11,11 @@ repository.workspace = true
 [dependencies]
 mklm-core.workspace = true
 mklm-ipc.workspace = true
+# Check, download and stage updates (design m5b H.4) over WinHTTP.
+mklm-update = { workspace = true, features = ["winhttp"] }
+# The user's update record `state.json` (`update::cache::ClientState`, design m5b H.4).
+serde.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 mklm-win.workspace = true

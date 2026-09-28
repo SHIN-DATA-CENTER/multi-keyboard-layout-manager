@@ -175,6 +175,10 @@ mod windows_session {
             // 3010 does not fit the u8 of `ExitCode`.
             std::process::exit(i32::try_from(uninstall_restore()).unwrap_or(1));
         }
+        // The update runner's fixed command line (design m5b D.7): its own checks and exit codes.
+        if let Some(args) = mklm_ipc::run_update_args(&command_line) {
+            return crate::run_update::run(&args);
+        }
         let Some(args) = parse_args(&command_line) else {
             return exit::BAD_ARGUMENTS;
         };
@@ -315,6 +319,25 @@ mod windows_session {
                     code = exit::FAILURE;
                     break;
                 }
+                // Skeleton (M5b, WP-H: design m5b C.4, D.3, D.4): the order rule
+                // (`mklm_ipc::staging::CallerOrder`), the lock and the heartbeat around a stage are
+                // WP-H's. Until then both are answered without touching anything, and the session
+                // goes on.
+                CallerMessage::RecordTrust(report) => {
+                    let _ =
+                        frames.send(HelperMessage::Update(crate::update::record_trust(&report)));
+                }
+                CallerMessage::StageUpdate(request) => {
+                    let _ = frames.send(HelperMessage::Update(crate::update::stage(&request)));
+                }
+                // Only after `SendInstaller`, which the skeleton never sends.
+                CallerMessage::InstallerChunk(_) => {
+                    let _ = frames.send(HelperMessage::Error(protocol_error(
+                        "an installer chunk without SendInstaller",
+                    )));
+                    code = exit::FAILURE;
+                    break;
+                }
             }
         }
         drop(frames);
@@ -429,15 +452,22 @@ mod windows_session {
         }
 
         /// Reads at most one frame within `timeout` while a request runs. Returns a decision;
-        /// records `Bye`, a closed pipe and protocol violations (a request or welcome in the
-        /// middle of a request) in `gone`.
+        /// records `Bye`, a closed pipe and protocol violations (a request, a welcome or an
+        /// update message in the middle of a request) in `gone`.
         fn poll(&mut self, timeout: Duration) -> Option<Decision> {
             if self.gone {
                 return None;
             }
             match self.read(timeout) {
                 Ok(CallerMessage::Decision(decision)) => Some(decision),
-                Ok(CallerMessage::Bye | CallerMessage::Request(_) | CallerMessage::Welcome(_)) => {
+                Ok(
+                    CallerMessage::Bye
+                    | CallerMessage::Request(_)
+                    | CallerMessage::Welcome(_)
+                    | CallerMessage::RecordTrust(_)
+                    | CallerMessage::StageUpdate(_)
+                    | CallerMessage::InstallerChunk(_),
+                ) => {
                     self.gone = true;
                     None
                 }

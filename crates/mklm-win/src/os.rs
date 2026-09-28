@@ -95,6 +95,33 @@ pub(crate) fn machine_name(machine: IMAGE_FILE_MACHINE) -> String {
     }
 }
 
+/// Relative to FOLDERID_ProgramFiles; NSIS's fixed `$INSTDIR` (design m5b D.4 step 1).
+pub const INSTALL_SUBDIR: &str = r"SHIN DATA CENTER\MKLM";
+
+/// `SHGetKnownFolderPath(FOLDERID_ProgramFiles)` + `INSTALL_SUBDIR`.
+pub fn fixed_install_dir() -> Result<std::path::PathBuf, Error> {
+    Err(Error::Win32 {
+        function: "fixed_install_dir (m5b skeleton)",
+        code: 50,
+    }) // Skeleton (M5b): WP-H
+}
+
+/// The native machine of this PC (design m5b C.7: shown by the GUI only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeMachine {
+    X64,
+    Arm64,
+    Other(u16),
+}
+
+/// `IsWow64Process2(GetCurrentProcess())`'s native machine.
+pub fn native_machine() -> Result<NativeMachine, Error> {
+    Err(Error::Win32 {
+        function: "native_machine (m5b skeleton)",
+        code: 50,
+    }) // Skeleton (M5b): WP-H
+}
+
 /// Architecture this binary was built for.
 fn build_arch() -> &'static str {
     match std::env::consts::ARCH {

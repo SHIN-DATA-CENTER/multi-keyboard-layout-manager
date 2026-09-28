@@ -12,11 +12,12 @@ use mklm_core::{
     RegValue, RestoreScope, ValueOp, WriteTarget,
 };
 use mklm_ipc::{
-    ApplyOptions, Assignment, CallerMessage, ConflictInfo, ConflictPolicy, Decision, ErrorCode,
-    ErrorInfo, Event, ExpectedKeyboard, ExpectedPlan, Frame, FrameError, FrameReader,
-    FrameSequencer, Hello, HelperMessage, MigrateRequest, Nonce, OperationResult, Outcome,
-    PROTOCOL_VERSION, RecoveredOp, Request, ResolutionChoice, ResolveConflictRequest,
-    RestoreBaselineRequest, SetLayoutRequest, ValueChoice, Welcome, read_frame, write_frame,
+    ApplyOptions, Assignment, CHUNK_LEN, CallerMessage, ConflictInfo, ConflictPolicy, Decision,
+    ErrorCode, ErrorInfo, Event, ExpectedKeyboard, ExpectedPlan, Frame, FrameError, FrameReader,
+    FrameSequencer, Hello, HelperMessage, InstallerChunk, MAX_FRAME_LEN, MigrateRequest, Nonce,
+    OperationResult, Outcome, PROTOCOL_VERSION, RecoveredOp, Request, ResolutionChoice,
+    ResolveConflictRequest, RestoreBaselineRequest, SetLayoutRequest, StageUpdateRequest,
+    TrustReport, UpdateMessage, UpdateRefusal, ValueChoice, Welcome, read_frame, write_frame,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -249,6 +250,11 @@ fn decisions(op: &OpId) -> Vec<(&'static str, Decision)> {
     )
 }
 
+/// A manifest and a signature as the update messages carry them (strings, exactly as downloaded).
+const MANIFEST_TEXT: &str = "{\n  \"schema\": 1,\n  \"product\": \"MKLM\"\n}\n";
+const SIGNATURE_TEXT: &str = "untrusted comment: signature from minisign secret key\nRUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=\ntrusted comment: mklm-latest-json v1 version=0.2.1 issued_at=1792022400\nwLMDjy9FLAuxZ3q4NlEvkgtyhrr0gtTu6KC4KBJdITbbOeAi1zBIYo0v4iTgt8jJpIidRJnp94ABQkJAgAooBQ==\n";
+const RUN_ID: &str = "0.2.1-3f9a0c2b7d1e4a65";
+
 fn caller_messages(op: &OpId) -> Vec<(String, CallerMessage)> {
     let mut samples = Vec::new();
     for (variant, message) in every_variant!(CallerMessage:
@@ -256,6 +262,18 @@ fn caller_messages(op: &OpId) -> Vec<(String, CallerMessage)> {
         Request => CallerMessage::Request(Request::Confirm { op_id: op.clone() }),
         Decision => CallerMessage::Decision(Decision::Keep { op_id: op.clone() }),
         Bye => CallerMessage::Bye,
+        RecordTrust => CallerMessage::RecordTrust(TrustReport {
+            manifest: MANIFEST_TEXT.to_string(),
+            signature: SIGNATURE_TEXT.to_string(),
+        }),
+        StageUpdate => CallerMessage::StageUpdate(StageUpdateRequest {
+            manifest: MANIFEST_TEXT.to_string(),
+            signature: SIGNATURE_TEXT.to_string(),
+        }),
+        InstallerChunk => CallerMessage::InstallerChunk(InstallerChunk::new(
+            65_536,
+            &[0x4d, 0x5a, 0x90, 0x00],
+        )),
     ) {
         match message {
             // Every request and every decision, below.
@@ -439,17 +457,45 @@ fn helper_messages(op: &OpId, other_op: &OpId) -> Vec<(String, HelperMessage)> {
             op_id: None,
             plan_error: None,
         }),
+        Update => HelperMessage::Update(UpdateMessage::StartingRunner),
     ) {
         match message {
-            // Every event, below.
-            HelperMessage::Event(_) => {}
+            // Every event and every update message, below.
+            HelperMessage::Event(_) | HelperMessage::Update(_) => {}
             message => samples.push((variant.to_string(), message)),
         }
     }
     for (variant, event) in events(op) {
         samples.push((format!("Event.{variant}"), HelperMessage::Event(event)));
     }
+    for (variant, update) in update_messages() {
+        samples.push((format!("Update.{variant}"), HelperMessage::Update(update)));
+    }
     samples
+}
+
+/// Protocol 3 (design m5b D.3, H.5).
+fn update_messages() -> Vec<(&'static str, UpdateMessage)> {
+    every_variant!(UpdateMessage:
+        TrustRecorded => UpdateMessage::TrustRecorded { changed: true },
+        TrustNotRecorded => UpdateMessage::TrustNotRecorded(UpdateRefusal::Busy),
+        SendInstaller => UpdateMessage::SendInstaller {
+            name: "MKLM-Setup-0.2.1-x64.exe".to_string(),
+            size: 6_291_456,
+            sha256: "3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b".to_string(),
+            chunk_len: 65_536,
+        },
+        Received => UpdateMessage::Received { bytes: 1_048_576 },
+        StartingRunner => UpdateMessage::StartingRunner,
+        HandedOff => UpdateMessage::HandedOff {
+            run_id: RUN_ID.to_string(),
+            to_version: "0.2.1".to_string(),
+        },
+        Refused => UpdateMessage::Refused(UpdateRefusal::Rollback {
+            issued_at: 1_792_022_400,
+            seen: 1_792_108_800,
+        }),
+    )
 }
 
 /// Every value of the `mklm_core` types the messages embed, one JSON value per line of the
@@ -705,6 +751,88 @@ fn vocabulary(op: &OpId) -> Vec<(String, String)> {
             InvPs2 => PlanError::InvPs2(InvPs2Violation {
                 keyboards: vec![INTERNAL_PS2.to_string()],
             }),
+        ),
+    );
+    // Protocol 3: `mklm_update::UpdateRefusal` inside `UpdateMessage::{Refused, TrustNotRecorded}`.
+    let key_id = || "8F1A2B3C4D5E6F70".to_string();
+    add(
+        &mut lines,
+        "UpdateRefusal",
+        every_variant!(UpdateRefusal:
+            NotConfigured => UpdateRefusal::NotConfigured,
+            NotInstalledCopy => UpdateRefusal::NotInstalledCopy,
+            ManifestTooLarge => UpdateRefusal::ManifestTooLarge { len: 65_537 },
+            SignatureTooLarge => UpdateRefusal::SignatureTooLarge { len: 4_097 },
+            SignatureMalformed => UpdateRefusal::SignatureMalformed,
+            WrongTrustedComment => UpdateRefusal::WrongTrustedComment,
+            UnknownKey => UpdateRefusal::UnknownKey { key_id: key_id() },
+            BadSignature => UpdateRefusal::BadSignature,
+            RevokedKey => UpdateRefusal::RevokedKey { key_id: key_id() },
+            ManifestMalformed => UpdateRefusal::ManifestMalformed {
+                detail: "unknown field `url`".to_string(),
+            },
+            UnsupportedSchema => UpdateRefusal::UnsupportedSchema { schema: 2 },
+            WrongProduct => UpdateRefusal::WrongProduct,
+            WrongChannel => UpdateRefusal::WrongChannel,
+            SignerNotListed => UpdateRefusal::SignerNotListed { key_id: key_id() },
+            IllegalRevocation => UpdateRefusal::IllegalRevocation { key_id: key_id() },
+            BadVersion => UpdateRefusal::BadVersion {
+                text: "v0.2.1".to_string(),
+            },
+            TagMismatch => UpdateRefusal::TagMismatch {
+                tag: "v0.2.2".to_string(),
+                version: "0.2.1".to_string(),
+            },
+            BadTimestamps => UpdateRefusal::BadTimestamps,
+            Rollback => UpdateRefusal::Rollback {
+                issued_at: 1_792_022_400,
+                seen: 1_792_108_800,
+            },
+            NoAssetForArch => UpdateRefusal::NoAssetForArch {
+                arch: mklm_update::Arch::Arm64,
+            },
+            AssetMalformed => UpdateRefusal::AssetMalformed {
+                detail: "two x64 assets".to_string(),
+            },
+            NotNewer => UpdateRefusal::NotNewer {
+                offered: "0.2.0".to_string(),
+                installed: "0.2.0".to_string(),
+            },
+            ManualUpdateRequired => UpdateRefusal::ManualUpdateRequired {
+                min_from: "0.3.0".to_string(),
+                installed: "0.2.0".to_string(),
+            },
+            Busy => UpdateRefusal::Busy,
+            UpdateInProgress => UpdateRefusal::UpdateInProgress,
+            OperationOpen => UpdateRefusal::OperationOpen {
+                waiting_for_reboot: true,
+            },
+            RecoveryNeeded => UpdateRefusal::RecoveryNeeded,
+            JournalUnreadable => UpdateRefusal::JournalUnreadable,
+            DiskFull => UpdateRefusal::DiskFull {
+                needed: 23_068_672,
+                available: 1_048_576,
+            },
+            InstallerSizeMismatch => UpdateRefusal::InstallerSizeMismatch {
+                expected: 6_291_456,
+                received: 6_291_455,
+            },
+            InstallerHashMismatch => UpdateRefusal::InstallerHashMismatch,
+            ChunkMalformed => UpdateRefusal::ChunkMalformed,
+            ChunkOutOfOrder => UpdateRefusal::ChunkOutOfOrder {
+                expected: 65_536,
+                found: 0,
+            },
+            CallerLeft => UpdateRefusal::CallerLeft,
+            HandOffFailed => UpdateRefusal::HandOffFailed {
+                detail: "the runner exited with code 7".to_string(),
+            },
+            Storage => UpdateRefusal::Storage {
+                detail: "RegSetValueExW failed with Win32 error 5".to_string(),
+            },
+            Internal => UpdateRefusal::Internal {
+                detail: "unexpected".to_string(),
+            },
         ),
     );
     lines
@@ -1024,6 +1152,164 @@ fn protocol_2_requests_have_the_documented_shape() {
     )
     .unwrap();
     assert!(!odd.countdown_allowed());
+}
+
+/// Protocol 3 (design m5b D.3): the frames of design m5b H.5, byte for byte.
+#[test]
+fn protocol_3_frames_have_the_documented_shape() {
+    let frames: [(&str, Frame<HelperMessage>); 5] = [
+        (
+            r#"{"v":3,"seq":2,"body":{"type":"update","data":{"kind":"trust-recorded","data":{"changed":true}}}}"#,
+            Frame {
+                v: 3,
+                seq: 2,
+                body: HelperMessage::Update(UpdateMessage::TrustRecorded { changed: true }),
+            },
+        ),
+        (
+            r#"{"v":3,"seq":3,"body":{"type":"update","data":{"kind":"send-installer","data":{"name":"MKLM-Setup-0.2.1-x64.exe","size":6291456,"sha256":"3a7b","chunk_len":65536}}}}"#,
+            Frame {
+                v: 3,
+                seq: 3,
+                body: HelperMessage::Update(UpdateMessage::SendInstaller {
+                    name: "MKLM-Setup-0.2.1-x64.exe".to_string(),
+                    size: 6_291_456,
+                    sha256: "3a7b".to_string(),
+                    chunk_len: 65_536,
+                }),
+            },
+        ),
+        (
+            r#"{"v":3,"seq":9,"body":{"type":"update","data":{"kind":"starting-runner"}}}"#,
+            Frame {
+                v: 3,
+                seq: 9,
+                body: HelperMessage::Update(UpdateMessage::StartingRunner),
+            },
+        ),
+        (
+            r#"{"v":3,"seq":10,"body":{"type":"update","data":{"kind":"handed-off","data":{"run_id":"0.2.1-3f9a0c2b7d1e4a65","to_version":"0.2.1"}}}}"#,
+            Frame {
+                v: 3,
+                seq: 10,
+                body: HelperMessage::Update(UpdateMessage::HandedOff {
+                    run_id: RUN_ID.to_string(),
+                    to_version: "0.2.1".to_string(),
+                }),
+            },
+        ),
+        (
+            r#"{"v":3,"seq":3,"body":{"type":"update","data":{"kind":"refused","data":{"code":"rollback","issued_at":1792022400,"seen":1792108800}}}}"#,
+            Frame {
+                v: 3,
+                seq: 3,
+                body: HelperMessage::Update(UpdateMessage::Refused(UpdateRefusal::Rollback {
+                    issued_at: 1_792_022_400,
+                    seen: 1_792_108_800,
+                })),
+            },
+        ),
+    ];
+    for (text, frame) in frames {
+        assert_eq!(serde_json::to_string(&frame).unwrap(), text);
+        assert_eq!(
+            serde_json::from_str::<Frame<HelperMessage>>(text).unwrap(),
+            frame
+        );
+    }
+
+    let caller: [(&str, Frame<CallerMessage>); 3] = [
+        (
+            r#"{"v":3,"seq":2,"body":{"type":"record-trust","data":{"manifest":"{\n  \"schema\": 1","signature":"untrusted comment: x"}}}"#,
+            Frame {
+                v: 3,
+                seq: 2,
+                body: CallerMessage::RecordTrust(TrustReport {
+                    manifest: "{\n  \"schema\": 1".to_string(),
+                    signature: "untrusted comment: x".to_string(),
+                }),
+            },
+        ),
+        (
+            r#"{"v":3,"seq":3,"body":{"type":"stage-update","data":{"manifest":"{\n  \"schema\": 1","signature":"untrusted comment: x"}}}"#,
+            Frame {
+                v: 3,
+                seq: 3,
+                body: CallerMessage::StageUpdate(StageUpdateRequest {
+                    manifest: "{\n  \"schema\": 1".to_string(),
+                    signature: "untrusted comment: x".to_string(),
+                }),
+            },
+        ),
+        (
+            r#"{"v":3,"seq":4,"body":{"type":"installer-chunk","data":{"offset":0,"hex":"4d5a9000"}}}"#,
+            Frame {
+                v: 3,
+                seq: 4,
+                body: CallerMessage::InstallerChunk(InstallerChunk::new(
+                    0,
+                    &[0x4d, 0x5a, 0x90, 0x00],
+                )),
+            },
+        ),
+    ];
+    for (text, frame) in caller {
+        assert_eq!(serde_json::to_string(&frame).unwrap(), text);
+        assert_eq!(
+            serde_json::from_str::<Frame<CallerMessage>>(text).unwrap(),
+            frame
+        );
+    }
+
+    for json in [
+        r#"{"type":"record-trust","data":{"manifest":"","signature":"","extra":1}}"#,
+        r#"{"type":"stage-update","data":{"manifest":"","signature":"","path":"C:\\x"}}"#,
+        r#"{"type":"stage-update","data":{"manifest":""}}"#,
+        r#"{"type":"installer-chunk","data":{"offset":0,"hex":"00","last":true}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<CallerMessage>(json).is_err(),
+            "accepted {json}"
+        );
+    }
+    for json in [
+        r#"{"type":"update","data":{"kind":"starting-runner","extra":1}}"#,
+        r#"{"type":"update","data":{"kind":"received","data":{"bytes":1,"extra":1}}}"#,
+        r#"{"type":"update","data":{"kind":"install-now"}}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<HelperMessage>(json).is_err(),
+            "accepted {json}"
+        );
+    }
+}
+
+/// A full installer chunk, and the largest manifest escaped as a JSON string, fit in one frame
+/// (design m5b D.3).
+#[test]
+fn update_frames_fit_the_frame_limit() {
+    let chunk = CallerMessage::InstallerChunk(InstallerChunk::new(
+        u64::from(u32::MAX),
+        &vec![0xff; CHUNK_LEN],
+    ));
+    let mut sequencer = FrameSequencer::new();
+    let mut bytes = Vec::new();
+    write_frame(&mut bytes, &sequencer.frame(chunk.clone())).unwrap();
+    assert!(bytes.len() < MAX_FRAME_LEN as usize, "{}", bytes.len());
+    let read: Frame<CallerMessage> = read_frame(&mut bytes.as_slice()).unwrap();
+    assert_eq!(read.body, chunk);
+
+    // The worst ordinary character (a quote) doubles in JSON; control characters are not in a
+    // manifest (design m5b D.3).
+    let manifest = "\"".repeat(mklm_update::MAX_MANIFEST_LEN);
+    let signature = "s".repeat(mklm_update::MAX_SIGNATURE_LEN);
+    let stage = CallerMessage::StageUpdate(StageUpdateRequest {
+        manifest,
+        signature,
+    });
+    let mut bytes = Vec::new();
+    write_frame(&mut bytes, &sequencer.frame(stage)).unwrap();
+    assert!(bytes.len() < MAX_FRAME_LEN as usize, "{}", bytes.len());
 }
 
 // ---- The shape snapshot ----

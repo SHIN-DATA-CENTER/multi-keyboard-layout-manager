@@ -1,0 +1,1 @@
+# MKLM update trust anchors (design m5b B.2). "<role> <KEYID> <base64 public key>" or "revoked <KEYID>".

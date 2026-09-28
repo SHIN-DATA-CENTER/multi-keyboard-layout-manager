@@ -229,6 +229,64 @@ pub fn same_image_directory(pid: u32) -> Result<bool, Error> {
     })
 }
 
+// ---- M5b additions (design m5b H.3, D.7, D.8; WP-H) ----
+
+/// PID → identity with its creation time (SystemProcessInformation); `None` if gone.
+#[allow(unused_variables)] // Skeleton (M5b)
+pub fn process_identity(pid: u32) -> Result<Option<ProcessIdentity>, Error> {
+    Err(skeleton("process_identity (m5b skeleton)")) // Skeleton (M5b): WP-H
+}
+
+/// NT path of a file (`GetFinalPathNameByHandleW(VOLUME_NAME_NT)`), for comparing with
+/// `process_image_nt_path`.
+#[allow(unused_variables)] // Skeleton (M5b)
+pub fn file_nt_path(path: &std::path::Path) -> Result<String, Error> {
+    Err(skeleton("file_nt_path (m5b skeleton)")) // Skeleton (M5b): WP-H
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageProcess {
+    pub identity: ProcessIdentity,
+    /// Index into the `nt_paths` argument.
+    pub path_index: usize,
+    pub session_id: u32,
+}
+
+/// Every process whose image NT path equals one of `nt_paths` (case-insensitive).
+#[allow(unused_variables)] // Skeleton (M5b)
+pub fn processes_with_images(nt_paths: &[String]) -> Result<Vec<ImageProcess>, Error> {
+    Err(skeleton("processes_with_images (m5b skeleton)")) // Skeleton (M5b): WP-H
+}
+
+/// One row of `WTSEnumerateProcessesW(WTS_CURRENT_SERVER_HANDLE)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessUser {
+    pub session_id: u32,
+    /// `pUserSid` as `S-1-…` text (`ConvertSidToStringSidW`); `None` when absent.
+    pub user_sid: Option<String>,
+}
+
+/// PID → session and user SID of every process (design m5b D.8 step 2; FIX-VERIFICATION-5).
+/// Whether `pUserSid` is filled for other users' processes when called from an elevated,
+/// non-SYSTEM process is unverified (design m5b I.12).
+pub fn process_users() -> Result<std::collections::HashMap<u32, ProcessUser>, Error> {
+    Err(skeleton("process_users (m5b skeleton)")) // Skeleton (M5b): WP-H
+}
+
+/// Polls `process_liveness` every 250 ms; true when all are gone within `timeout`.
+#[allow(unused_variables)] // Skeleton (M5b)
+pub fn wait_for_exit(
+    processes: &[ProcessIdentity],
+    timeout: std::time::Duration,
+) -> Result<bool, Error> {
+    Err(skeleton("wait_for_exit (m5b skeleton)")) // Skeleton (M5b): WP-H
+}
+
+/// What the WP-0 skeleton returns (design m5b G.2): `ERROR_NOT_SUPPORTED`.
+fn skeleton(function: &'static str) -> Error {
+    Error::Win32 { function, code: 50 }
+}
+
 /// Directory part of an NT image path (without the last `\`); `None` without one.
 fn image_directory(path: &str) -> Option<&str> {
     path.rsplit_once('\\')

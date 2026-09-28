@@ -458,6 +458,13 @@ pub fn relay(
                         frontend.finish()?;
                         return Ok(lost(link, &view, "unexpected hello frame".to_string()));
                     }
+                    // Update answers belong to an update session (`update::stage`) or to the
+                    // `RecordTrust` sent before the request (M5b, WP-C); in a request they are
+                    // unexpected, like `Hello`.
+                    HelperMessage::Update(_) => {
+                        frontend.finish()?;
+                        return Ok(lost(link, &view, "unexpected update frame".to_string()));
+                    }
                 }
             }
             Recv::Timeout => {

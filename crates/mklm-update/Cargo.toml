@@ -1,0 +1,33 @@
+[package]
+name = "mklm-update"
+description = "Signed update manifests of MKLM: verification, anti-rollback state, fetch policy (design m5b)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+mklm-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+minisign-verify.workspace = true
+sha2.workspace = true
+semver.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+mklm-win = { workspace = true, optional = true, features = ["net"] }
+
+[features]
+# The WinHTTP transport (mklm_update::winhttp). The GUI, the CLI and xtask get it; the helper never
+# enables it (design m5b A.9).
+winhttp = ["dep:mklm-win"]
+
+[dev-dependencies]
+minisign.workspace = true
+mklm-core = { workspace = true, features = ["test-fixtures"] }
+
+[lints]
+workspace = true

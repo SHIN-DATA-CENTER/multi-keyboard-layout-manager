@@ -38,12 +38,23 @@
 //! - `session`: also the GUI's HKCU autostart value.
 //! - `ui` (feature `gui`, only `apps/mklm`): theme, high contrast, title bar, the hidden shell
 //!   window, the active input language, allowlisted settings pages, the clipboard and the
-//!   start-up error message box.
+//!   start-up error message box; M5b adds `ui::open_url` (release page, cached installer).
+//!
+//! Updates (M5b, docs/design/m5b-updater.md H.3):
+//! - [`update_store`]: `HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Update` (`Trust`, `Run`,
+//!   `LastResult`; written by the helper only).
+//! - [`update_dir`]: the `Updates\<run-id>` run folders, the installed build IDs, files in use.
+//! - [`shell_launch`]: the update runner's COM set-up and the unelevated GUI relaunch.
+//! - [`user_dirs`]: the per-user update cache folder.
+//! - `net` (feature `net`, never in the helper): one HTTPS GET over WinHTTP.
+//! - `os`, `proc_identity`, `instance`, `elevation`, `session_end`, `session`: additions for the
+//!   update runner (install folder, native machine, process lookups, `quit-if-idle`, clean
+//!   environment blocks, shutdown order, the after-update RunOnce value).
 //!
 //! HKLM keys are opened with `KEY_SET_VALUE` only in [`regwrite`], [`journal_store`] (which
-//! write through the private `regraw` value I/O) and [`machine_settings`], and the HKCU RunOnce
-//! and Run values are written only in [`session`]. The private `security` module names the right
-//! only to check ACLs.
+//! write through the private `regraw` value I/O), [`machine_settings`] and [`update_store`], and
+//! the HKCU RunOnce and Run values are written only in [`session`]. The private `security` module
+//! names the right only to check ACLs.
 
 #![cfg(windows)]
 
@@ -58,6 +69,8 @@ pub mod input_lang;
 pub mod instance;
 pub mod journal_store;
 pub mod machine_settings;
+#[cfg(feature = "net")]
+pub mod net;
 pub mod notify;
 pub mod os;
 pub mod pipe;
@@ -72,10 +85,14 @@ pub mod regwrite;
 mod security;
 pub mod session;
 pub mod session_end;
+pub mod shell_launch;
 mod sys;
 pub mod time;
 #[cfg(feature = "gui")]
 pub mod ui;
+pub mod update_dir;
+pub mod update_store;
+pub mod user_dirs;
 
 use mklm_core::SystemSnapshot;
 

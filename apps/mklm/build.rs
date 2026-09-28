@@ -110,15 +110,21 @@ fn version_header(build_id: &str) -> String {
         part("CARGO_PKG_VERSION_PATCH"),
     );
     let version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION is set by Cargo");
-    let flags = if env::var("PROFILE").as_deref() == Ok("debug") {
-        "0x1L"
-    } else {
-        "0x0L"
-    };
+    let flags = file_flags();
     format!(
         "#define MKLM_VERSION_NUM {major},{minor},{patch},0\n\
          #define MKLM_VERSION_STR \"{version}\"\n\
          #define MKLM_FILEFLAGS {flags}\n\
          #define MKLM_BUILD_ID_STR \"{build_id}\"\n"
     )
+}
+
+/// `VS_FF_DEBUG` when the package is compiled with debug assertions (design m5b A.10; see
+/// apps/mklm-cli/build.rs).
+fn file_flags() -> &'static str {
+    if env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some() {
+        "0x1L"
+    } else {
+        "0x0L"
+    }
 }

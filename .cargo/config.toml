@@ -1,0 +1,4 @@
+# Aliases only (design m5b A.10, G.2): release.yml refuses any other table ([build], [target],
+# [profile], ...) or rustflags here, because they would change what the release build compiles.
+[alias]
+xtask = "run --package xtask --locked --"

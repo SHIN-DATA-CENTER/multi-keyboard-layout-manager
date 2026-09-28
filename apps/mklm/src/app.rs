@@ -108,17 +108,22 @@ fn not_launched(session: SessionId, message: String) -> AppMsg {
 
 /// A command from a second MKLM process (UI thread; design m3 F.1): `activate` shows the window
 /// without changing the page (review A8), `quit` quits as the tray's "終了" does. The reply is
-/// `busy` while the quit has to wait for a connected helper session (design m3 F.5).
+/// `busy` while the quit has to wait for a connected helper session (design m3 F.5). The update
+/// runner's `quit-if-idle` (design m5b E.4.1) is answered `busy` until WP-C implements it.
 fn instance_command(command: InstanceCommand) -> InstanceReply {
+    let message = match command {
+        InstanceCommand::Activate => AppMsg::Activate,
+        InstanceCommand::Quit => AppMsg::QuitRequested,
+        // Skeleton (M5b): WP-C implements `state::quit_if_idle` (design m5b E.4.1). Until then the
+        // update runner's command changes nothing and is answered `busy`.
+        InstanceCommand::QuitIfIdle => return InstanceReply::Busy,
+    };
     let quit_waits = current_app().is_some_and(|app| {
         app.state
             .try_borrow()
             .is_ok_and(|state| matches!(state.session, SessionPhase::Running { .. }))
     });
-    dispatch(match command {
-        InstanceCommand::Activate => AppMsg::Activate,
-        InstanceCommand::Quit => AppMsg::QuitRequested,
-    });
+    dispatch(message);
     single_instance::reply_for(command, quit_waits)
 }
 

@@ -11,6 +11,7 @@
 //!   allowlisted settings page or the recovery files folder, copying diagnostics to the
 //!   clipboard, and the start-up error message box.
 
+pub mod open_url;
 pub mod shell_window;
 pub mod theme;
 

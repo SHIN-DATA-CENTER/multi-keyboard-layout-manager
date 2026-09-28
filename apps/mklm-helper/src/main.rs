@@ -9,11 +9,18 @@
 //! A second, equally fixed command line, `--uninstall-restore` (M5), is run by the elevated
 //! uninstaller: a silent restore-to-baseline without a pipe, exit 0 / 3010 (restart needed) /
 //! 6 (busy) / 1.
+//!
+//! A third, `--run-update <run-id>` (M5b, docs/design/m5b-updater.md D.7), is run by the helper
+//! itself: its copy `mklm-update-runner.exe` in a protected run folder installs a verified update
+//! (exit 0 installed / 7 not installed). In a pipe session the helper also stages updates
+//! (`StageUpdate`) and records verified manifests (`RecordTrust`). It never uses the network.
 
 #![windows_subsystem = "windows"]
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod run_update;
 mod session;
+mod update;
 
 use std::process::ExitCode;
 
@@ -32,6 +39,9 @@ mod exit {
     pub const NOT_ELEVATED: u8 = 4;
     /// Not Windows 11 24H2 (build 26100) or later, or not Windows at all.
     pub const UNSUPPORTED_OS: u8 = 5;
+    /// `--run-update`: not installed, or failed; the reason is in `LastResult` (none before
+    /// `ready`). Also when the installer did not finish within 60 minutes (design m5b D.15).
+    pub const NOT_UPDATED: u8 = 7;
 }
 
 fn main() -> ExitCode {

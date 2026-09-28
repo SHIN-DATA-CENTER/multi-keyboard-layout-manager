@@ -10,6 +10,8 @@ repository.workspace = true
 
 [dependencies]
 mklm-core.workspace = true
+# The update messages embed its types (design m5b H.2); without the `winhttp` feature.
+mklm-update.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

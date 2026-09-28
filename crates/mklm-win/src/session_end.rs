@@ -119,6 +119,48 @@ impl SessionEndWindow {
     }
 }
 
+// ---- M5b: the update runner (design m5b D.7; RELIABILITY-3; WP-H) ----
+
+/// H2: the highest application level, so that it hears of the session end first.
+pub const RUNNER_SHUTDOWN_LEVEL: u32 = 0x3FF;
+
+/// `SetProcessShutdownParameters(RUNNER_SHUTDOWN_LEVEL, SHUTDOWN_NORETRY)`.
+pub fn shut_down_first() -> Result<(), Error> {
+    Err(Error::Win32 {
+        function: "shut_down_first (m5b skeleton)",
+        code: 50,
+    }) // Skeleton (M5b): WP-H
+}
+
+/// The update runner's answer to `WM_QUERYENDSESSION`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryAnswer {
+    Allow,
+    Block,
+}
+
+impl SessionEndWindow {
+    /// Like `spawn`, but the handler's answer to `QueryEndSession` is returned to Windows.
+    #[allow(unused_variables)] // Skeleton (M5b)
+    pub fn spawn_with_answer(
+        handler: impl Fn(SessionEndEvent) -> QueryAnswer + Send + 'static,
+    ) -> Result<SessionEndWindow, Error> {
+        Err(Error::Win32 {
+            function: "SessionEndWindow::spawn_with_answer (m5b skeleton)",
+            code: 50,
+        }) // Skeleton (M5b): WP-H
+    }
+
+    /// `ShutdownBlockReasonCreate` / `Destroy` on the window's own thread (posted to it).
+    #[allow(unused_variables)] // Skeleton (M5b)
+    pub fn set_block_reason(&self, reason: Option<&str>) -> Result<(), Error> {
+        Err(Error::Win32 {
+            function: "SessionEndWindow::set_block_reason (m5b skeleton)",
+            code: 50,
+        }) // Skeleton (M5b): WP-H
+    }
+}
+
 impl Drop for SessionEndWindow {
     fn drop(&mut self) {
         let hwnd = HWND(self.hwnd as *mut core::ffi::c_void);

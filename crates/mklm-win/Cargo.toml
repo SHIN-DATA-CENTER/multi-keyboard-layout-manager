@@ -33,6 +33,8 @@ features = [
     "Win32_System_Environment",
     "Win32_System_IO",
     "Win32_System_LibraryLoader",
+    # `VARIANT` / `BSTR` of shell_launch (design m5b D.10, G.2).
+    "Win32_System_Ole",
     "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_Shutdown",
@@ -40,6 +42,7 @@ features = [
     "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_System_Time",
+    "Win32_System_Variant",
     "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
@@ -50,6 +53,9 @@ features = [
 workspace = true
 
 [features]
+# The WinHTTP client (`net`, design m5b A.9): only mklm-update's `winhttp` feature enables it, which
+# the GUI, the CLI and xtask use. The helper never does (release.yml checks its imports).
+net = ["windows/Win32_Networking_WinHttp"]
 # Win32 pieces of the GUI (apps/mklm, design m3 A.5): the `ui` module. Only apps/mklm enables it.
 gui = [
     "windows/Foundation",

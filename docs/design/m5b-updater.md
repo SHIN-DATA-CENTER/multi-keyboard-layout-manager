@@ -3968,7 +3968,7 @@ JSON の例（形を固定するテストの期待値に使う）:
 7. **サインアウトとインストール**（D.7、D.12）: `installing` の間はセッションの終了を止めることにした。0x3FF の H2 に `WM_QUERYENDSESSION` が NSIS より先に届くこと、Windows が理由の文をどう見せるかは、F.6 と T-UPD-16 で確かめる。
 8. **`ProgramData` の先回り**（m2 I.18）: `Updates` も先回りして作られうる。隔離の仕組み（m2 S1）がそのまま効くが、隔離できない場合は更新も `Storage` で止まる。
 9. **従量制の接続**（E.1）: ダウンロードを自動で行う（J-7 の決定 (a)）。問題になれば、`NetworkInformation` の接続の費用を見て止める。
-10. **`CARGO_CFG_DEBUG_ASSERTIONS`**（A.10）: ビルド スクリプトに、対象のデバッグの表明の設定が渡るか。WP-0 が確かめる。渡らなくても、ビルドの前の環境の検査と、陽性の対照つきの目印の検査が守る。
+10. （解決。WP-0、2026-09-29）**`CARGO_CFG_DEBUG_ASSERTIONS`**（A.10）: ビルド スクリプトに、対象のデバッグの表明の設定が渡る。`CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true` のリリース ビルドで 3 つの exe の `IsDebug` が true になった（L 章）。
 11. **ほかの利用者のセッションでの起動し直し**（D.8）: `quit-if-idle` で終わらせたほかの利用者の GUI は、その利用者が開き直すかサインインし直すまで戻らない。タスク スケジューラーの 1 回だけのタスク（その利用者の SID、`TASK_LOGON_INTERACTIVE_TOKEN`、`RunLevel` LUA）で戻す案は、管理者がパスワードなしで登録できるか未確認で、コードも増えるので採らなかった（J-2 の決定は (a)。(c) は選ばれなかった）。
 12. **ほかの利用者の GUI のプロセスを開けるか、SID が取れるか**（D.8）: 昇格した H2 が、ほかの利用者の `mklm.exe` を `PROCESS_QUERY_LIMITED_INFORMATION` で開けるかは確かめていない。開けなければ、作成時刻付きの識別を前後で比べる方式に落ちる。また、パイプの名前を計算するのに使う `WTSEnumerateProcessesW` の `pUserSid` が、SYSTEM でない昇格したプロセスから見て、ほかの利用者のプロセスについても入っているかを、この PC で確かめていない（Microsoft Learn は「プロセスのプライマリ トークンの利用者の SID」とだけ書く。FIX-VERIFICATION-5）。入っていなければ、その GUI は飛ばされ、D.8 の 3 の待ちで `ProgramsStillRunning` になる（安全側）。F.6 の任意の 2 つ目のアカウントか T-UPD-7 で確かめる。
 13. **再現可能なビルド**（B.5 の 5）: 同じコミットを手元でビルドして CI と同じハッシュになるかは確かめていない（PDB のパス、時刻、NSIS の圧縮など）。比べるのは任意で、違っても直ちに異常とはしない。
@@ -4042,23 +4042,30 @@ JSON の例（形を固定するテストの期待値に使う）:
 - Microsoft Learn の `WTS_PROCESS_INFOW`: `SessionId`、`ProcessId`、`pProcessName`、`pUserSid`（「プロセスのプライマリ トークンの利用者の SID」）を持つ（2026-09-29）。
 - Microsoft Learn の `WinHttpOpen`: `WINHTTP_ACCESS_TYPE_NAMED_PROXY` はバイパスの一覧に当たらない名前をプロキシに送る。`<local>` はピリオドのない名前だけをバイパスする（2026-09-29）。
 
+**WP-0 で確かめたこと**（2026-09-29、この開発機。Rust 1.98.1、VS Build Tools 2022。G.2 の手で確かめる項目を含む）
+
+- **ビルド ID と信頼の起点ファイル**（G.2。FIX-VERIFICATION-15）: `apps/build_id.rs` が `HASHED_CRATES` の 5 つと `HASHED_FILES`（`anchors.txt`）をハッシュするようにした後、`cargo build -p mklm -p mklm-cli -p mklm-helper`（dev）で 3 つの exe の VERSIONINFO の `MKLMBuildId` はそろって `0.1.0+806e3257…ad9a`。`anchors.txt` にコメントの行を 1 つ足して同じビルドをすると、3 つとも `0.1.0+162df532…66ba` に変わり（`watched_paths` によりビルド スクリプトが走り直した）、元に戻すと 3 つとも元の値に戻った。
+- **`VS_FF_DEBUG` と `CARGO_CFG_DEBUG_ASSERTIONS`**（A.10。I.10 は解決）: 3 つの `build.rs` を `CARGO_CFG_DEBUG_ASSERTIONS` の有無で決めるようにした。`cargo build --release --workspace` の 3 つの exe は `VersionInfo.IsDebug` が false。`CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true`（別の `CARGO_TARGET_DIR`）の `cargo build --release -p mklm -p mklm-cli -p mklm-helper` では、生成した `*-version.rch` が `MKLM_FILEFLAGS 0x1L` で、3 つとも `IsDebug` が true（`PROFILE` は `release` のまま）。つまり、ビルド スクリプトには対象のパッケージのデバッグの表明の設定が渡る。dev のビルドも 3 つとも true。
+- **目印（DEV_MARKER）**（A.10）: `RUSTFLAGS=--cfg mklm_update_dev`、`CARGO_TARGET_DIR=target\dev-update` の `cargo build -p mklm -p mklm-cli -p mklm-helper`（dev）で、3 つの exe すべてに `MKLM-UPDATE-DEV-OVERRIDES!` があった（陽性の対照が通る）。骨組みでは GUI と CLI はまだ `for_this_build` を呼ばない（WP-C の `env::environment` から呼ぶ）が、dev のビルドでは `#[used]` の静的な値だけで残った。helper は骨組みの `update` と `run_update` から `for_this_build` を呼ぶ。`--release` の 3 つの exe と、開発用の cfg なしの dev の `mklm.exe` には目印がない。
+- **helper とネットワーク**（A.9）: `cargo tree -p mklm-helper -e features` に `mklm-win feature "net"` も `mklm-update feature "winhttp"` も `Win32_Networking_WinHttp` もない（対照: `mklm-cli` の木には `net` と `winhttp` がある）。`dumpbin /imports`（`vswhere` で見つけた MSVC 14.44.35207 の `Hostx64\x64\dumpbin.exe`）で、リリースの x64 の `mklm-helper.exe` は `WINHTTP.dll` をインポートしていない。
+- **クレートの版と API**（B.1、G.7 の 2）: `minisign-verify` =0.3.0、`minisign` 0.10.0、`sha2` 0.11.0、`semver` 1.0.28 は crates.io にあり、解決してコンパイルできる（`sha2` 0.11.0 の `rust-version` は 1.85、`minisign-verify` 0.3.0 は宣言なしで依存 0）。`minisign-verify` 0.3.0 のソース（`lib.rs`）で、`PublicKey::from_base64`、`Signature::decode`、`PublicKey::verify(&[u8], &Signature, allow_legacy)`（鍵 ID が違えば `Error::UnexpectedKeyId`、legacy を許さず legacy なら `Error::UnexpectedAlgorithm`、署名の誤りは `Error::InvalidSignature`）、`Signature::trusted_comment()` が B.1 のとおりであることを確かめた（`Signature` は `Debug` を実装しない）。`minisign` 0.10.0 の `sign` は常に prehashed（`ED`）の署名を作り、`minisign-verify` が `allow_legacy = false` で通す。`minisign` 0.10.0 の依存は `getrandom` 0.4、`scrypt` 0.11、`rpassword` 7.5.4、`ct-codecs`（dev-dependency だけ）。これらを `crates/mklm-update/tests/crate_apis.rs`（使い捨ての鍵をテストの中で作る）に固定した。
+- **鍵 ID の表記**（B.2）: `minisign` 0.10.0 の公開鍵ファイルの 1 行目は `untrusted comment: minisign public key: <ID>` で、`<ID>` は鍵 ID の 8 バイトを little-endian の u64 とした 16 桁の大文字の 16 進（`{:016X}`）。`KeyId::to_text` と一致する（同じテスト）。公開鍵の base64 を解いた 42 バイトの先頭 2 バイトは `Ed`、続く 8 バイトが鍵 ID。
+- **`windows` 0.62.2 の feature 名**: `Win32_Networking_WinHttp`、`Win32_System_Ole`、`Win32_System_Variant`、`Win32_System_RemoteDesktop`、`Win32_System_RestartManager` はクレートの `Cargo.toml` にある（`Win32_System_Com` は既存）。WP-0 は `net`（`Win32_Networking_WinHttp`）、`Win32_System_Ole`、`Win32_System_Variant` を足した。
+
 **確かめていないこと**
 
-- `minisign-verify` 0.3.0 と `minisign` 0.10.0（どちらも 2026-09-25 公開）の、前の版からの変更点。`minisign` クレートが prehashed の署名を作るか、公式の `minisign` 0.12 の鍵ファイルと互換か（テストのデータで確かめる）。docs.rs で確かめたのは B.1 に挙げた `minisign-verify` の関数だけ。
-- minisign の鍵 ID の表記（little-endian の u64 の 16 進）が、公式のコマンドの表示と同じか（B.5 の準備で目で確かめる）。
+- `minisign-verify` 0.3.0 と `minisign` 0.10.0（どちらも 2026-09-25 公開）の、前の版からの変更点（`minisign-verify` のソース全体の読み合わせは G.6 のレビュー）。`minisign` クレートの署名と鍵が、公式の `minisign` 0.12 の鍵ファイルと互換か（prehashed であることは WP-0 で確かめた）。
+- 公式の `minisign` のコマンドの鍵 ID の表示が、`minisign` クレートと同じ形か（B.5 の準備で目で確かめる。クレートの形は WP-0 で確かめた）。
 - 公式の `minisign` の Windows 版の配布物が、作者の鍵で署名された `.minisig` を伴うか、legacy の署名か（`verify-signer` は legacy も受け付ける）。ライセンスが ISC であること。
-- `sha2` 0.11.0 と `minisign-verify` 0.3.0 の最低の Rust の版（ツールチェーンは 1.98.1 なので問題ないはず）。
-- `windows` 0.62.2 の feature 名: `Win32_Networking_WinHttp`（`windows::Win32::Networking::WinHttp` のモジュールはドキュメントで確かめた）、`Win32_System_Ole`、`Win32_System_Variant`、`Win32_System_Com`、`IShellDispatch2` などの置き場所。
+- `IShellWindows` / `IShellDispatch2` などの `windows` 0.62.2 での置き場所（feature 名は WP-0 で確かめた）。
 - `WINHTTP_OPTION_AUTOLOGON_POLICY` の HIGH が、プロキシへの既定の資格情報の送信も止めること。レビュー第 1 回の後の版は「F.3 の 407 のテストで確かめる」と書いたが、そのテストはプロキシなしのセッションで、プロキシの認証の経路を通らなかった（FIX-VERIFICATION-4）。F.3 の「プロキシの認証の試験」（名前付きのプロキシ、LOW の対照つき）が通るまで未確認。その試験が通っても、`AUTOMATIC_PROXY`（WPAD と PAC）で見つけたプロキシに同じ方針が効くことは前提のまま（未確認）。`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` がループバックの要求をプロキシに送らないか（ループバックのテストはプロキシなしのセッションを使うので影響しない）。
 - `WTSEnumerateProcessesW` の `pUserSid` が、SYSTEM でない昇格したプロセスから、ほかの利用者のプロセスについても得られること（I.12。FIX-VERIFICATION-5）。
-- Restart Manager の `RmGetList` が、ふつうに開いたファイルのハンドルの持ち主を返すこと（I.16。RED-TEAM-3）。`windows` 0.62.2 の feature 名 `Win32_System_RemoteDesktop`（`WTSEnumerateProcessesW`）と `Win32_System_RestartManager`。
-- `std::hint::black_box` で参照した `#[used]` の静的な値が、`/OPT:REF` のリンクの後も 3 つの exe に残ること（A.10。ci.yml と `-Profile dev` の陽性の対照が、残らなければ失敗して知らせる）。
-- `apps/build_id.rs` に `anchors.txt` を足したとき、3 つの exe の `MKLMBuildId` が変わること（WP-0 が一度確かめる。G.2）。
+- Restart Manager の `RmGetList` が、ふつうに開いたファイルのハンドルの持ち主を返すこと（I.16。RED-TEAM-3）。
+- `std::hint::black_box` で参照した `#[used]` の静的な値が、`/OPT:REF` のリンクの後も 3 つの exe に残ること（A.10。dev のビルドで残ることは WP-0 で確かめた。リリースには開発用のモジュールがない。ci.yml と `-Profile dev` の陽性の対照が、残らなければ失敗して知らせる）。
 - GitHub の下書きのページがアセットの SHA-256 を表示するか（B.5 の手順 8 の任意の照合の手段にならないか。今の手順は手順 6 の表示と比べるだけ）。
 - （確かめる必要がなくなったもの）署名専用のアカウントにかかわる 2 つ（`C:\Users\Public` の受け渡しのフォルダーの権限、サインアウトした開発用のアカウントのプロセスが残らないこと）は、J-6 の決定 (a)（普段のアカウントで署名する）で不要になった。
 - 引き継ぎの案内の文（約 110 文字）を、ナレーターが 15 秒で読み終えること（E.4。T-UPD-14 で確かめる）。
 - NSIS: `AllowSkipFiles on` の `File` の失敗のサイレントの既定の答え、`Rename` の失敗が `${Errors}` を立てること、`windows-2025` のランナーが build 26100 であること。NSIS の zip（`nsis-3.12.zip`）の SHA-256（WP-H が SourceForge の表示と照らして記録する）。
-- `CARGO_CFG_DEBUG_ASSERTIONS` がビルド スクリプトに、対象のデバッグの表明の設定として渡ること（I.10）。
 - 昇格したプロセスから `IShellWindows` / `IShellDispatch2` で起動し直す方法が、Windows 11 25H2 で同じ利用者のときに動くこと（M5a では NSIS の `explorer.exe <path>` の方法を確かめた）と、別の管理者のときの COM のアクセスの検査。`EOAC_NO_CUSTOM_MARSHAL | EOAC_DISABLE_AAA` の下で ShellWindows の呼び出しが通ること。
 - `FILE_SHARE_READ` だけのハンドルを開いたまま、そのファイルを `CreateProcessW`（一時停止）で起動できること（I.1）。
 - `ShutdownBlockReasonCreate` を窓のスレッドから呼ぶ必要があること（Microsoft Learn の記述と理解しているが、読み直していない）。0x3FF の H2 に `WM_QUERYENDSESSION` が先に届くこと。

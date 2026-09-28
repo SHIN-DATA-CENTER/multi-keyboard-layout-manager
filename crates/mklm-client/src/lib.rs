@@ -22,6 +22,8 @@
 //! - Windows only: [`launch`] (helper start and handshake), [`journal`] (unelevated journal
 //!   read), [`inventory`] (the keyboards a request plans with), [`run_once`] (the post-reboot
 //!   RunOnce rule, design m2 F.4 / review C17).
+//! - [`update`] (M5b, docs/design/m5b-updater.md H.4): check, download and stage updates, the
+//!   user's update cache, and the machine's update records as the front ends show them.
 //!
 //! `mklm-client` never elevates and never writes the machine's keyboard settings: those writes
 //! happen in `mklm-helper.exe`. Its only write is the per-user RunOnce value ([`run_once`]),
@@ -44,6 +46,7 @@ pub mod preview;
 pub mod run_once;
 pub mod session;
 pub mod startup;
+pub mod update;
 pub mod values;
 
 pub use orchestrator::{LaunchError, LaunchFailure, RecoverySkip};

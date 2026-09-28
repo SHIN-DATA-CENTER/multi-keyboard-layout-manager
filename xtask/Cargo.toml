@@ -1,0 +1,31 @@
+[package]
+name = "xtask"
+description = "Maintainer tool of MKLM (design m5b B.3): key and release checks on public data only"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+# The same verification and fetch code as the product (design m5b B.3).
+mklm-update = { workspace = true, features = ["winhttp"] }
+sha2.workspace = true
+semver.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+
+# Never a normal dependency on the `minisign` crate: xtask opens no secret key and asks for no
+# password; real keys are handled by the official minisign binary alone (design m5b B.1, B.3).
+[dev-dependencies]
+minisign.workspace = true
+
+[lints]
+workspace = true
