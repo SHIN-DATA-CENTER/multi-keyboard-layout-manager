@@ -233,6 +233,9 @@ msgstr "サインイン オプションを開く"
 msgid "Open the taskbar settings"
 msgstr "タスク バーの設定を開く"
 
+msgid "Over Remote Desktop, the remote PC decides what each key does, with a key table fixed when the session starts: a change that waits for a restart reaches Remote Desktop only after the restart and a new sign-in. If the 英数 key does not switch Japanese input there, use Shift+英数 (英数), Ctrl+英数 (ひらがな), Alt+英数 (カタカナ) or Alt+半角/全角 (IME on/off), or assign Ctrl+Space as above."
+msgstr "リモート デスクトップでは、各キーの働きは接続先の PC が決めます。キーの割り当てはセッションが始まったときに決まるため、再起動を待っている変更は、再起動してサインインし直すまでリモート デスクトップには反映されません。そこで英数キーを押しても日本語入力が切り替わらないときは、Shift+英数（英数）、Ctrl+英数（ひらがな）、Alt+英数（カタカナ）、Alt+半角/全角（IME のオン/オフ）を使うか、上のとおり Ctrl+Space を割り当ててください。"
+
 msgid "Per-keyboard layouts work only while the Japanese IME is the active input method. To type English, turn the IME off (Alt+` or the 半角/全角 key) instead of switching to English (US): while English (US) is active, every keyboard types US."
 msgstr "キーボードごとの配列は、日本語 IME を使っている間だけ有効です。英語を打つときは、英語 (US) に切り替えずに IME をオフにしてください（Alt+` か「半角/全角」キー）。英語 (US) に切り替えると、すべてのキーボードが US 配列になります。"
 

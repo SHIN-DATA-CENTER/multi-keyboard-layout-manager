@@ -395,6 +395,13 @@ export component ImeHelpScreen inherits VerticalLayout {
             text: @tr("A US keyboard has no 半角/全角 key: turn the IME on and off with Alt+`. To use Ctrl+Space instead: Microsoft IME settings → Keys and touch customization → turn on \"Assign your preferred function to each key/key combination\" → Ctrl + Space: IME on/off.");
         }
 
+        // Remote Desktop (docs/research/rdp-keyboard.md): the session's key table is fixed when it
+        // starts, so a session that started before a pending restart may treat 英数 as on a US
+        // keyboard. Guidance only (plan 3.10).
+        Body {
+            text: @tr("Over Remote Desktop, the remote PC decides what each key does, with a key table fixed when the session starts: a change that waits for a restart reaches Remote Desktop only after the restart and a new sign-in. If the 英数 key does not switch Japanese input there, use Shift+英数 (英数), Ctrl+英数 (ひらがな), Alt+英数 (カタカナ) or Alt+半角/全角 (IME on/off), or assign Ctrl+Space as above.");
+        }
+
         HorizontalLayout {
             alignment: start;
             Button {
