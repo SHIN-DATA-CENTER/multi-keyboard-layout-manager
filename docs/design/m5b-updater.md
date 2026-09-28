@@ -5,7 +5,7 @@
 | 対象 | マイルストーン M5 の後半（M5b）: アップデーターとリリースの署名（計画 4.2〜4.4、6 章の M5） |
 | 根拠 | 承認済みプラン 2.1〜2.2、4.2〜4.4、5 章（4.x は MSI 向けに書かれている。インストーラーは 2026-09-28 のユーザーの決定で NSIS）。M2 設計（`docs/design/m2-engine.md`）の D.9、E、G.1、I.18。M3 設計（`docs/design/m3-gui.md`）の A.4、B.5、B.17、D、E、F。M5a の実機テスト（`docs/research/m5-install-tests.md`）。main の 37989f8 のコード |
 | ユーザーの決定（M5b の依頼） | 完全な自動更新（ダウンロード、署名の検証、サイレント インストール）。minisign で署名した `latest.json`。**秘密鍵はメンテナーがオフラインで保管し、GitHub の secrets には置かない**。公開鍵を 2 本（通常用とバックアップ用）埋め込み、鍵 ID、失効（`revoked_keys`）、`issued_at`（巻き戻しの防止）、`expires`（凍結の検知）を持つ。確認とダウンロードは自動、インストールは利用者がボタンを押したときだけ。UAC の事前説明あり（未署名のため）。当面バイナリは署名しない。インストーラーは NSIS 3.12（WiX は使わない）。「まず使えるもの」を優先するが、更新の経路は安全に直結するので、検証の正しさは譲らない |
-| 状態 | 設計。**レビュー第 1 回（47 件）を反映した版**（対応は M 章の表）。この段階ではコードを変えない（新しい開発機に Rust ツールチェーン、MSVC Build Tools、NSIS がまだ入っていないため）。骨組み（G.2 の WP-0）は次の段階 |
+| 状態 | 設計。**レビュー第 1 回（47 件）と第 2 回（20 件: 第 1 回の対応の検証 17 件、新しい攻撃の検討 3 件）を反映した版**（対応は M 章の 2 つの表）。この段階ではコードを変えない（新しい開発機に Rust ツールチェーン、MSVC Build Tools、NSIS がまだ入っていないため）。骨組み（G.2 の WP-0）は次の段階 |
 | 読み手 | M5b を分担して実装する人（G 章、H 章）とレビューする人。指摘に使えるよう、すべての節に番号を付けた |
 
 識別子、コード、コマンドは英語のまま書く。「計画」は承認済みプラン、「m2 D.9」「m3 F.5」は M2 / M3 設計の節を指す。H1 と H2 は D 章で定義する helper の 2 つのプロセスを指す。「未確認」と書いたものは L 章にまとめた。レビューの指摘は「（SECURITY-1）」のように ID で引く。
@@ -47,7 +47,7 @@
 | 更新情報（マニフェスト） | `latest.json`（A.2） |
 | 主署名、副署名 | `latest.json.minisig`（必須）と `latest.json.alt.minisig`（鍵の移行の間だけ。A.4、B.7） |
 | 信頼の起点ファイル | `crates/mklm-update/trust/anchors.txt`。そのビルドが信頼する公開鍵と、失効させた鍵 ID の一覧（B.2）。`xtask` は過去のタグのこのファイルを `git show` で読む |
-| 移行の窓 | `TRANSITION_WINDOW_DAYS`（400 日）。公開から 400 日以内のリリースの利用者が、新しい署名を受け付けられるようにしておく期間（B.3 の取り残しの検査） |
+| 移行の窓 | `TRANSITION_WINDOW_DAYS`（400 日）。ある版が「最新」でなくなってから（= 次の安定版が公開されてから）400 日の間は、その版の利用者が新しい署名を受け付けられるようにしておく。対象の版の正確な決め方は B.3 の「窓の中の版」（FIX-VERIFICATION-2。レビュー前は各版の公開日から数えていたので、長く最新だった版の利用者を取り残しえた） |
 | 信頼できる時刻 | `https://api.github.com` の応答の `Date`。`issued_at` はこれで決める（B.3） |
 | H1 | 利用者が［今すぐ更新］を押し、UAC で起動した `%ProgramFiles%\SHIN DATA CENTER\MKLM\mklm-helper.exe`。更新情報の検証と、インストーラーの受け取り（staging）を行う |
 | H2 | H1 が `Updates\<run-id>\mklm-update-runner.exe` にコピーして起動した helper（`--run-update <run-id>`）。インストーラーを実行する。名前を変えるのは、プロセスの名前で MKLM を探す道具やインストーラーの変更に巻き込まれないため（RELIABILITY-12） |
@@ -232,17 +232,23 @@
 
 - 本番の URL は `Endpoints::production()` が返す固定の文字列だけ。**実行時に URL を変える手段（環境変数、引数、設定ファイル）は、リリース ビルドには存在しない。**
 - 本番以外の経路は、すべて `#[cfg(all(debug_assertions, mklm_update_dev))]` の中に置く。
-  - ループバックの規則 `UrlPolicy::loopback()`、`Endpoints::loopback(base)`（`http://127.0.0.1:<port>` だけ）、`mklm_win::net` の平文 HTTP（接続先が `127.0.0.1` のときだけ）、`HttpSession::open_direct`、`WinHttpTransport::new_without_proxy`。
+  - ループバックの規則 `UrlPolicy::loopback()`、`Endpoints::loopback(base)`（`http://127.0.0.1:<port>` だけ）、`mklm_win::net` の平文 HTTP（接続先が `127.0.0.1` のとき、または名前付きのプロキシのセッションで `.invalid` の名前のときだけ）、`HttpSession::open_direct`、`HttpSession::open_named_proxy` と `AutologonLevel`（F.3 のプロキシの認証の試験）、`WinHttpTransport::new_without_proxy`。
   - GUI と CLI の `--update-endpoint=http://127.0.0.1:<port>`（F.6）。リリース ビルドにはこの引数を解釈するコードがなく、ほかの未知の引数と同じくログに書いて無視する。
   - 開発用の鍵: ビルド時の環境変数 `MKLM_UPDATE_DEV_PUBKEY`（`option_env!`）の公開鍵を、`TrustAnchors::for_this_build()` が「開発用の鍵」として足す。開発用の鍵は `mklm-dev-latest-json v1` の署名だけを通し、失効も巻き戻しの記録も動かさない（A.4、B.2）。
   - 目印: `mklm_update::dev` に `#[used] static DEV_MARKER: [u8; 26] = *b"MKLM-UPDATE-DEV-OVERRIDES!";`。release.yml は 6 つの exe（x64 と ARM64 の 3 つずつ）のバイト列にこの文字列がないことを確かめる。実行しないので、x64 のランナーで ARM64 の exe も調べられる。
+  - **目印が必ずリンクされるようにする**（FIX-VERIFICATION-3）: rlib の非公開のモジュールの `#[used]` の静的な値が、リンカーの `/OPT:REF` を越えて exe に残るとは言い切れない。そこで、3 つの exe がすべて通る開発用の経路 `TrustAnchors::for_this_build()` の開発用の分岐（`dev::extra_key()`）が、`std::hint::black_box(&DEV_MARKER)` で目印を実際に参照する。GUI と CLI は `mklm_client::update::env::environment` から、helper は H1 と H2 と `RecordTrust` の処理からこの関数を呼ぶ。
+  - **陽性の対照**（FIX-VERIFICATION-3）: 目印の検査は「ないこと」を確かめるだけなので、目印が開発用のビルドにも残らない状態では、何も守らないまま常に通る。そこで、開発用の cfg で作った 3 つの exe に目印が**あること**を、次の 2 か所で確かめ、なければ失敗させる。(1) ci.yml の F.3 のステップ（同じ `RUSTFLAGS` と `CARGO_TARGET_DIR` で `cargo build -p mklm -p mklm-cli -p mklm-helper --locked` もして、3 つの exe を調べる）。(2) `build-installer.ps1 -Profile dev`（リハーサルのインストーラーに入れる 3 つの exe）。検査の関数（`installer/find-marker.ps1`。バイト列の中の完全一致）は release.yml の「ないこと」の検査と同じものを使う。
 - `mklm_update_dev` は Cargo の feature ではなく cfg にする。feature はワークスペースのビルドで統合されるので、どこかのクレートが有効にするとリリースにも入りうる。cfg は `RUSTFLAGS` で明示したときだけ立つ。立てるのは F.3 の ci.yml の 1 ステップ（別の `CARGO_TARGET_DIR`）と、F.6 のリハーサルのビルド（`build-installer.ps1 -Profile dev`）だけ。
   - ルートの `Cargo.toml` の `[workspace.lints.rust]` に `unexpected_cfgs = { level = "warn", check-cfg = ['cfg(mklm_update_dev)'] }` を足す（綴りの誤りを `clippy -D warnings` で検出する）。
 - `debug_assertions` も併せて求める理由: 誤ってリリースのプロファイルで cfg を立てても、`[profile.release] debug-assertions = false`（WP-0 が明示する）なら入らない。二重の条件にする。
 - **守り**（release.yml。G.6）
-  1. ビルドの前: 環境変数 `RUSTFLAGS`、`CARGO_ENCODED_RUSTFLAGS`、`CARGO_BUILD_RUSTFLAGS`、`MKLM_UPDATE_DEV_PUBKEY` と、`CARGO_PROFILE_` で始まるものが 1 つでもあれば失敗。`.cargo/config.toml` に `[alias]` 以外の表（`[build]`、`[target…]`、`[profile…]`）か `rustflags` があれば失敗。
-  2. ビルドの後: 3 つの exe の `VersionInfo.IsDebug` が false。6 つの exe に目印の文字列がない。
-- 各 exe の `build.rs` は、`VS_FF_DEBUG` を `PROFILE` ではなく `CARGO_CFG_DEBUG_ASSERTIONS` の有無から決める（Cargo のドキュメントは `PROFILE` を使わないよう勧めている。`CARGO_CFG_<cfg>` は「ビルドするパッケージの cfg」を表す。デバッグの表明の設定がそのまま反映されるかは未確認で、WP-0 が `CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true` のビルドで確かめる。反映されなくても、目印の検査が本当の守りになる）。
+  1. ビルドの前（`installer/check-build-env.ps1`。FIX-VERIFICATION-3 で広げた）:
+     - 次の環境変数が 1 つでもあれば失敗: `RUSTFLAGS`、`CARGO_ENCODED_RUSTFLAGS`、`CARGO_BUILD_RUSTFLAGS`、`MKLM_UPDATE_DEV_PUBKEY`、`RUSTC`、`RUSTC_WRAPPER`、`RUSTC_WORKSPACE_WRAPPER`、`CARGO_BUILD_RUSTC`、`CARGO_BUILD_RUSTC_WRAPPER`、`CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`。名前が `CARGO_PROFILE_` で始まるもの、`CARGO_TARGET_` で始まり `_RUSTFLAGS` で終わるもの（`CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS` など）も失敗。ラッパーや別の `rustc` は、フラグを足す別の入口になるため。
+     - リポジトリの `.cargo/config.toml` に `[alias]` 以外の表（`[build]`、`[target…]`、`[profile…]`）か `rustflags` があれば失敗。
+     - Cargo が読むほかの設定ファイルがあれば失敗: `%CARGO_HOME%\config.toml` と `%CARGO_HOME%\config`（`CARGO_HOME` がなければ `%USERPROFILE%\.cargo`）、作業ツリーの**親のフォルダー**のそれぞれの `.cargo\config.toml` と `.cargo\config`（Cargo は今のフォルダーから上へすべてを読み、合わせる）。
+     - ワークフローのコマンドに `--config` を書かない（レビューで確かめる。G.6）。
+  2. ビルドの後: 3 つの exe の `VersionInfo.IsDebug` が false。6 つの exe に目印の文字列がない。この「ないこと」の検査が意味を持つのは、上の陽性の対照（ci.yml と `-Profile dev` で「あること」）が通っているときだけ。
+- 各 exe の `build.rs` は、`VS_FF_DEBUG` を `PROFILE` ではなく `CARGO_CFG_DEBUG_ASSERTIONS` の有無から決める（Cargo のドキュメントは `PROFILE` を使わないよう勧めている。`CARGO_CFG_<cfg>` は「ビルドするパッケージの cfg」を表す。デバッグの表明の設定がそのまま反映されるかは未確認で、WP-0 が `CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true` のビルドで確かめる）。守りは 3 つを重ねる: ビルドの前の環境の検査、`IsDebug`、陽性の対照つきの目印の検査。どれか 1 つが漏れても、ほかが止める。
 - `xtask` は開発用の鍵を読まない: 本番のコマンドはすべて `TrustAnchors::release()`（信頼の起点ファイルだけ。ビルドのプロファイルによらない）を使い、`cfg!(mklm_update_dev)` のビルドなら何もせずに失敗する。リハーサルのコマンド（`--dev`）は、開発用の公開鍵をファイルで明示的に受け取る（B.3）。
 - テストは `TrustAnchors::from_keys` だけを使う（開発者の環境変数でテストの結果が変わらないように）。
 - 前例: helper にはすでに、デバッグ ビルドだけの `MKLM_DEBUG_PAUSE`（m2 H.2 の R5）がある。
@@ -297,12 +303,14 @@ revoked 1111222233334444
    | ID が指す鍵 | 署名した鍵が通常用 | 署名した鍵がバックアップ用 |
    |---|---|---|
    | 署名した鍵そのもの | `IllegalRevocation`（更新情報ごと拒否） | 同左 |
-   | 埋め込みのバックアップ用の鍵 | `IllegalRevocation` | （署名した鍵そのもの。上の行） |
+   | 埋め込みのバックアップ用の鍵 | **無視する（記録しない。更新情報は受け付ける）** | （署名した鍵そのもの。上の行） |
    | 埋め込みの、ほかの通常用の鍵 | 記録する | 記録する |
    | すでにビルドで失効している ID | 何もしない | 何もしない |
    | 埋め込みにない ID | **無視する（記録しない）** | 同左 |
+   - レビュー第 1 回の後は「通常用がバックアップ用を失効 → `IllegalRevocation`」だったが、無視に改めた（FIX-VERIFICATION-1）。`prepare-release` は失効を引き継ぐ（B.3 の手順 9）ので、B1 を `revoked` にした版の後の更新情報はすべて `revoked_keys` に B1 を持つ。拒否にすると、B1 を埋め込んだ古い版がそれ以降の通常用の鍵の署名をすべて拒み、バックアップ用の鍵を替えただけで全員が取り残された（B.7 の 3、4 行目）。無視しても守りは弱まらない: 漏れた通常用の鍵を持つ攻撃者は、失効の行を省けば同じ更新情報を作れるので、拒否は攻撃を何も止めていなかった。記録しないので、規則 4 はそのまま成り立つ。
+   - `IllegalRevocation` が残るのは「署名した鍵そのもの」を失効させる更新情報だけ（作る側の誤り。`prepare-release` の手順 10 が署名の前に見つける）。
 3. 記録した失効は取り消せない。
-4. バックアップ用の鍵は、更新情報では失効させられない。失効させるのは新しい版の信頼の起点ファイル（`revoked` の行）だけ。
+4. バックアップ用の鍵は、更新情報では失効させられない（通常用の鍵の署名では無視され、バックアップ用の鍵の署名では自分自身の失効になる）。失効させるのは新しい版の信頼の起点ファイル（`revoked` の行）だけ。
    - 理由: 通常用の鍵はリリースのたびに使うので、漏れる機会が多い。漏れた通常用の鍵で「バックアップ用を失効」と書いた更新情報を作れば、復旧の道を断てる。これを許さない。
    - 裏返しとして、**バックアップ用の鍵が漏れることは、通常用の鍵が漏れることと同じかそれ以上に重い**（SECURITY-4 の (d)）。攻撃者は GitHub への書き込みと合わせて、悪意のある更新情報に署名でき、古いクライアントに通常用の鍵を失効させることもできる。バックアップ用の鍵はほとんど使わず、別の場所に保管する（B.6）。起きたときの手順は B.7。
 5. （レビュー前の規則 5「埋め込みにない ID の失効も記録する」は**やめた**。）漏れた通常用の鍵で、まだ公開前の後継の鍵（P2、B2）の ID を失効させた更新情報を作られると、後継の鍵を入れた版を入れた後、その鍵の署名がすべて `RevokedKey` になり、手で入れ直す以外に抜けられなくなるため。新しい版が加える鍵は、その版の信頼の起点ファイルが守る。
@@ -329,15 +337,15 @@ revoked 1111222233334444
 
 | コマンド | 動作 | ネットワーク |
 |---|---|---|
-| `check-keys` | 信頼の起点ファイルが解析でき、通常用 1 本とバックアップ用 1 本で、表記の ID が公開鍵の ID と一致し、互いに違い、`revoked` に入っておらず、**過去のタグの同じ ID が別の公開鍵を指していない**こと（鍵 ID の使い回しの検出）。release.yml が呼ぶ | なし |
+| `check-keys` | 信頼の起点ファイルが解析でき、通常用 1 本とバックアップ用 1 本で、表記の ID が公開鍵の ID と一致し、互いに違い、`revoked` に入っておらず、**過去のタグの同じ ID が別の公開鍵を指していない**こと（鍵 ID の使い回しの検出）、**過去のタグで `revoked` にした ID を埋め込んでいない**こと。release.yml が呼ぶ。過去のタグは `git tag -l "v*"` と `git show <tag>:<ANCHORS_REPO_PATH>` で読む。**読めないときは飛ばさずに失敗する**: リポジトリが浅い（`git rev-parse --is-shallow-repository` が true）、`v*` のタグが 1 つもない、またはファイルを持つ最初のタグより後のタグにファイルがない（FIX-VERIFICATION-15）。ファイルを持つ最初のタグより前のタグ（v0.1.0 など）は、更新に対応していない版として飛ばす | なし |
 | `pubkey-line --pub <file> --role primary\|backup` | 公式の `minisign -G` が書いた `.pub` を読み、信頼の起点ファイルに貼る 1 行（`primary <ID> <base64>`）と指紋を表示する。公開鍵だけを扱う | なし |
 | `verify-signer --zip <minisign の zip> --sig <zip.minisig>` | 公式の `minisign` の配布物を作者の公開鍵（B.1。定数）で確かめ、zip と中の `minisign.exe` の SHA-256 を表示する（メンテナーが記録する） | なし |
 | `prepare-release …` | 下の手順。署名する前のすべての確認と、`latest.json` と trusted comment の作成 | あり |
 | `publish --tag vX.Y.Z --dir <dir>` | 下の手順。署名の検証、アップロード、公開、公開後の確認 | あり |
-| `verify --remote [--installers] [--min-days-left N]`、`verify --dir <dir>` | 本番の取得の経路（`WinHttpTransport`、本番の URL の規則、tag の取り出し、副署名の規則）で公開中の更新情報を取り、信頼の起点ファイルの鍵と空の記録で検証する。`--installers` なら 2 つのインストーラーもダウンロードして大きさと SHA-256 を確かめる（SECURITY-1 の (6)）。期限までの日数が N 未満、`issued_at` が信頼できる時刻より 1 日以上先なら失敗。`--dir` は手元のファイルを検証する | `--remote` はあり |
+| `verify --remote [--installers] [--min-days-left N] [--newest-published]`、`verify --dir <dir>` | 本番の取得の経路（`WinHttpTransport`、本番の URL の規則、tag の取り出し、副署名の規則）で公開中の更新情報を取り、信頼の起点ファイルの鍵と空の記録で検証する。`--installers` なら 2 つのインストーラーもダウンロードして大きさと SHA-256 を確かめる（SECURITY-1 の (6)）。期限までの日数が N 未満、`issued_at` が信頼できる時刻より 1 日以上先なら失敗。`--newest-published` は、配られている版が公開済みの最も新しい安定版より古ければ失敗（G.6 の見張り。RED-TEAM-1）。`--dir` は手元のファイルを検証する | `--remote` はあり |
 | `fetch-smoke` | 本番の経路で `releases/latest/download/SHA256SUMS` を取り、リダイレクトの各段が本番の規則を通ること、tag が取り出せること、TLS、本文が `SHA256SUMS` として読めることを確かめる（v0.1.0 にもある。OPS-UX-TEST-8） | あり |
-| `key-drill start --role backup --out <dir>`、`key-drill check --dir <dir> --role backup` | 鍵の点検（B.6）。`start` は乱数の nonce のファイルと、公式の `minisign` のコマンド（trusted comment `mklm-key-drill v1 nonce=<hex>`）を書く。`check` は、その署名が最新のリリースのタグと、移行の窓の中のすべてのリリースのタグの信頼の起点ファイルのバックアップ用の鍵で通ることと、nonce の一致を確かめ、鍵 ID を表示する。何も書かない（OPS-UX-TEST-13） | `check` はタグの一覧のため `git` だけ |
-| `prepare-release --dev …`、`serve-releases --dir <dir> [--port N]` | デバッグ ビルドのリハーサル専用（F.6）。`--dev` は GitHub、来歴の証明、取り残しの検査を行わず、開発用の接頭辞（A.4）で作る。開発用の公開鍵は `--dev-pub <file>` で明示する。`--only-arch x64` のときは、もう一方のアーキテクチャのアセットを「大きさ 1、SHA-256 は 64 個の 0」で埋める（`--dev` なしでは使えない。OPS-UX-TEST-9） | なし |
+| `key-drill start --role backup --out <dir>`、`key-drill check --dir <dir> --role backup` | 鍵の点検（B.6）。`start` は乱数の nonce のファイル（`<out>\nonce.bin`、32 バイト）と、公式の `minisign` のコマンド（`<out>\SIGN-OFFLINE.txt`。署名は `<out>\nonce.bin.minisig`、trusted comment は固定の `mklm-key-drill v1`。署名が新しい乱数のファイルにかかるので、nonce を trusted comment に写す必要はない）を書く。`check` は、その署名が「窓の中の版」（下の定義。今の時刻で数える）のすべてのタグの信頼の起点ファイルのバックアップ用の鍵で、`start` が作った `nonce.bin` の署名として通ることと、trusted comment が `mklm-key-drill v1` であることを確かめ、鍵 ID を表示する。何も書かない（OPS-UX-TEST-13） | `check` はリリースの公開日のため `gh release list`、ファイルのため `git` |
+| `prepare-release --dev …`、`serve-releases --dir <dir> [--port N]` | デバッグ ビルドのリハーサル専用（F.6）。文法と出力は下の「`prepare-release --dev` の文法」 | なし |
 
 **`prepare-release --tag vX.Y.Z --commit <40 桁の SHA> --main-key-id <ID> [--alt-key-id <ID>] [--expires-days N] [--revoke <ID>]... [--min-from-version X.Y.Z] [--allow-strand <tag>,...] [--published-misdated] --out <dir>` の手順**（SECURITY-1、SECURITY-4、SECURITY-12、RELIABILITY-6、OPS-UX-TEST-1）
 
@@ -351,16 +359,44 @@ revoked 1111222233334444
 8. **公開中の更新情報**: 本番の経路で `latest.json` と署名を取り、**直前のリリースのタグ**の信頼の起点ファイルで検証する（鍵を移行した後でも、公開中のものは古い鍵で署名されているため）。
    - `issued_at` が公開中のもの以下なら拒否。公開中のものが信頼できる時刻より未来の日付なら、`--published-misdated` を付けたときだけ続ける（B.7 の「日付の誤った更新情報」。クライアントは記録を受け取った時刻で抑えているので、正しい日付の次の版を受け付ける）。
    - 公開中の更新情報がない（404）のは、信頼の起点ファイルを持つ過去のタグがないとき（最初の更新対応版 v0.2.0）だけ許す。
-9. **失効の引き継ぎ**: `revoked_keys` = このタグの信頼の起点ファイルの `revoked` ∪ 公開中の更新情報の `revoked_keys` ∪ `--revoke`。`--revoke` が B.2 の規則に反すれば拒否（下の 10 の各版の信頼の起点で判断する）。
-10. **取り残しの検査**: 対象の版 = 直前のリリースと、公開から `TRANSITION_WINDOW_DAYS`（400 日）以内のすべてのリリース（`gh release list`。信頼の起点ファイルのないタグは除く）、それにこのタグ自身。各版の信頼の起点ファイルで、主署名の鍵（`--main-key-id`）か副署名の鍵（`--alt-key-id`）の少なくとも一方が「知っていて、失効していない」こと、`revoked_keys` がその版で `IllegalRevocation` にならないことを確かめ、表にして表示する（「v0.2.0: 主署名 ×（未知の鍵）、副署名 ○」）。受け付けない版があれば拒否。`--allow-strand` に挙げた版だけは、取り残すことを承知したものとして続ける。
+9. **失効の引き継ぎ**: `revoked_keys` = このタグの信頼の起点ファイルの `revoked` ∪ 公開中の更新情報の `revoked_keys` ∪ `--revoke`。`--revoke` が B.2 の規則に反すれば拒否（下の 10 の各版の信頼の起点で判断する）。バックアップ用の鍵の ID が入っても、それを埋め込んだ版は通常用の鍵の署名の中では無視するので（B.2 の規則 2）、古い版を拒ませることはない（FIX-VERIFICATION-1）。
+10. **取り残しの検査**: 対象の版 = 下の「窓の中の版」（信頼の起点ファイルのないタグは除く）と、このタグ自身。各版の信頼の起点ファイルで、C.3 の手順と同じ判断（`xtask::strand::accepts`。`verify_manifest` の鍵の選択と失効の規則だけを、署名の代わりに鍵 ID で行う純粋な関数）を行い、主署名の鍵（`--main-key-id`）か副署名の鍵（`--alt-key-id`）の少なくとも一方で「知っていて、失効しておらず、`revoked_keys` が `IllegalRevocation` にならない」ことを確かめ、表にして表示する（「v0.2.0: 主署名 ×（未知の鍵）、副署名 ○」）。受け付けない版があれば拒否。`--allow-strand` に挙げた版だけは、取り残すことを承知したものとして続ける。
 11. `latest.json` を正準形で `<out>` に書く（`key_ids` = 主署名の鍵、副署名の鍵）。trusted comment（`mklm-latest-json v1 version=<v> issued_at=<t>`）を `<out>\trusted-comment.txt` に書く。
 12. `<out>\SIGN-OFFLINE.txt` に、オフラインで実行する公式の `minisign` のコマンドを、そのまま貼れる形で書く:
     ```
     E:\tools\minisign.exe -S -s E:\mklm-keys\mklm-primary.key -m <out>\latest.json -x <out>\latest.json.minisig -t "<trusted comment>"
     ```
     （副署名があれば、同じ形で `-x <out>\latest.json.alt.minisig` の行も。）
-13. `<out>\prepare.json` に、タグ、コミット、2 つのアセットの SHA-256 と `digest`、`issued_at`、鍵 ID、取り残しの検査の結果を書く（`publish` が照らし直す）。
-14. 要約を表示する: 版、**`issued_at` と有効期限の UTC の日付**（大きく）、主署名と副署名の鍵と役割、失効、2 つのアセットの大きさと SHA-256、取り残しの表。
+13. `<out>\prepare.json` に、タグ、コミット、2 つのアセットの SHA-256 と `digest`、`issued_at`、鍵 ID、窓の中の版の一覧、取り残しの検査の結果を書く（`publish` が照らし直す）。
+14. 要約を表示する: 版、**`issued_at` と有効期限の UTC の日付**（大きく）、主署名と副署名の鍵と役割、失効、2 つのアセットの大きさと SHA-256、取り残しの表（窓の中の各版の後継の公開日と、窓が明ける日を含む）。
+
+**窓の中の版**（`xtask::releases::window_targets(releases, now)`。`prepare-release`、`publish`（`prepare.json` に残した一覧）、`key-drill check` が同じ関数を使う。FIX-VERIFICATION-2）
+
+- 材料: `gh release list --exclude-drafts --json tagName,publishedAt,isPrerelease`（件数の上限を十分に大きく）のうち、タグが安定版の形（`vX.Y.Z`）のもの。**公開後にプレリリースの印を付けたもの（B.5 の「リリースの事故」）も含める**（その間に入れた利用者がいうる）。`-` を含むタグ（本来のプレリリース）は除く。`now` は手順 7 の信頼できる時刻（`key-drill check` では同じく `gh api -i /` の `Date`）。
+- 公開日の順に並べ、各版 R の「後継の公開日」を、R の次に公開された版の `publishedAt` とする。
+- 窓の中の版 = 後継がまだない版（= 今の最新。直前のリリースはここに入る）と、後継の公開日から `TRANSITION_WINDOW_DAYS`（400 日）たっていない版。
+- 理由: 利用者が新しい鍵を覚えるのは、その版が最新である間に確認したときではなく、**後継が出た後に**確認したときである。レビュー前の「各版の公開日から 400 日」では、長く最新だった版（たとえば 1 年）が、後継（鍵の移行の版）の公開から 2 か月で窓から外れ、その 2 か月に確認しなかった利用者が取り残された。
+- 例（`xtask` の単体テスト。F.1）: v0.4.0 を 2027-01-10 に公開。v0.5.0（鍵の移行: 主 B1、副 P2）を 2028-01-10 に公開。2028-03-10 に v0.6.0 を主 P2 だけで準備する。v0.4.0 の後継の公開日は 2028-01-10 で、60 日しかたっていないので窓の中。v0.4.0 は P2 を知らないので、手順 10 は拒否する（副署名に B1 を付ければ通る）。
+
+**`prepare-release --dev` の文法**（F.6 のリハーサル専用。FIX-VERIFICATION-17）
+
+```
+cargo xtask prepare-release --dev --tag vX.Y.Z --dist <dir> --dev-pub <file.pub> --minisign <minisign.exe>
+                            [--only-arch x64|arm64] [--expires-days N] [--issued-at <Unix 秒>] --out <dir>
+```
+
+- `--dist`: `build-installer.ps1 -Profile dev` が書いたフォルダー（`dist-dev\<版>\`）。`MKLM-Setup-<v>-x64.exe` と `MKLM-Setup-<v>-arm64.exe`（`--only-arch` のときはその 1 つ）と `SHA256SUMS` があり、`SHA256SUMS` の行が各ファイルと一致すること。
+- `--dev-pub`: 公式の `minisign -G` が書いた開発用の鍵の `.pub`。その鍵 ID が `key_ids` になる。**鍵 ID が `TrustAnchors::release()`（本番の信頼の起点ファイル）にあれば拒否**（本番の鍵を開発用として使わない）。
+- `--minisign`: `SIGN-OFFLINE.txt` に書く `minisign.exe` のパス（F.6 の準備で、確かめた zip から取り出したもの）。`xtask` はこのファイルを実行しない。
+- `--only-arch`: もう一方のアーキテクチャのアセットを「大きさ 1、SHA-256 は 64 個の 0」で埋める（OPS-UX-TEST-9）。
+- `issued_at`: 手元の時計（GitHub には問い合わせない）。`--issued-at` は巻き戻しのリハーサル用。`expires` は `issued_at` + `--expires-days`（既定 400）。
+- `--out`: `--dist` と同じでもよい（F.6 はそうする）。書くもの: `latest.json`（正準形、`revoked_keys` は空）、`trusted-comment.txt`（`mklm-dev-latest-json v1 version=<v> issued_at=<t>`）、`SIGN-OFFLINE.txt`（下の 1 行）。`prepare.json` は書かない（`publish` は `--dev` の成果物を扱わない）。
+  ```
+  <--minisign> -S -s <--dev-pub と同じフォルダーの、同じ名前の .key> -m <out>\latest.json -x <out>\latest.json.minisig -t "<trusted comment>"
+  ```
+  （`xtask` は `.key` のパスを文字列として書くだけで、開かない。B.3 の「秘密鍵のファイルを開くコードを持たない」は変わらない。）
+- 拒否するもの: `--dev` のない `--dist`、`--dev-pub`、`--minisign`、`--only-arch`、`--issued-at`（本番の文法と混ぜない）。プレリリースのタグ。ファイルの欠け、`SHA256SUMS` の食い違い。
+- `serve-releases --dir <dist-dev のルート> [--port N]`: `127.0.0.1` だけで待ち受け、`<ルート>\<版>\` をタグ `v<版>` として、`/releases/latest/download/<名前>` → 302 → `/releases/download/v<最新>/<名前>` を GitHub と同じ形で返す。「最新」は `latest.json` と `latest.json.minisig` がそろった、最も新しい版のフォルダー。
 
 **`publish --tag vX.Y.Z --dir <dir>` の手順**（OPS-UX-TEST-2）
 
@@ -389,11 +425,17 @@ revoked 1111222233334444
 
 1. `latest.json` と署名は**下書きのうちに**上げる。公開した後では直せない。上げ忘れたまま公開しないよう、公開は `xtask publish` で行う（B.3）。下書きの題は「MKLM vX.Y.Z — UNSIGNED, DO NOT PUBLISH」にし、ブラウザーで誤って公開しにくくする（release.yml。OPS-UX-TEST-2）。
 2. `releases/latest/download` は最新のリリースのファイルしか配らない。同じリリースの `latest.json` を署名し直して `expires` を延ばすことはできないので、延ばすには新しいリリースが要る。
-3. したがって、有効期限の既定は **400 日**（13 か月あまり）にする。年に 1 回以上リリースすれば切れない。依存クレートの更新やセキュリティ修正を兼ねた保守リリースを、年に 1 回の目安にする（期限の長さは J 章の質問 3）。
+3. したがって、有効期限の既定は、今の設計の値では **400 日**（13 か月あまり）にする。年に 1 回以上リリースすれば切れない。依存クレートの更新やセキュリティ修正を兼ねた保守リリースを、年に 1 回の目安にする。期限の長さは J 章の質問 3 で決める。期限は凍結を知らせる唯一の信号なので（下の 4）、レビュー第 2 回の後のおすすめは **180 日**（年に 2 回以上のリリース）に変わった。答えが 180 日なら、`DEFAULT_VALIDITY_DAYS`（H.1）、`prepare-release` の既定（B.3 の手順 7）、この節と B.5 の注の「年に 1 回」、A.2 の例の日付を合わせて変える。
 4. **`expires` は「凍結の検知」のための助言で、インストールの可否には使わない**（C.6）。
    - 期限切れの更新情報が差す版でも、署名が正しく、入っている版より新しいなら、それを入れて状態が悪くなることはない。
    - 期限を門にすると、メンテナーが 1 年あまり動けないだけで、正しい最新版すら自動で入らなくなる。
-   - 古い更新情報の再送（巻き戻し）は `issued_at` の記録で、ダウングレードは版の比較で防ぐ（C.4、C.5）。凍結（新しい版を隠され、古いものを見せ続けられる）は `expires` と、30 日以上の確認の失敗と、巻き戻しの警告で**気付かせる**（E.3。SECURITY-11、OPS-UX-TEST-5）。
+   - 古い更新情報の再送（巻き戻し）は `issued_at` の記録で、ダウングレードは版の比較で防ぐ（C.4、C.5）。
+   - **凍結**（新しい版を隠され、古いが正しく署名された更新情報を見せ続けられる）への備えを、レビュー第 2 回で正直に書き直した（RED-TEAM-1）。現実的な凍結は、GitHub のリポジトリに書ける攻撃者が新しいリリースの「最新」の印を外す（または削除する）か、TLS を検査する社内のプロキシを握った攻撃者が、利用者がすでに持っている版の更新情報を返し続けることで起きる。このとき、確認は毎回**成功**し（`last_success` が進む）、`issued_at` は記録と同じ（巻き戻しにならない）で、画面は「最新です」のままになる。見分ける手がかりは次のとおりで、**30 日の確認の失敗のバナーは凍結には効かない**（それが知らせるのは、つながらない、形式が読めない、など失敗が続くときだけ）。
+     1. `expires`: 凍結を知らせる**唯一の自動の信号**。隠された版に気付くまで、最長で `expires - issued_at`（既定 400 日。J 章の質問 3）かかる。
+     2. 巻き戻しの警告（E.3）: 隠された新しい更新情報を、この PC のどれかの GUI か CLI が一度でも受け取っていた場合だけ（`RecordTrust` で機械の記録にも伝わる）。
+     3. 人の目: 更新のページの「最新です」の行に、受け取った更新情報の公開日を出す（「MKLM は最新です（0.2.0。2026/10/15 の更新情報）」。E.2）。`update --check --json` も `issued_at` を出す（D.14）。
+     4. メンテナーの見張り: `update-canary.yml` が、配られている版がリポジトリの最も新しい安定版のリリースより古ければ失敗する（G.6）。リポジトリを握った攻撃者はワークフローも止められるので、主に事故の検出になる。
+   - 期限とは別の「更新情報が古い」の信号（たとえば 90 日）は採らなかった: 期限をもう 1 つ短く持つのと同じで、メンテナーがその間隔でリリースしなければ全員に誤報が出る。凍結を早く知らせたいなら、期限そのものを短くする（J 章の質問 3 の (b)）。期限は門ではない（この項の初め）ので、短くしたときの代償は、メンテナーがリリースしない間に出る情報の表示だけである。
 5. **期限が切れたときに利用者が見るもの**: 設定の「更新」欄と更新のページに、情報として「更新情報の有効期限（2027/11/19）を過ぎています。新しい版が長く公開されていないか、古い情報が届いています。GitHub のリリース ページで確かめてください。［リリース ページを開く］」と出す。加えて、メイン画面に情報のバナーを 30 日に 1 回だけ出す（E.3。レビュー前は出さなかった。SECURITY-11）。CLI の `update --check` は警告の行を 1 行出す。キーボードの機能には何も影響しない。
 6. 間違った `latest.json` を公開してしまった、または `latest.json` なしで公開してしまった場合は、そのリリースに「プレリリース」の印を付けて「最新」から外す（公開後も変えられる）。直前のリリースが「最新」に戻る。そのあと次の版（X.Y.(Z+1)）を出す（B.5 の「リリースの事故」）。クライアントの側では、ハッシュが違えばダウンロードで止まり、形式が違えば「更新を確認できません」になるだけで、害はない。
 7. 公開の前の確認は道具で行う（B.3 の `prepare-release` と `publish`）。公開の後は、`publish` の確認と、CI の見張り（`update-canary.yml`。G.6。OPS-UX-TEST-3）が確かめる。
@@ -404,8 +446,12 @@ revoked 1111222233334444
 
 **準備（初回だけ）**
 
-- [ ] 公式の `minisign` を用意する: `https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip` とその `.minisig` をダウンロード → `cargo xtask verify-signer --zip … --sig …` → 表示された SHA-256 を `release-signing.ja.md` に記録 → zip の中の `minisign.exe` を、通常用の鍵の USB メモリ（`E:\tools\`）とバックアップ用の媒体の両方に置く。
-- [ ] ネットワークを切る → 通常用の USB メモリ（BitLocker To Go）をつなぐ → `E:\tools\minisign.exe -G -p E:\mklm-keys\mklm-primary.pub -s E:\mklm-keys\mklm-primary.key`（パスワードを 2 回）→ 外す。
+最初の項目（公式の `minisign` の用意と確認）は、F.6 のリハーサルの**前に**行う（リハーサルも同じ道具で署名するため）。2 つ目以降（本物の鍵の生成など）は、F.6 の後片付けが済んでから行う（G.1 の順序。FIX-VERIFICATION-17）。
+
+- [ ] 公式の `minisign` を用意する: `https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip` とその `.minisig` をダウンロード → `cargo xtask verify-signer --zip … --sig …` → 表示された SHA-256 を `release-signing.ja.md` に記録 → 確かめた zip を残しておく（F.6 はここから取り出した `minisign.exe` を使う）。鍵の媒体への `minisign.exe` の配置は、下の鍵の生成のときに行う。
+- [ ] （ここから F.6 の後）確かめた zip の中の `minisign.exe` を、通常用の鍵の USB メモリ（`E:\tools\`）とバックアップ用の媒体の両方に置く。
+- [ ] （J 章の質問 6 が (c) のとき）署名専用の Windows のアカウントを作る: 標準ユーザー、名前は例えば `mklm-sign`。このアカウントでは Rust、git、エディター、ブラウザーの拡張などを一切入れず、実行しない。受け渡しのフォルダー `C:\Users\Public\mklm-sign\` を作り（公開のデータだけを置く）、2 つのアカウントが互いの作ったファイルを読み書きできるよう `icacls C:\Users\Public\mklm-sign /grant "mklm-sign:(OI)(CI)M" "<開発用のアカウント>:(OI)(CI)M"` を実行する（既定の継承だけで足りるかは未確認。L 章）。
+- [ ] ネットワークを切る →（(c) のときは開発用のアカウントからサインアウトし、署名専用のアカウントでサインイン）→ 通常用の USB メモリ（BitLocker To Go）をつなぐ → `E:\tools\minisign.exe -G -p E:\mklm-keys\mklm-primary.pub -s E:\mklm-keys\mklm-primary.key`（パスワードを 2 回）→ 外す。
 - [ ] 同じく、別の媒体でバックアップ用: `F:\tools\minisign.exe -G -p F:\mklm-keys-backup\mklm-backup.pub -s F:\mklm-keys-backup\mklm-backup.key` → 外す。2 つのパスワードは別々の保管場所に置く（B.6）。
 - [ ] 2 つの `.pub`（公開鍵。秘密ではない）を作業用の PC に写し、`cargo xtask pubkey-line --pub … --role primary`、`--role backup` → 表示された 2 行を `crates/mklm-update/trust/anchors.txt` に貼る → `cargo xtask check-keys` → コミット（公開鍵だけ。秘密鍵は決してリポジトリに入れない）。`minisign -G` が表示した鍵 ID と、`pubkey-line` の ID が一致することを目で確かめる（L 章の ID の表記の確認を兼ねる）。
 - [ ] 公開鍵を `docs/install-guide.ja.md` の「ファイルが正しいか確かめる」に載せる。
@@ -420,14 +466,18 @@ revoked 1111222233334444
 3. Actions の「Release」が緑になり、題が「MKLM vX.Y.Z — UNSIGNED, DO NOT PUBLISH」の下書きに、2 つのインストーラーと `SHA256SUMS` が付くのを待つ（来歴の証明も CI が付ける）。
 4. **レビュー**: `git fetch --tags` → `git switch --detach vX.Y.Z` → `git rev-parse HEAD` をメモする（これが `--commit`）。`git diff <直前のタグ>..vX.Y.Z` を読む。特に `.github/`、`installer/`、各 `build.rs`、`Cargo.lock`、`rust-toolchain.toml`、`xtask/`、`crates/mklm-update/trust/`。意図しない変更があれば止める。
 5. （任意）同じコミットを手元でビルドし、インストーラーのハッシュを比べる（再現可能なビルドかは確かめていない。L 章。違っても直ちに異常とは言えないので、比べた結果を記録するだけ）。
-6. `cargo xtask prepare-release --tag vX.Y.Z --commit <SHA> --main-key-id <通常用の ID> --out release-work\vX.Y.Z`。表示された UTC の日付と、取り残しの表を見る。ここで `xtask` がコンパイルされる（**鍵はまだつながない**）。
-7. **ネットワークを切る**（Wi-Fi をオフ、ケーブルを抜く）。
-8. 通常用の USB メモリをつなぐ。`Get-FileHash E:\tools\minisign.exe` が記録した SHA-256 と一致することを確かめる。
-9. `release-work\vX.Y.Z\SIGN-OFFLINE.txt` のコマンドを貼って実行し、`minisign` にパスワードを入れる。
-10. USB メモリを外す。**ネットワークを戻す。**
-11. `cargo xtask publish --tag vX.Y.Z --dir release-work\vX.Y.Z`。署名の検証、アップロード、ファイルの組の確認、公開、公開後の確認（インストーラーのダウンロードを含む）が終わるのを待つ。
+6. `cargo xtask prepare-release --tag vX.Y.Z --commit <SHA> --main-key-id <通常用の ID> --out C:\Users\Public\mklm-sign\vX.Y.Z`（J 章の質問 6 が (a) か (b) なら `--out release-work\vX.Y.Z`）。表示された UTC の日付と、取り残しの表と、2 つのインストーラーの SHA-256 を見る。ここで `xtask` がコンパイルされる（**鍵はまだつながない**）。
+7. **ネットワークを切る**（Wi-Fi をオフ、ケーブルを抜く）。(c) のときは、続けて開発用のアカウントから**サインアウト**し（ユーザーの切り替えではなく。そのアカウントのプロセスを残さないため）、署名専用のアカウントでサインインする。
+8. 通常用の USB メモリをつなぐ。`Get-FileHash E:\tools\minisign.exe` が記録した SHA-256 と一致することを確かめる。（任意）`Get-Content …\latest.json` で版と 2 つの SHA-256 を表示し、手順 6 で見た値と一致することを確かめる。
+9. 署名のコマンドを実行し、`minisign` にパスワードを入れる。(a) か (b) なら `SIGN-OFFLINE.txt` の行を貼る。**(c) では `SIGN-OFFLINE.txt` を貼らない**: 開発用のアカウントが書いたファイルで、侵されていれば別のコマンド（`&` の後ろや 2 行目）を紛れ込ませ、鍵をつないだ署名専用のアカウントで実行させられるため。代わりに `release-signing.ja.md` の固定の形を打ち、版と `issued_at` の 2 つの値だけを、`trusted-comment.txt` をメモ帳で開いて読み写す:
+   ```
+   E:\tools\minisign.exe -S -s E:\mklm-keys\mklm-primary.key -m C:\Users\Public\mklm-sign\vX.Y.Z\latest.json -x C:\Users\Public\mklm-sign\vX.Y.Z\latest.json.minisig -t "mklm-latest-json v1 version=X.Y.Z issued_at=<数字>"
+   ```
+   （副署名があるときは、鍵と `-x` の名前を変えた 2 行目。）値を写し間違えても、`publish` が trusted comment の不一致で公開を止める（B.3）。
+10. USB メモリを外す。(c) のときは署名専用のアカウントからサインアウトし、開発用のアカウントでサインインする。**ネットワークを戻す。**
+11. `cargo xtask publish --tag vX.Y.Z --dir <手順 6 の --out>`。署名の検証、アップロード、ファイルの組の確認、公開、公開後の確認（インストーラーのダウンロードを含む）が終わるのを待つ。
 12. Actions の「Update canary」（公開で動く）が緑であることを確かめる。
-13. `git switch main`。`release-work\` は消してよい（公開のデータだけ）。
+13. `git switch main`。手順 6 の `--out` のフォルダーは消してよい（公開のデータだけ）。
 
 **毎回（gh CLI が使えない場合）**
 
@@ -460,10 +510,15 @@ revoked 1111222233334444
   - 署名の間はネットワークを切る。鍵をつないでいる間は、`minisign.exe` 以外を実行しない。
   - F.6 のデバッグ ビルドの MKLM が入っていないこと、開発用の鍵が残っていないこと（F.6 の後片付け）。
   - Windows と Defender が最新であること。
+- **残る危険**（FIX-VERIFICATION-16）: `xtask` は鍵に触れないが、`cargo xtask prepare-release`（B.5 の手順 6）は、タグの `xtask` と、`Cargo.lock` のすべてのビルド スクリプトと proc-macro を、メンテナーの権限でコンパイルして実行する。ふだんの開発でも毎日同じことが起きる。`Cargo.lock` の差分のレビューは版を見るだけで、コードは読まない。侵された依存のクレートが利用者の権限で常駐するプログラムを仕込めば、数分後につないだ USB メモリの `E:\mklm-keys\*.key` を写し、`minisign` に打ち込むパスワードを記録し、手順 10 でネットワークが戻った後に送り出せる。そうなれば、オフラインの鍵はオンラインの鍵と同じだけ危うい。ネットワークを切るだけでは防げない。安い順の対策:
+  1. **署名専用の Windows のアカウント**（J 章の質問 6 の (c)。おすすめ）: 標準ユーザーで、cargo も git も一度も実行しない。開発用のアカウントが書いたファイルを実行しない、貼らない（B.5 の手順 9 は固定の形のコマンドを打つ）。署名の前に開発用のアカウントから**サインアウト**する（ユーザーの切り替えでは、そのアカウントのプロセスが動き続け、BitLocker To Go で開いた USB メモリ（exFAT / FAT にはアクセス権がない）を読める）。利用者の権限の常駐プログラムは、別のアカウントのサインインの後には動かず、そのアカウントのキー入力も読めない。管理者の権限まで奪われていれば防げない（開発用のアカウントで UAC を承認するのは、MKLM の試験など限られた場面だけにする）。
+  2. 署名専用の PC（(b)）、または毎回きれいな状態から起動する仮想マシンやライブ USB で署名する。
+  3. `prepare-release` を別の PC で実行し、公開のデータ（`latest.json`、`trusted-comment.txt`、`SIGN-OFFLINE.txt`）だけを署名する PC に運ぶ。
+  - 同じ理由で、署名するもの（`latest.json` の中身）の正しさは、それを作った開発用のアカウントを信頼している。B.5 の手順 8 の任意の照合（手順 6 で表示した値との比較）は、受け渡しの間の差し替えを見つけるだけで、`xtask` そのものが侵された場合は、来歴の証明と公開後の `verify --remote --installers` と見張り（G.6）が後から見つける（G.7 の 19）。
 - **点検（年に 1 回、バックアップ用。通常用の鍵を新しくした後にも）**
-  1. `cargo xtask key-drill start --role backup --out drill-2027`（ネットワークはつないだまま、鍵はつながない）。
-  2. ネットワークを切る → バックアップ用の媒体をつなぐ → `minisign.exe` の SHA-256 を確かめる → `drill-2027\SIGN-OFFLINE.txt` のコマンドを実行してパスワードを入れる → 外す → ネットワークを戻す。
-  3. `cargo xtask key-drill check --dir drill-2027 --role backup` → 「最新のリリースと移行の窓の中のリリースが信頼するバックアップ用の鍵（ID …）で署名されています」。
+  1. `cargo xtask key-drill start --role backup --out C:\Users\Public\mklm-sign\drill-2027`（(a) か (b) なら `--out drill-2027`。ネットワークはつないだまま、鍵はつながない）。
+  2. ネットワークを切る →（(c) のときは開発用のアカウントからサインアウトし、署名専用のアカウントでサインイン）→ バックアップ用の媒体をつなぐ → `minisign.exe` の SHA-256 を確かめる → 手順 1 の `SIGN-OFFLINE.txt` のコマンドを実行してパスワードを入れる（(c) では貼らずに、`release-signing.ja.md` の固定の形 `F:\tools\minisign.exe -S -s F:\mklm-keys-backup\mklm-backup.key -m <out>\nonce.bin -x <out>\nonce.bin.minisig -t "mklm-key-drill v1"` を打つ。`<out>` は手順 1 のフォルダー。B.5 の手順 9 と同じ理由）→ 外す →（(c) ではサインアウトして開発用のアカウントへ）→ ネットワークを戻す。
+  3. （開発用のアカウントに戻って）`cargo xtask key-drill check --dir <手順 1 の --out> --role backup` → 「窓の中の版（B.3）がすべて信頼するバックアップ用の鍵（ID …）で署名されています」。
   4. `release-signing.ja.md` の点検の記録に、日付、鍵 ID、結果を 1 行足す。
   - これで確かめられること: 媒体が読める、パスワードを覚えている、**その鍵が出荷したビルドに埋め込んだバックアップ用の鍵そのものである**（古い鍵のファイルを取り違えていない）。レビュー前の「適当なファイルに署名する」では、最後の点を確かめられなかった。
 
@@ -473,15 +528,16 @@ revoked 1111222233334444
 
 | 事態 | 次の版 N の信頼の起点ファイル | N の `latest.json` の署名 | N+1 以降の署名 | 取り残される利用者 | 利用者の側の危険 |
 |---|---|---|---|---|---|
-| 通常用 P1 が漏れた（疑いを含む） | primary P2、backup B1、revoked P1 | 主: B1、副: P2。`revoked_keys` に P1（B1 が P1 を失効させる。B.2 の規則 2） | 主: P2、副: B1。移行の窓（N の公開から 400 日）の間、取り残しの検査が副署名を求めなくなるまで続ける。`revoked_keys` は P1 を引き継ぐ | 移行の窓の間に 1 度も確認しなかった PC（400 日以上オフライン）: 主署名は未知の鍵、副署名はなし → 「署名を確かめられません」→ 手で入れ直す | 失効の告知（N か、それ以降の更新情報）を受け取る前に、攻撃者が P1 の署名と GitHub への書き込みの両方を手に入れていれば、その PC には悪意のある更新を入れられる。受け取った後は P1 の署名を拒む |
+| 通常用 P1 が漏れた（疑いを含む） | primary P2、backup B1、revoked P1 | 主: B1、副: P2。`revoked_keys` に P1（B1 が P1 を失効させる。B.2 の規則 2） | 主: P2、副: B1。移行の窓の間（N より前の最後の版が最新でなくなった日、つまり N の公開の日から 400 日。B.3 の「窓の中の版」）、取り残しの検査が副署名を求めなくなるまで続ける。`revoked_keys` は P1 を引き継ぐ | 移行の窓の間に 1 度も確認しなかった PC（400 日以上オフライン）: 主署名は未知の鍵、副署名はなし → 「署名を確かめられません」→ 手で入れ直す | 失効の告知（N か、それ以降の更新情報）を受け取る前に、攻撃者が P1 の署名と GitHub への書き込みの両方を手に入れていれば、その PC には悪意のある更新を入れられる。受け取った後は P1 の署名を拒む |
 | 通常用 P1 をなくした、パスワードを忘れた（漏れてはいない） | primary P2、backup B1、revoked P1（念のため失効させる。害はない） | 主: B1、副: P2 | 上と同じ | 上と同じ | なし |
-| バックアップ用 B1 が漏れた | primary P1、backup B2、revoked B1 | 主: P1（古い版は P1 を知っている）。B1 は更新情報では失効させられない（B.2 の規則 4） | 主: P1 | なし（ただし下の攻撃を受けた PC は手で入れ直す） | **通常用の漏れと同じかそれ以上**: 攻撃者は GitHub への書き込みと合わせて、古い版に B1 で署名した悪意のある更新を入れられ、P1 を失効させて正しい更新を止めることもできる。N を入れた PC だけが B1 を拒む。README、リリースノート、Issue で早く N を入れるよう知らせる |
-| バックアップ用 B1 をなくした | primary P1、backup B2（B1 は失効させる） | 主: P1 | 主: P1 | なし | なし |
+| バックアップ用 B1 が漏れた | primary P1、backup B2、revoked B1 | 主: P1（古い版は P1 を知っている）。`revoked_keys` には B1 が入る（B.3 の手順 9）が、B1 を埋め込んだ古い版は、通常用の P1 の署名の中のそれを無視して N を受け付ける（B.2 の規則 2。記録もしないので規則 4 のとおり）。B1 を拒むのは N を入れた版から | 主: P1。`revoked_keys` は B1 を引き継ぐ（古い版は無視し、N 以降の版はビルドで失効済み） | なし（ただし下の攻撃を受けた PC は手で入れ直す） | **通常用の漏れと同じかそれ以上**: 攻撃者は GitHub への書き込みと合わせて、古い版に B1 で署名した悪意のある更新を入れられ、P1 を失効させて正しい更新を止めることもできる。N を入れた PC だけが B1 を拒む。README、リリースノート、Issue で早く N を入れるよう知らせる |
+| バックアップ用 B1 をなくした | primary P1、backup B2、revoked B1（念のため） | 主: P1（`revoked_keys` の B1 は、上の行と同じく古い版では無視される） | 主: P1 | なし | なし |
 | 両方が漏れた、または両方をなくした | 新しい P2、B2 | 主: P2（古い版は検証できない） | 主: P2 | **すべての利用者**が手で入れ直す | 漏れた場合は、手で入れ直すまで、攻撃者（鍵と GitHub への書き込みの両方）は古い版に悪意のある更新を入れられる。README、リリースノート、Issue で「手で入れ直してください」 |
 | 日付の誤った（未来の）更新情報を公開した | 変えない | — | 次の版を正しい日付でふつうに出す（`prepare-release --published-misdated`） | なし（クライアントは記録を受け取った時刻で抑えている。B.2） | なし。期限切れの表示が一時的にずれるだけ |
 | `latest.json` なし、または間違ったもので公開した | 変えない | — | B.5 の「リリースの事故」 | 事故の間に確認した PC は、次の確認で戻る | なし（形式か署名で止まる） |
 
-- 通常用の鍵を替えたら、移行の窓の間はバックアップ用の鍵をリリースのたびに使う（副署名）。バックアップ用の鍵が表に出る回数が増えるので、移行の窓が明けたら、バックアップ用の鍵も新しくする（P2 が主署名で、信頼の起点ファイルを「P2、B2、revoked B1」にした版を出す。P2 を知る版は取り残されない）ことを勧める。
+- 通常用の鍵を替えたら、移行の窓の間はバックアップ用の鍵をリリースのたびに使う（副署名）。バックアップ用の鍵が表に出る回数が増えるので、移行の窓が明けたら、バックアップ用の鍵も新しくする（P2 が主署名で、信頼の起点ファイルを「P2、B2、revoked P1、revoked B1」にした版を出す）ことを勧める。P2 を知る版は取り残されない: 「P2、B1、revoked P1」の版は、P2 の署名の中の B1 の失効を無視し（B.2 の規則 2）、P1 の失効はビルドで失効済みとして何もしない。「P2、B2、…」の版は B1 をビルドで失効済みとして扱う。F.1 と `xtask` のテストが、この回転の前後の版で次の版を検証する（FIX-VERIFICATION-1）。
+- レビュー第 1 回の後の版は、通常用の鍵がバックアップ用の鍵を失効させる更新情報を拒否（`IllegalRevocation`）していたため、上の 3、4 行目と回転の後の更新情報を、B1 を埋め込んだすべての版が拒み、この表の「取り残される利用者: なし」と矛盾していた（FIX-VERIFICATION-1）。
 - レビュー前のこの表は、通常用の鍵をなくした場合の利用者の側を「影響なし」としていたが誤りだった（新しい通常用の鍵だけで署名すると、古い版はすべて取り残される）。
 - この表は `docs/maintainer/release-signing.ja.md` にも載せる（WP-U）。
 
@@ -547,7 +603,7 @@ H1 の手順の駆動部（`stage_update`）は、パイプのメッセージを
 7. 更新情報を厳密に解析する（A.3。`ManifestMalformed`）。
 8. `schema == 1`（`UnsupportedSchema`）、`product == "MKLM"`（`WrongProduct`）、`channel == "stable"`（`WrongChannel`）。
 9. `key_ids` が 1〜2 個の、重複のない正しい形の ID で（`ManifestMalformed`）、手順 3 の鍵 ID を含むこと（`SignerNotListed`）。知らない ID が含まれていてもよい（移行の間、新しい鍵の ID が並ぶ）。
-10. `revoked_keys` の各 ID が正しい形で（`ManifestMalformed`）、B.2 の失効の規則 2 の表に反しないこと（`IllegalRevocation`）。記録する失効（埋め込みの、ほかの通常用の鍵）を `VerifiedManifest::revoked` に集める。埋め込みにない ID は無視する。開発用の鍵が署名した更新情報の失効は、すべて無視する。
+10. `revoked_keys` の各 ID が正しい形で（`ManifestMalformed`）、B.2 の失効の規則 2 の表に反しないこと（`IllegalRevocation` は署名した鍵そのものの失効だけ）。記録する失効（埋め込みの、署名した鍵以外の通常用の鍵）を `VerifiedManifest::revoked` に集める。埋め込みにない ID と、通常用の鍵の署名の中の埋め込みのバックアップ用の鍵の ID は無視する（FIX-VERIFICATION-1）。開発用の鍵が署名した更新情報の失効は、すべて無視する。
 11. `version` と `min_from_version` が A.2 の規則に合うこと（`BadVersion`）。tag があれば `version` と一致（`TagMismatch`）。
 12. `issued_at < expires` かつ差が `MAX_VALIDITY_SECS` 以下（`BadTimestamps`）。
 13. 巻き戻し: `issued_at` が `state.rollback_threshold(anchors, 手順 10 の失効)` より小さければ拒否（`Rollback { issued_at, seen }`）。B.2 の「巻き戻しの記録」。
@@ -573,7 +629,7 @@ H1 の手順の駆動部（`stage_update`）は、パイプのメッセージを
 - **機械の記録を進める経路**（SECURITY-5）
   1. H1 が、ステージングを始める前に、送られた更新情報で進める（D.4）。
   2. **`RecordTrust`**: GUI と CLI は、helper のセッション（キーボードの変更を含む、すべてのセッション）の `Welcome` の直後に、利用者のキャッシュの「最後に検証に通った更新情報と、その署名」を送る。送るのは、利用者の記録が機械の記録より進んでいるとき（`TrustState::is_ahead_of`: より大きい最大値か、機械の記録にない失効を持つ）だけ。
-     - helper は `verify_manifest`（`Purpose::Check`、入っている版 = 自分の版、機械の記録、`for_this_build()`）で検証し、通れば、書き込みのロック（最大 2 秒。取れなければ何もしない）の中で機械の記録を読み直して `recorded` を合わせ、書く。返事は `TrustRecorded { changed }` か `TrustNotRecorded(理由)`。
+     - helper（`mklm_ipc::staging::record_trust`。H.2）は、書き込みのロックを最大 2 秒待って取り（取れなければ `TrustNotRecorded(Busy)` で何もしない）、機械の記録を読み直し、`apply_trust_report`（`verify_manifest` の `Purpose::Check`、入っている版 = 自分の版、その機械の記録、`for_this_build()`）で検証して合わせ、変わったときだけ書いてから、ロックを放す。返事は `TrustRecorded { changed }` か `TrustNotRecorded(理由)`。
      - どちらの返事でも、セッションはそのまま続く（キーボードの変更を止めない）。署名されたデータなので、送り手を信用する必要はない。
      - 限界: 機械の記録が進むのは、利用者が helper を起動したときだけ（UAC なしに HKLM に書く方法はない。0.2 の 5）。進んでいない機械で、悪意のある GUI が古い正しい更新情報を H1 に送る攻撃（SECURITY-5 の (a)）は、それまでに誰かのセッションで新しい記録が届いていれば防げ、届いていなければ防げない（G.7）。
 - 機械の記録が壊れていた（JSON として読めない）場合: helper は空の記録として扱い、ログに残す。書けるのは管理者だけで（D.6）、管理者は信頼の外にいないので、ここで更新を止め続けるより、失効はビルドの一覧と次の更新情報に任せる方がよいと判断した。
@@ -590,6 +646,7 @@ H1 の手順の駆動部（`stage_update`）は、パイプのメッセージを
 ### C.6 `expires` の扱い
 
 - 検証は通し、`Freshness::Expired` を返すだけ（B.4 の 4）。
+- 正しく署名された古い更新情報を見せ続けられる凍結を、自動で知らせるのはこの期限だけである（B.4 の 4。RED-TEAM-1）。
 - GUI と CLI は E.3 と E.6 の文で知らせる。helper は拒否しない（ログに残すだけ）。
 - PC の時計が大きくずれていると、期限切れの表示が誤ることがある。インストールの判断には影響しない。
 
@@ -632,7 +689,7 @@ GUI（非昇格）                 H1（昇格、$INSTDIR\mklm-helper.exe）    
                                     Run=ready を見る（最大 120 秒）
                  ◀── Update::HandedOff{run_id, to_version}
  RunOnce（--after-update）を登録
- 案内（5 秒以上）の後に終了           ロックを放して終了                  H1 の終了を待つ
+ 案内（最大 15 秒）の後に終了         ロックを放して終了                  H1 の終了を待つ
                                                                        署名、版、SHA-256 を検証し直す
                                                                        ロック、ジャーナル、インストール先の版、空き容量
                                                                        ほかの MKLM に quit-if-idle、終了を待つ
@@ -675,7 +732,7 @@ GUI（非昇格）                 H1（昇格、$INSTDIR\mklm-helper.exe）    
 | helper → 呼び出し元 | `HelperMessage::Update(UpdateMessage::Refused(UpdateRefusal))` | 断った。何も変えていない。セッションは続く（呼び出し元が `Bye`） |
 
 - `Request` の列挙には足さない。`Request` はエンジンに写す要求の一覧（m2 S5）で、更新はエンジンを使わないため。既存の網羅的な `match`（中継の `plans_first` など）に影響しない。
-- `RecordTrust` は `Welcome` の直後の 1 つ目のメッセージとしてだけ受け付ける（それ以外で届けばプロトコルの誤り）。送るかどうかは呼び出し元が決め、送らないのがふつう。
+- `RecordTrust` は `Welcome` の直後の 1 つ目のメッセージとしてだけ受け付ける（それ以外で届けばプロトコルの誤り。helper の `serve` は `mklm_ipc::staging::CallerOrder` でこれを確かめる。H.2）。送るかどうかは呼び出し元が決め、送らないのがふつう。
 - **Heartbeat**: helper の書き込み専用のスレッドは、`busy` のフラグが立っている間だけ 10 秒ごとに `Event::Heartbeat` を送る（m2 S7。`session.rs` の `write_loop`）。今の `busy` は `CallerMessage::Request` の処理の間だけ立つので、`StageUpdate` の処理の間も立てる（RELIABILITY-5）。H1 が H2 の準備を待つ最大 120 秒の間も、呼び出し元の受信の期限が切れない。呼び出し元は更新のセッションで Heartbeat 以外の `Event` を受け取らない（来たらログに書いて無視）。
 - `StageUpdate` は 1 つのセッションで何度でも送れる（断られた後の再試行）。`InstallerChunk` は `SendInstaller` の後でだけ受け付け、それ以外で届けばプロトコルの誤り（helper は `HelperMessage::Error` を返して切断）。
 - 大きさ: 64 KiB の 16 進は 128 KiB で、フレームの上限 256 KiB に余裕を持って収まる。更新情報（64 KiB 以下）は JSON の文字列にすると引用符などのエスケープで最悪 2 倍（制御文字は更新情報の中にないので 6 倍にはならない）で、これも収まる。
@@ -798,7 +855,7 @@ mklm-update-runner.exe --run-update <run-id>
 17. 終了を最大 `INSTALLER_WAIT`（15 分）待つ。
     - 期限を過ぎたら: `LastResult = Failed(InstallerTimedOut)` を書く（`Run` は `installing` のまま残す。**インストーラーは止めない**。ファイルの置き換えの途中で止めると、必ず半端になるため）。さらに最大 `INSTALLER_WAIT_MAX`（合わせて 60 分）待ち続ける。その間に終われば手順 18 へ進み、`LastResult` を本当の結果で書き直す。
     - 60 分でも終わらなければ: 止める理由を消し、ロックを放し、`Run`（`installing`、`installer` 付き）を残したまま `exit 7`。GUI は起動し直さない（インストーラーがまだ `mklm.exe` を置き換えているかもしれないため）。`installer` が生きている間は、誰が見ても `InProgress`。死んだ後に見た人が、ビルド ID で結果を決める（`interrupted_result`。D.13）。
-18. 止める理由を消す（`ShutdownBlockReasonDestroy`）。`Run.phase = finishing`。インストール先の 3 つの exe のビルド ID を読み（`update_dir::read_install_state`）、`run::decide_outcome` で結果を決める（D.13）。
+18. 止める理由を消す（`ShutdownBlockReasonDestroy`）。`Run.phase = finishing`。インストール先の 3 つの exe のビルド ID を読み（`InstallState::from_build_ids(update_dir::read_build_ids(install_dir))`。環境のトレイトでは `RunnerEnv::read_install_state`）、`run::decide_outcome` で結果を決める（D.13）。
 19. `LastResult` を書き（`gui_relaunch_attempted` は、次の手順で起動を試みるなら true）、`Run` を消し、ロックを放す。
 20. 後片付け（D.11）: 自分の実行のフォルダーのインストーラー、2 つの更新情報、`tmp` を消す。
 21. **最後に** GUI を起動し直す（D.10。17 の 60 分の期限切れを除く）。
@@ -820,21 +877,24 @@ mklm-update-runner.exe --run-update <run-id>
 インストーラーは、`$INSTDIR` の `mklm-helper.exe`、`mklm-cli.exe`、`mklm.exe` のどれかが動いていると拒否する（0.1）。H2 は先に、次の順で終わらせる。
 
 1. **更新を始めた GUI**（`Run.caller`）は、`HandedOff` を受けて自分から終了する（m3 F.5 の A12）。H2 は最大 30 秒待つ（`CallerDidNotExit`）。H1 が `HandedOff` を送る前に落ちた場合も、GUI は `Run` の記録から引き継ぎを知って終了する（E.4。RELIABILITY-5）。
-2. **すべてのセッションの GUI**: `mklm_win::instance::quit_idle_instances($INSTDIR\mklm.exe の NT パス, sessions, 全体 20 秒, 最大 16 本)`（SECURITY-7、RELIABILITY-1、OPS-UX-TEST-4）
-   - まず、実行ファイルが `$INSTDIR\mklm.exe` であるプロセスを `proc_identity::processes_with_images` で探し、そのセッション ID の集合を作る。GUI が 1 つもなければ何もしない。
-   - `\\.\pipe\` を列挙し、名前が `^SHINDATACENTER\.MKLM\.Instance\.([0-9]{1,10})\.(S-1-5-21(-[0-9]{1,10}){4}|S-1-12-1(-[0-9]{1,10}){4})$` に**完全に一致し**、そのセッション ID が上の集合にあるものだけを候補にする（`instance::parse_instance_pipe_name`。ローカルのアカウントとドメインは `S-1-5-21-…`、Microsoft Entra ID のアカウントは `S-1-12-1-…`）。それ以外の名前は**開かない**。`/`、`..`、ASCII 以外の文字を含む名前で、`CreateFileW` の正規化を使ってパイプの外（UNC など）へ誘導される余地をなくす。
-   - 候補は最大 16 本。超えた分はログに書いて送らない（そのセッションの GUI が残れば、3 のプロセスの待ちが決める）。
+2. **すべてのセッションの GUI**: `mklm_win::instance::quit_idle_instances($INSTDIR\mklm.exe の NT パス, 1 本 5 秒, 全体 20 秒, 最大 16 本)`（SECURITY-7、RELIABILITY-1、OPS-UX-TEST-4。パイプの名前の決め方を FIX-VERIFICATION-5 で改めた）
+   - まず、実行ファイルが `$INSTDIR\mklm.exe` であるプロセスを `proc_identity::processes_with_images` で探す（PID、作成時刻、セッション ID）。GUI が 1 つもなければ何もしない。
+   - **パイプの名前は列挙せず、計算する**: `proc_identity::process_users()`（`WTSEnumerateProcessesW`。各プロセスの `SessionId` と、プライマリ トークンの利用者の SID `pUserSid`。Microsoft Learn の `WTS_PROCESS_INFOW`）から、上の各 GUI の PID の行を取り、セッション ID が `processes_with_images` の値と一致することを確かめ、`instance::instance_pipe_path(session, sid)`（既存。GUI が自分のパイプを作るのと同じ関数）で名前を作る。`pUserSid` がない、または 2 つのセッション ID が合わない GUI は、ログに書いて飛ばす（そのセッションの GUI が残れば、3 のプロセスの待ちが決める）。
+   - 作った名前を、念のため `instance::parse_instance_pipe_name` の厳密な正規表現（`^SHINDATACENTER\.MKLM\.Instance\.([0-9]{1,10})\.(S-1-5-21(-[0-9]{1,10}){4}|S-1-12-1(-[0-9]{1,10}){4})$`。ローカルのアカウントとドメインは `S-1-5-21-…`、Microsoft Entra ID のアカウントは `S-1-12-1-…`）にも通す。合わない名前は**開かない**。`\\.\pipe\` の列挙はしないので、ほかの利用者が作った偽の名前のパイプで予算を使わされることはない（レビュー第 1 回の後の版は列挙していたので、正しい形の偽の名前を 16 本以上作られると、本物の GUI のパイプまで届かなかった）。
+   - 本物の GUI のパイプは `FILE_FLAG_FIRST_PIPE_INSTANCE` と最大 1 インスタンスで作られている（`instance.rs`）ので、GUI が動いている間、同じ名前のインスタンスをほかの誰かが足すことはできない。GUI より先に同じ名前を作られた場合は、GUI 自身が多重起動の仕組みを作れない（m3 の範囲）。その名前のサーバーは下の確認で `NotOurs` になり、GUI は 3 の待ちで `ProgramsStillRunning` になる（G.7 の 16）。
+   - 候補は最大 16 本（GUI のプロセスの数。利用者とセッションごとに 1 つなので、ふつうは数本）。超えた分はログに書いて送らない。
    - 各候補を `pipe::open_client`（`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`、重なった I/O）で開く。1 本の期限は 5 秒、全体の期限は 20 秒（`INSTANCES_TOTAL`）。
-   - サーバーの確認: `GetNamedPipeServerProcessId` → `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` で**ハンドルを取り、送り終えるまで持つ**（PID の再利用を防ぐ）。そのハンドルで実行ファイルの NT パスが `$INSTDIR\mklm.exe` であり、`GetNamedPipeServerSessionId` がパイプの名前のセッションと一致することを確かめる。ほかの利用者のプロセスを開けない場合（未確認。I.12）は、作成時刻付きの識別（`process_identity`）を送る前と返事の後で比べ、同じプロセスであることを確かめる。合わなければ何も送らない（`NotOurs`）。
+   - サーバーの確認: `GetNamedPipeServerProcessId` がその GUI の PID であること。`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` で**ハンドルを取り、送り終えるまで持つ**（PID の再利用を防ぐ）。そのハンドルで実行ファイルの NT パスが `$INSTDIR\mklm.exe` であり、`GetNamedPipeServerSessionId` がパイプの名前のセッションと一致することを確かめる。ほかの利用者のプロセスを開けない場合（未確認。I.12）は、作成時刻付きの識別（`process_identity`）を送る前と返事の後で比べ、`processes_with_images` で見た GUI と同じプロセスであることを確かめる。合わなければ何も送らない（`NotOurs`）。
    - 送るのは **`quit-if-idle\n`**（13 バイト。`MAX_INSTANCE_MESSAGE` の 16 以内）だけ。`quit` は使わない。
      - `ok`: その GUI は何もしていない状態で、終了する。H2 は 3 で終わりを待つ。
-     - `busy`: その GUI は helper のセッション中か、利用者への問いかけ（終了の確認、再接続待ち、回復の確認）を出している。**GUI は何も変えていない**（取り消しも、後で終了する印も立てない）。H2 は更新をやめる（`NotInstalled(InstanceBusy)`）。
+     - `busy`: その GUI は helper のセッション中か、利用者への問いかけ（終了の確認、再接続待ち、回復の確認）を出している。**GUI は何も変えていない**（取り消しも、後で終了する印も立てない）。H2 は更新をやめる（`NotInstalled(InstanceBusy { sessions })`。`busy` を返した GUI のセッション ID を残し、管理者が誰の MKLM かを調べられるようにする。RED-TEAM-3）。その利用者が自分の GUI に手を加えれば、いつでも `busy` を返させられる（G.7 の 16）。
      - 返事がない（期限切れ、パイプのスレッドが止まっている）: 「終了しなかった」とみなし、3 に任せる。
    - GUI の側の `quit-if-idle` の決まりは E.4.1。GUI は終了する前に、自分の HKCU の RunOnce に `--after-update` を登録する（昇格していなければ。RELIABILITY-7）。
    - **ほかの利用者の GUI について正直に書くと**（RELIABILITY-7、OPS-UX-TEST-21）: ユーザーの切り替えで別の利用者の画面に戻るのはサインインではなく再接続なので、Run キーも RunOnce も動かない。終わらせた GUI は、**その利用者が MKLM を開き直すか、サインアウトしてサインインし直すまで戻らない**（その間、その利用者のトレイのアイコンと通知が消える）。次のサインインでは、RunOnce で結果と「別のユーザーの更新のために MKLM が終了していました」が出る（E.5）。H2 はほかの利用者のセッションに GUI を起動しない（その利用者のトークンを持たない。タスク スケジューラーで起動し直す案は採らなかった。I.11、J 章の質問 2）。
-3. **すべてのプロセス**: 実行ファイルが `$INSTDIR` の `mklm.exe`、`mklm-cli.exe`、`mklm-helper.exe` のどれかであるプロセスを `proc_identity::processes_with_images` で探し、なくなるまで待つ。GUI と CLI は 30 秒、helper は最大 75 秒（何もしていない helper は 60 秒で終わる。m2 E.7）。残れば `NotInstalled(ProgramsStillRunning { programs })`。
-4. **ファイルが使われていないこと**（SECURITY-10）: 3 つの exe のそれぞれを `DELETE` の権利と、読み取り、書き込み、削除のすべての共有で開けること（`update_dir::files_in_use`）。ほかのプロセスが削除の共有なしで開いていれば開けない（NSIS の名前の変更も同じ理由で失敗する）。ウイルス対策ソフトの一時的な読み取りを見込み、最大 10 秒、250 ms ごとに試す。開けなければ `NotInstalled(FilesInUse { programs })`。
-   - 標準ユーザーは Program Files のファイルを読めるので、**ほかの利用者がファイルを開いたままにして、更新（と手でのインストール）を遅らせることはできる**。防ぎようがないので、文で原因を示す（E.6）。半端に入ることはない（D.9.2）。
+3. **すべてのプロセス**: 実行ファイルが `$INSTDIR` の `mklm.exe`、`mklm-cli.exe`、`mklm-helper.exe` のどれかであるプロセスを `proc_identity::processes_with_images` で探し、なくなるまで待つ。GUI と CLI は 30 秒、helper は最大 75 秒（何もしていない helper は 60 秒で終わる。m2 E.7）。残れば `NotInstalled(ProgramsStillRunning { programs, holders })`（`holders` は残ったプロセスの PID、セッション ID、実行ファイルの名前。RED-TEAM-3）。
+4. **ファイルが使われていないこと**（SECURITY-10）: 3 つの exe のそれぞれを `DELETE` の権利と、読み取り、書き込み、削除のすべての共有で開けること（`update_dir::files_in_use`）。ほかのプロセスが削除の共有なしで開いていれば開けない（NSIS の名前の変更も同じ理由で失敗する）。ウイルス対策ソフトの一時的な読み取りを見込み、最大 10 秒、250 ms ごとに試す。開けなければ、開いているプロセスを Restart Manager（`RmStartSession`、`RmRegisterResources`、`RmGetList`。`update_dir::file_holders`）で調べ、`NotInstalled(FilesInUse { programs, holders })` にする（調べられなければ `holders` は空。未確認。I.16）。
+   - 標準ユーザーは Program Files のファイルを読めるので、**ほかの利用者は、ファイルを削除の共有なしで開いたままにするだけで、すべての更新（と手でのインストール。NSIS の終了コード 26）を止め続けられる**。そのプロセスが動いている限り、何度試しても入らず、自動で抜ける方法はない（RED-TEAM-3。レビュー第 1 回の後の版は「遅らせる」と書いていたが、実際には期限のない妨害である）。半端に入ることはない（D.9.2）。
+   - 管理者ができること: 結果の「技術的な詳細」と `update --status` に出る `holders`（PID、セッション ID、実行ファイルの名前）で相手を見つけ、タスク マネージャーの「ユーザー」タブ（セッションと利用者の対応）でそのプロセスを止めてから、もう一度［今すぐ更新］を押す。PC を再起動した直後、ほかの利用者がサインインする前に更新する方法もある（`docs/recovery.md` に書く。WP-H）。`holders` には利用者の SID を入れない（`LastResult` は Users が読めるため。セッション ID と名前は標準ユーザーもほかの手段で見られる）。
 5. インストーラーの `CloseMklm` が、念のためにもう一度確かめる（0.1）。ここで拒否された場合は D.9.1 の終了コードで分かる。
 
 ### D.9 NSIS
@@ -855,11 +915,15 @@ mklm-update-runner.exe --run-update <run-id>
 | 22 | `MKLM_EXIT_HELPER_RUNNING` | `$INSTDIR\mklm-helper.exe` が動いている（書き込みの共有なしで開かれている） | いいえ |
 | 23 | `MKLM_EXIT_CLI_RUNNING` | `$INSTDIR\mklm-cli.exe` が同上 | いいえ |
 | 24 | `MKLM_EXIT_GUI_RUNNING` | `--quit` の後も `mklm.exe` が同上（`/S` では「キャンセル」が既定） | いいえ |
-| 26 | `MKLM_EXIT_FILES_IN_USE` | exe の名前の変更に失敗した（ほかのプロセスが削除の共有なしで開いている）。入れ替えた分を元に戻してから終わる（D.9.2。SECURITY-10） | いいえ |
-| 27 | `MKLM_EXIT_FILE_WRITE` | 新しい exe（`.new`）を書けなかった（ディスクの空き、ウイルス対策ソフト）。`.new` を消してから終わる（RELIABILITY-2） | いいえ |
+| 26 | `MKLM_EXIT_FILES_IN_USE` | exe の名前の変更に失敗した（ほかのプロセスが削除の共有なしで開いている）。入れ替えた分を元に戻し、MessageBox（`$(FILES_IN_USE)`、`/SD IDOK`）を出してから終わる（D.9.2。SECURITY-10） | いいえ |
+| 27 | `MKLM_EXIT_FILE_WRITE` | 新しい exe（`.new`）を書けなかった（ディスクの空き、ウイルス対策ソフト）。`.new` を消し、MessageBox（`$(FILE_WRITE_FAILED)`、`/SD IDOK`）を出してから終わる（RELIABILITY-2） | いいえ |
 | 3010 | — | （アンインストーラーだけ）アンインストールの復元で PC の再起動が必要（既存） | — |
 
-- 25（`MKLM_EXIT_BAD_INSTALL_DIR`）はインストーラーの表から外した（RELIABILITY-10）。これを出すのはアンインストーラーの `un.onInit` だけで、インストーラーの `.onInit` はインストール先を固定するので出ない。アンインストーラーは自分を `%TEMP%` に写して起動し直す（`Main.c` の `~nsu%X.tmp`）ので、その終了コードは `_?=` を付けて直接実行したときにしか呼び出し元に届かない。`un.onInit` には `SetErrorLevel 25` を付けるが、`mklm_update::run::nsis_exit` には持たない（`InstallerExit::Other(25)`）。
+- 対話のインストール（利用者が手で実行、D.13 の［インストーラーを実行］）で黙って消えないよう、20〜24 と同じく 26 と 27 にも理由の MessageBox を出す（FIX-VERIFICATION-10）。`/SD IDOK` なので `/S` では止まらない。順序は MessageBox → `SetErrorLevel` → `Quit` で、D.9.3 の規則 1〜3 を満たす。文（`LangString`、日英）:
+  - `FILES_IN_USE`: 「別のプログラムが MKLM のファイルを開いているため、ファイルを置き換えられませんでした。何も変更していません。しばらくしてから、もう一度実行してください。」
+  - `FILE_WRITE_FAILED`: 「新しいファイルを書き込めませんでした。ディスクの空きとウイルス対策ソフトを確かめてください。何も変更していません。」
+- 今の `mklm.nsi`（37989f8）の拒否（`CloseMklm` の `Quit`、`.onInit` の `Abort`、`un.onInit` の `Quit`）には `SetErrorLevel` がなく、終了コードは 3010 のほかに決めていない。上の表の 20〜27 は**この設計で決める**もの（FIX-VERIFICATION-10。レビュー第 1 回の後の L 章は「25 は `un.onInit` だけ」を今のコードの事実として書いていたが、誤りだった）。
+- 25（`MKLM_EXIT_BAD_INSTALL_DIR`）はインストーラーの表から外した（RELIABILITY-10）。この設計では、これを出すのはアンインストーラーの `un.onInit` だけにする。インストーラーの `.onInit` はインストール先を固定するので出ない。アンインストーラーは自分を `%TEMP%` に写して起動し直す（`Main.c` の `~nsu%X.tmp`）ので、その終了コードは `_?=` を付けて直接実行したときにしか呼び出し元に届かない。`un.onInit` には `SetErrorLevel 25` を付けるが、`mklm_update::run::nsis_exit` には持たない（`InstallerExit::Other(25)`）。
 - 同じ値を `mklm_update::run::nsis_exit` の定数に持つ。WP-H のテスト（`crates/mklm-update/tests/nsis_exit_codes.rs`）が `mklm.nsi` を読んで、`!define MKLM_EXIT_*` の値が定数と一致することを確かめる（25 はアンインストーラー専用の印を付けて除く）。
 - `InstallerExit::leaves_old_files()`: 20〜24、26、27（何も置き換えていないことが NSIS の側で保証されるもの）。
 
@@ -890,6 +954,7 @@ Section "MKLM" SecMain
   AllowSkipFiles off
   ${If} ${Errors}
     !insertmacro DELETE_NEW
+    MessageBox MB_OK|MB_ICONSTOP "$(FILE_WRITE_FAILED)" /SD IDOK
     SetErrorLevel ${MKLM_EXIT_FILE_WRITE}
     Quit
   ${EndIf}
@@ -908,7 +973,7 @@ Section "MKLM" SecMain
 SectionEnd
 ```
 
-- `SwapExecutables`: `mklm-helper.exe`、`mklm-cli.exe`、`mklm.exe` の順に、(a) 元があれば `Rename <名前> <名前>.old`、(b) `Rename <名前>.new <名前>`。どこかで失敗したら、それまでに入れ替えた分を逆の順に戻し（新しい方を消し、`.old` を元の名前に戻す）、残りの `.new` を消して `SetErrorLevel ${MKLM_EXIT_FILES_IN_USE}` → `Quit`。
+- `SwapExecutables`: `mklm-helper.exe`、`mklm-cli.exe`、`mklm.exe` の順に、(a) 元があれば `Rename <名前> <名前>.old`、(b) `Rename <名前>.new <名前>`。どこかで失敗したら、それまでに入れ替えた分を逆の順に戻し（新しい方を消し、`.old` を元の名前に戻す）、残りの `.new` を消して `MessageBox MB_OK|MB_ICONSTOP "$(FILES_IN_USE)" /SD IDOK` → `SetErrorLevel ${MKLM_EXIT_FILES_IN_USE}` → `Quit`。
 - 名前の変更は、ほかのプロセスがそのファイルを削除の共有なしで開いていると失敗する。H2 は NSIS の前に同じ条件を確かめている（D.8 の 4）ので、ここで失敗するのは、その後に開かれた場合だけ。
 - `AllowSkipFiles on` は `.new` の展開の間だけにする: ここでは「失敗したら印を立てて続ける」の方が、後で `${Errors}` を見て 27 で終われるので都合がよい（置き換える前なので、飛ばしても害がない）。もし煙の試験で、サイレントの既定の答えが「中止」だと分かっても、終了コードが 2 になるだけで、何も置き換えていないことは変わらない。
 - 半端になりうるのは、(b) の 3 回の名前の変更と、(a) の 3 回の間だけ（ミリ秒の単位）。そこで電源が落ちても、`.old` と `.new` が残り、D.13 の検出と、次のインストールの `DELETE_LEFTOVERS` で直る。
@@ -929,9 +994,10 @@ SectionEnd
 
 1. **直前のリリースからの上書き**: 公開中の最新のリリースの x64 のインストーラーを `gh release download` で取り、`/S` → 0。`HKLM\SOFTWARE\SHIN DATA CENTER` を書き出しておく。新しいインストーラーを `/S` → 0。3 つの exe のビルド ID がそろって新しい版であること。`HKLM\SOFTWARE\SHIN DATA CENTER` が変わっていないこと。
 2. もう一度 `/S` → 0（同じ版の上書き）。この 1 回は D.9.4 の最小の環境ブロックで実行する。
-3. PowerShell で `$INSTDIR\mklm-cli.exe` を共有なしで開いたまま `/S` → 23。3 つのビルド ID が変わっていないこと。
-4. `$INSTDIR\mklm.exe` を `FileShare.ReadWrite`（削除の共有なし）で開いたまま `/S` → 26。3 つのビルド ID が変わっておらず、`.new` と `.old` が残っていないこと（2 段階の置き換えの戻し）。
-5. `$INSTDIR\mklm.exe` を `FileShare.Read` で開いたまま `/S` → 24（追記で開けないので「動いている」とみなし、`--quit` の後も同じ。今の決まりの記録）。
+   開いたままにするハンドルの権利と共有は、NSIS の `IsLocked` と合わせて正確に決める（FIX-VERIFICATION-10）。`IsLocked` の `FileOpen … a` は NSIS の `myOpenFile` を通り、`CreateFile` を**書き込みを含む権利と、共有 `FILE_SHARE_READ` だけ**で開く（共有は NSIS の `util.c` の `myOpenFile` で確認。`a` が読み書きか書き込みだけかはコンパイラーの対応表で、未確認だが、どちらでも下の結論は同じ）。したがって、先に開いておくハンドルの権利が読み取りだけなら `IsLocked` は通り、書き込みを含めば通らない。
+3. PowerShell で `[IO.File]::Open("$INSTDIR\mklm-cli.exe", 'Open', 'Read', 'None')` のまま `/S` → 23（共有なしなので `IsLocked` が開けない）。3 つのビルド ID が変わっていないこと。
+4. `[IO.File]::Open("$INSTDIR\mklm.exe", 'Open', 'Read', 'ReadWrite')` のまま `/S` → 26。権利は読み取りだけ（`IsLocked` の書き込みの開き方と両立するので「動いていない」とみなされ、置き換えまで進む）、共有は読み取りと書き込みで削除なし（名前の変更が失敗する）。3 つのビルド ID が変わっておらず、`.new` と `.old` が残っていないこと（2 段階の置き換えの戻し）。権利を `ReadWrite` にすると `IsLocked` が「動いている」と判断して 24 になり、戻しの経路を試さなくなるので、そうしない。
+5. `[IO.File]::Open("$INSTDIR\mklm.exe", 'Open', 'Read', 'Read')` のまま `/S` → 24（共有が読み取りだけなので `IsLocked` の書き込みの開き方が失敗し、「動いている」とみなす。`--quit` の後も同じ。今の決まりの記録）。
 6. ARM64 のインストーラーを `/S` → 21。
 7. アンインストール: `Start-Process -Wait "$INSTDIR\uninstall.exe" -ArgumentList '/S', "_?=$INSTDIR"`（`_?=` を付けると、自分を写して起動し直さず、終わるまで待て、終了コードも届く）→ 0。3 つの exe が消えていること（`_?=` のときは `uninstall.exe` 自身とフォルダーが残るので、試験が消す）。
 
@@ -1004,7 +1070,7 @@ SectionEnd
 
 ### D.13 途中で止まったインストールの検出と、次の GUI の表示
 
-**インストールの状態**（`run::InstallState`。読むのは `mklm_win::update_dir::read_install_state(install_dir)` の 1 つの関数で、H2 と、GUI と CLI の `read_status` が同じものを使う。OPS-UX-TEST-12）: インストール先の `mklm.exe`、`mklm-cli.exe`、`mklm-helper.exe` の VERSIONINFO のビルド ID（`elevation::file_build_id`。非昇格でも読める）。3 つがあってすべて同じなら、その版（ビルド ID の `+` の前）が「そろった版」（`consistent_version`）。1 つでも欠けるか違えば「そろっていない」。`.new` と `.old` は見ない。
+**インストールの状態**（`run::InstallState`。読むのは `mklm_win::update_dir::read_build_ids(install_dir)` と、その結果を変換する `InstallState::from_build_ids` の 1 組で、H2（`RunnerEnv::read_install_state` の実装）、H1（`StagerEnv::read_install_state`）、GUI と CLI の `read_status` が同じものを使う。OPS-UX-TEST-12。レビュー第 1 回の後の版がここで書いていた `update_dir::read_install_state` という関数はない。`mklm-win` は `mklm-update` の型を返せないため。FIX-VERIFICATION-11）: インストール先の `mklm.exe`、`mklm-cli.exe`、`mklm-helper.exe` の VERSIONINFO のビルド ID（`elevation::file_build_id`。非昇格でも読める）。3 つがあってすべて同じなら、その版（ビルド ID の `+` の前）が「そろった版」（`consistent_version`）。1 つでも欠けるか違えば「そろっていない」。`.new` と `.old` は見ない。
 
 **結果の判定**（`run::decide_outcome`。H2 が使う。中断の場合は `interrupted_result` が同じ規則を使う）
 
@@ -1020,7 +1086,9 @@ SectionEnd
 **GUI の起動時**（どの起動方法でも。`--tray`、`--after-update`、RunOnce、手で。OPS-UX-TEST-6、RELIABILITY-11、OPS-UX-TEST-15）
 
 1. `update_store` を読み、`classify_run` で `Run` を分類する。
-   - `InProgress` で段階が `ready` 以降（`runner` か `installer` が生きている）: 更新の途中なので、**窓を出さず、インスタンスにもならずに、すぐ終了する**（ログに残す。RunOnce の値は消さない）。窓を出すと `mklm.exe` がロックされ、インストーラーを止めてしまうため。数十秒後に H2 が GUI を起動し直す。`staging` / `staged` の間（まだ GUI が動いているはずの段階）は、ふつうに起動する。
+   - `InProgress` で段階が `ready` 以降（`runner` か `installer` が生きている）: 更新の途中なので、**窓を出さず、インスタンスにもならずに、すぐ終了する**（ログに残す。RunOnce の値は消さない）。窓を出すと `mklm.exe` がロックされ、インストーラーを止めてしまうため。`staging` / `staged` の間（まだ GUI が動いているはずの段階）は、ふつうに起動する。
+     - この GUI のセッションが `Run.caller_session` と同じなら、数十秒後に H2 が GUI を起動し直す。
+     - **違う（または `caller_session` がない）なら**（別の利用者が、更新の間にサインインした、または MKLM を開いた。FIX-VERIFICATION-9）: H2 はこのセッションに GUI を起動し直さない（D.10 はその利用者のトークンを持たない）。そこで終了する前に、昇格していなければ自分の HKCU の RunOnce に `--after-update` を登録し、`settings.update.closed_by_update` に今の時刻を書く（保存を待ってから終了する）。**このセッションの MKLM は、その利用者が MKLM を開き直すか、次にサインインするまで動かない**（トレイのアイコンも通知もない）。次の起動で、結果と「別のユーザーの更新のために、MKLM はいったん終了していました。」が出る（3 と E.5。起動を見送った場合も同じ文を使う）。
    - `Interrupted`: 下の「表示の条件」を満たせば、中断の結果を表示する。表示した `Run.run_id` を `settings.update.result_seen` に書く（利用者ごとに 1 回だけ。レビュー前は起動のたびに出ていた）。
 2. `LastResult` は、次をすべて満たすときだけ 1 回表示し、`result_seen` に `run_id` を書く。満たさなければ、表示せずに `result_seen` に書く。
    - `run_id` が `result_seen` と違う。
@@ -1029,9 +1097,12 @@ SectionEnd
 3. 文の選び方:
    - 更新を始めたのがこの利用者（`settings.update.started_run == run_id`。引き継ぎのときに GUI が書く）なら、E.6 の文。
    - ほかの利用者の更新なら、中立の文: 「MKLM は 0.2.1 に更新されました（別のユーザーが更新しました）。」。失敗や中断は、ほかの利用者には出さない（その利用者の操作ではなく、次の手順もないため）。ただし「そろっていない」は 4 で全員に出る。
-   - この利用者の GUI が `quit-if-idle` で終わっていた（`settings.update.closed_by_update` の時刻の後に終わった更新）なら、「別のユーザーの更新のために、MKLM はいったん終了していました。」を添える（RELIABILITY-7）。
+   - この利用者の GUI が `quit-if-idle` で終わっていた、または更新の途中のため起動を見送った（1。どちらも `settings.update.closed_by_update` の時刻の後に終わった更新）なら、「別のユーザーの更新のために、MKLM はいったん終了していました。」を添える（RELIABILITY-7）。
 4. **今の**インストールの状態がそろっていなければ、`LastResult` によらず「MKLM のファイルの版がそろっていません」を出す（m3 の helper のビルド ID の確認より先に、原因を示すため）。
-   - 利用者のキャッシュに、キャッシュの検証済みの更新情報の版のインストーラーがあれば、［インストーラーを実行］を出す: 押すと、キャッシュの更新情報を検証し直し、インストーラーの大きさと SHA-256 を照らしてから、`ShellExecuteExW`（`runas`）で**対話の**インストーラーを起動する（利用者がボタンを押したときの UAC。NSIS の画面が出る。RELIABILITY-2）。これは利用者がダウンロードしたインストーラーを手で実行するのと同じ経路で、それ以上の保証はない（キャッシュは利用者が書ける場所）。
+   - 利用者のキャッシュに、キャッシュの更新情報の版のインストーラーがあれば、［インストーラーを実行］を出す: 押すと、キャッシュの更新情報を検証し直し、インストーラーの大きさと SHA-256 を照らしてから、`ShellExecuteExW`（`runas`）で**対話の**インストーラーを起動する（利用者がボタンを押したときの UAC。NSIS の画面が出る。RELIABILITY-2）。
+   - **この照合は、壊れたファイル（ダウンロードの途中の失敗、ディスクの誤り）を見つけるためだけのもので、安全の保証ではない**（RED-TEAM-2）。キャッシュはサインインしている利用者が書ける場所で、照合は同じ利用者の非昇格の GUI が行い、昇格したインストーラーは照合の後に同じパスを開き直す。その間に利用者（またはその利用者の権限のマルウェア）はファイルを差し替えられる。GUI そのものも同じ利用者のプロセスなので、ハンドルを開いたままにしても、その利用者に対しては何も守れない。したがってこの経路は、利用者が自分でダウンロードしたインストーラーを手で実行するのと同じ信頼しか持たない。
+     - 画面と読み上げの文で「検証済み」「確かめた」と言わない（ボタンは「インストーラーを実行（管理者の許可が要ります）」だけ）。
+     - 標準ユーザーの画面で別の管理者が資格情報を入れる場合（UAC の資格情報の画面）、その管理者から見ると、この経路の UAC は署名のない任意のプログラムと見分けがつかない（場所は利用者のフォルダーになる）。`docs/recovery.md` と `install-guide.ja.md` に「ほかの利用者の PC で管理者として承認するときは、リリース ページから自分でダウンロードし、`SHA256SUMS` と署名で確かめたインストーラーを使う」と書く（WP-H、WP-U）。標準ユーザーはこの経路がなくても、同じ見た目の UAC を管理者に出せるので、MKLM が新しい昇格の道を開くわけではない。
    - ［リリース ページを開く］も出す。
 5. 表示していない結果がなければ、`unregister_after_update` を呼ぶ（手で開いた場合も、次のサインインで意味のない窓が出ないように）。`--after-update` で起動していて表示するものがなければ、`--tray` と同じに振る舞う。
 
@@ -1049,13 +1120,15 @@ SectionEnd
 
 | コマンド | 動作 | 終了コード |
 |---|---|---|
-| `mklm-cli update --check [--json]` | GUI と同じ確認（`mklm_client::update::check`。副署名の規則を含む）。利用者の記録を更新する。ダウンロードもインストールもしない。「MKLM 0.2.1 is available (installed 0.2.0). Open MKLM to install it.」または「MKLM is up to date (0.2.0).」。期限切れなら警告を 1 行（終了コードは変えない）。巻き戻しを無視したときも警告を 1 行 | 0: 最新。20: 更新あり。21: 手で更新が必要。22: このビルドでは更新を使えない（`NotConfigured`）。1: 確認できなかった。2: 使い方の誤り |
+| `mklm-cli update --check [--json]` | GUI と同じ確認（`mklm_client::update::check`。副署名の規則を含む）。利用者の記録を更新する。ダウンロードもインストールもしない。「MKLM 0.2.1 is available (installed 0.2.0). Open MKLM to install it.」または「MKLM is up to date (0.2.0).」。期限切れなら警告を 1 行（終了コードは変えない）。巻き戻しを無視したときも警告を 1 行 | 0: 最新。20: 更新あり。21: 手で更新が必要。22: このビルドでは更新を使えない（`NotConfigured`）。**6: 更新の途中（しばらくしてから再試行）**。1: 確認できなかった。2: 使い方の誤り |
 | `mklm-cli update --status [--json]` | 機械の記録（`LastResult`、進行中の `Run`、インストールの状態）と、利用者の記録（最後の確認、最後に成功した確認、最後の失敗の種類、無視した巻き戻し）を表示する | 0 / 1 / 2 |
 
 - 終了コードを分けた（OPS-UX-TEST-20）: レビュー前は「最新」「更新あり」「手で更新が必要」がどれも 0 で、スクリプトは `--json` を解析するしかなかった。レビューの提案の 10〜12 ではなく 20〜22 にしたのは、書き込みのコマンドの 10（`AWAITING_CONFIRM`）と同じ数が別の意味になるのを避けるため。`NotInstalledCopy`（開発用のビルド）は確認だけできるので、結果に応じて 0 / 20 / 21。
-- **更新中の早い終了**（RELIABILITY-2 の 4）: `update --status` 以外のすべてのコマンドは、起動の直後に `classify_run` を見て、`ready` 以降の `InProgress` なら「MKLM is being updated. Try again in a minute.」を出して終了コード 6（`BLOCKED`）で終わる。GUI と同じく、更新の途中で `mklm-cli.exe` を動かし続けないため。
+- **更新中の早い終了**（RELIABILITY-2 の 4。対象を FIX-VERIFICATION-14 で絞った）: 書き込みのコマンド（`set`、`migrate`、`revert`、`undo`、`resolve`、`restore`、`recover`、`keep`、`reboot`、`post-reboot`）と `update --check` は、起動の直後に `classify_run` を見て、`ready` 以降の `InProgress` なら「MKLM is being updated. Try again in a minute.」を出して終了コード 6（`BLOCKED`。書き込みのコマンドの既存の意味「ほかのものが道をふさいでいる」と同じ）で終わる。GUI と同じく、更新の途中で `mklm-cli.exe` を長く動かし続けないため（`update --check` はネットワークの待ちで 1 分を超えうる。H2 は CLI の終了を 30 秒しか待たない）。
+  - 読み取りだけのコマンド（`list`、`status`、`global status`、`journal`、`update --status`）は早い終了の対象にしない。1 秒ほどで終わり、H2 の待ち（D.8 の 3）の間に終わるので、更新を止めない。`main.rs` の約束（読み取りのコマンドは 0 / 1 / 2）はそのまま保つ。監視のスクリプトが更新の間に見慣れない 6 を受け取ることはない。
+  - `update --check` の 6 は、上の表と `docs/install-guide.ja.md` の終了コードの表に載せる（WP-U）。
 - **CLI はインストールしない**（J 章の質問 4）。理由: `mklm-cli.exe` 自身が `$INSTDIR` にあり、インストールの前に終わらなければならない。結果を表示できるのは次に起動した GUI か `update --status` になり、CLI の利点（その場で結果と終了コードが分かる）がない。GUI の引き継ぎと起動し直しをもう 1 組作る価値は小さい。スクリプトや管理ツールからは、インストーラーを直接 `/S` で実行すればよい（終了コードは D.9.1。`docs/install-guide.ja.md` に、この表と並べて書く）。
-- 出力は英語（M1、M2 と同じ）。`--json` の形は `{"installed":"0.2.0","status":"update-available"|"up-to-date"|"manual-required","offered":"0.2.1","freshness":"fresh"|"expired","expires":1826582400,"release_page":"https://…","rollback_ignored":null|{"issued_at":…,"seen":…}}`（`--check`）。
+- 出力は英語（M1、M2 と同じ）。`--json` の形は `{"installed":"0.2.0","status":"update-available"|"up-to-date"|"manual-required","offered":"0.2.1","freshness":"fresh"|"expired","issued_at":1792022400,"expires":1826582400,"release_page":"https://…","rollback_ignored":null|{"issued_at":…,"seen":…}}`（`--check`）。
 
 ### D.15 helper の終了コード（m2 E.8 への追加）
 
@@ -1087,7 +1160,7 @@ H1 は、H2 が `ready` の前に終了したとき、その終了コードを `
 | `skipped_version` | なし | ［この版をスキップ］の版 |
 | `result_seen` | なし | 表示済み（または表示しないと決めた）結果の `run_id`。`LastResult` と中断の両方（D.13） |
 | `started_run` | なし | この利用者の GUI が引き継いだ更新の `run_id`（`HandedOff` のときに書く）。結果の文を選ぶため（D.13） |
-| `closed_by_update` | なし | この GUI が `quit-if-idle` で終わった時刻（Unix 秒）。次の起動で「別のユーザーの更新のために終了していました」を添えるため（E.5） |
+| `closed_by_update` | なし | この GUI が `quit-if-idle` で終わった、または別のセッションの更新の途中のため起動を見送った（D.13 の 1）時刻（Unix 秒）。次の起動で「別のユーザーの更新のために終了していました」を添えるため（E.5） |
 | `stale_notice_at` | なし | 「長く確認できていない」「期限切れ」のバナーを最後に出した時刻（30 日に 1 回にするため。E.3） |
 | `rollback_notice_for` | なし | 巻き戻しの警告を出した `issued_at`（同じものに 2 度出さないため） |
 
@@ -1135,7 +1208,7 @@ H1 は、H2 が `ready` の前に終了したとき、その終了コードを `
 |---|---|---|
 | 使えない（`NotConfigured`、`NotInstalledCopy`、`Unknown`） | 理由（E.6） | ［今すぐ確認］（`NotInstalledCopy` のときだけ。確認だけ） |
 | 確認していない / 確認中 | 「確認しています…」 | ［キャンセル］ |
-| 最新 | 「MKLM は最新です（0.2.0）。最後の確認: 2026/10/16 09:12」 | ［今すぐ確認］ |
+| 最新 | 「MKLM は最新です（0.2.0。2026/10/15 の更新情報）。最後の確認: 2026/10/16 09:12」。更新情報の日付は `issued_at` を現地の日付にしたもの（凍結に人が気付く手がかり。B.4 の 4。RED-TEAM-1） | ［今すぐ確認］ |
 | 更新あり・スキップした版（未ダウンロード） | 「0.2.1 はスキップしました。」、新しい版、公開日、［リリースノートを開く］ | ［ダウンロード］［今すぐ確認］（OPS-UX-TEST-16） |
 | 更新あり・ダウンロード中 | 新しい版、公開日、［リリースノートを開く］、進捗（MB と %） | ［キャンセル］ |
 | 更新あり・準備完了 | 下の図 | ［この版をスキップ］［後で］［今すぐ更新（次に Windows の確認が出ます）］ |
@@ -1172,9 +1245,11 @@ H1 は、H2 が `ready` の前に終了したとき、その終了コードを `
 ### E.3 バナーとトレイ
 
 - **更新あり**（情報）: 「MKLM の新しい版（0.2.1）を使えます。［詳細…］」。準備完了（ダウンロード済み）のときだけ出す。スキップした版には出さない。
-- **長く確認できていない、または期限切れ**（情報。SECURITY-11、OPS-UX-TEST-5）: `auto_check` がオンで、最後に成功した確認が 30 日以上前（成功がなければ、最初の失敗から 30 日以上）か、キャッシュの更新情報が期限切れのとき。`stale_notice_at` から 30 日以上たっていれば 1 回出し、`stale_notice_at` を書く。
+- **長く確認できていない、または期限切れ**（情報。SECURITY-11、OPS-UX-TEST-5）: `auto_check` がオンで、更新が使える（`Availability::Available`）か確認だけできる（`NotInstalledCopy`）とき、最後に成功した確認が 30 日以上前（成功がなければ、記録した最初の失敗から 30 日以上）か、キャッシュの更新情報が期限切れのとき。`stale_notice_at` から 30 日以上たっていれば 1 回出し、`stale_notice_at` を書く。
+  - 最後の失敗の種類は `classify`（H.4）が決め、`ClientState.last_failure` に残す。取り消し（`Cancelled`）と `NotConfigured` は失敗として記録しない（30 日の数え始めにならない。FIX-VERIFICATION-12）。
   - 最後の失敗が一時的なもの: 「30 日以上、MKLM の更新を確認できていません。インターネットやプロキシの設定を確かめてください。［詳細…］」
-  - 最後の失敗が構造的なもの（E.6 の「構造」）か、期限切れ: 「MKLM の自動更新が使えなくなっている可能性があります。GitHub のリリース ページで新しい版を確かめてください。［リリース ページを開く］［詳細…］」
+  - 最後の失敗が構造的なもの（E.6 の「構造」。`Rollback` を含む）か、期限切れ: 「MKLM の自動更新が使えなくなっている可能性があります。GitHub のリリース ページで新しい版を確かめてください。［リリース ページを開く］［詳細…］」
+  - この知らせは、確認が**失敗し続ける**ときのもので、正しく署名された古い更新情報を見せ続けられる凍結（確認は成功する）には効かない。凍結を知らせるのは期限切れの方だけ（B.4 の 4。RED-TEAM-1）。
 - **古い更新情報を無視した**（警告。SECURITY-11、RELIABILITY-6）: 自動の確認でも、`Rollback` が起きたら、その `issued_at` について 1 回だけ出す（`rollback_notice_for`）: 「以前に確かめたものより古い更新情報が届いたため、使いませんでした。［詳細…］」。改ざんか、記録の破損か、新しい版の取り下げのしるしなので、黙って捨てない。更新のページと `update --status` にも「最後の確認: 古い更新情報を無視しました（受け取ったもの 2026/10/20、記録 2026/11/02）」と出す。ログには両方の値を書く。
 - トレイ: ツールチップに「MKLM — 新しい版（0.2.1）があります」。メニューに「MKLM を更新…」（準備完了のときだけ有効。更新のページを開く）。長く確認できていないことと巻き戻しは、トレイには出さない（バナーと設定で足りる）。
 - Windows の通知（トースト）は使わない（m3 B.16 の方針）。
@@ -1189,19 +1264,19 @@ H1 は、H2 が `ready` の前に終了したとき、その終了コードを `
 - `HandedOff` を受けたら（またはそう扱ったら）:
   1. `settings.update.started_run` に `run_id` を書く（保存は下の 3 の終了の経路で待つ）。
   2. RunOnce（`--after-update`）を登録する（昇格した GUI は登録しない。D.10）。
-  3. 引き継ぎのオーバーレイを **5 秒以上**（`HANDOFF_OVERLAY_MIN`）出し、［OK］で早めに閉じられるようにする（OPS-UX-TEST-15。読み上げは assertive で、5 秒あれば読み終わる。H2 は呼び出し元の終了を 30 秒まで待つ）:
+  3. 引き継ぎのオーバーレイを出す（OPS-UX-TEST-15。長さを FIX-VERIFICATION-13 で決め直した）。［OK］はいつでも押せ、押せばすぐ閉じて 4 へ進む。押されなければ `HANDOFF_OVERLAY_MAX`（15 秒）で自分で閉じて 4 へ進む。H2 は呼び出し元の終了を `CALLER_EXIT_WAIT`（30 秒。D.8 の 1）までしか待たないので、利用者が席を外していても、GUI は必ずその前に終わる（15 秒 + 終了の経路の最大 2 秒 < 30 秒。F.4 のテストで定数の関係を固定する）。15 秒は、下の文を assertive で読み上げ終える長さの見込み（約 110 文字）。同じ内容（MKLM がいったん終了し、自動で開き直す）は UAC の前の更新のページ（E.2）にもあるので、読み終わる前に閉じても、知るべきことを失わない（WCAG 2.2.1 の「本質的な情報は時間の制限の前にも示す」）:
      「MKLM を更新しています。MKLM はまもなく終了し、更新が終わると 1 分ほどで自動で開きます。開き直すまで、サインアウトや再起動はしないでください。2 分たっても開かない場合は、スタート メニューから MKLM を開いてください。」
   4. 通常の終了の経路で終了する（トレイを消す、I/O の保存を最大 1 秒待つ。m3 F.5）。
 
 #### E.4.1 更新のセッションの間の、終了、閉じる、セッションの終わり（OPS-UX-TEST-12）
 
-m3 F.5 の表に、更新のセッションの列を足したもの。`SessionPhase::Updating` の `stage`（`UpdateStage`）で分ける。
+m3 F.5 の表に、更新のセッションの列を足したもの。`SessionPhase::Updating` の `stage`（`UpdateStage`）で分ける。「UAC 待ち（更新）」は、`SessionPhase::Launching` で `AppState::session_purpose == Some(SessionPurpose::Update)` の状態（H.4。FIX-VERIFICATION-11）。`Notice::Connected` を受けたとき、`session_purpose` が `Update` なら `Updating { stage: Sending }` へ、`Change` なら今までどおり `Running` へ移る。
 
 | 場面 | UAC 待ち（`Launching`、更新） | 送信中（`Updating { Sending }`） | H2 の準備待ち（`Updating { StartingRunner }`、最後のチャンクの後） | 引き継ぎ済み（`Updating { HandedOff }`、オーバーレイ） |
 |---|---|---|---|---|
 | ウィンドウの × | 閉じない（m3 と同じ） | 閉じない（ページに［キャンセル］がある） | 閉じない（「Windows がファイルを確認しています…」） | オーバーレイを閉じて終了（引き継ぎの終了の経路） |
 | トレイの「終了」、`quit` | すぐに終了（取り消しも立てる。m3 と同じ）。`quit` には `ok` | 送信をやめて `Bye`（helper はフォルダーと `Run` を消す。何も変わらない）→ 終了。`quit` には `ok` | すぐには終わらない: 「後で終了」の印を立て、`HandedOff`（か `Run` による判断）を受けたら引き継ぎの終了、`Refused` なら終了。`quit` には `busy` | 引き継ぎの終了の経路ですぐに終了。`quit` には `ok` |
-| `quit-if-idle` | `busy`（何も変えない） | `busy`（何も変えない） | `busy`（何も変えない） | `ok`（すでに終了の途中） |
+| `quit-if-idle` | `busy`（何も変えない） | `busy`（何も変えない） | `busy`（何も変えない） | `busy`（何も変えない。この GUI はすでに自分で終了する途中で、H2 はその終了を D.8 の 1 で別に待つ。`ok` にすると下の決まりの「何もしていない」の経路に入り、`closed_by_update` と RunOnce を書いてしまう。FIX-VERIFICATION-8） |
 | `activate` | 窓を出す | 窓を出す | 窓を出す | 窓を出す |
 | サインアウト、シャットダウン（`WM_QUERYENDSESSION`） | 取り消しを立てる（m3 と同じ） | 取り消しを立てる。helper は切断を見て片付ける | 何もしない（H2 が `ready` なら H2 が自分で扱う。D.7） | RunOnce は登録済み。何もしない |
 
@@ -1224,7 +1299,13 @@ m3 F.5 の表に、更新のセッションの列を足したもの。`SessionPh
 
 Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` で日英を持つ（m3 D.4）。下の表は、`UpdateRefusal`、`FetchError`、`TransportError`、`CheckError`、`DownloadError`、`StageEnd`、`UpdateOutcome`、`NotInstalledReason`、`FailedReason`、`InstallerExit`、`Availability`、`Freshness`、`RunPhase`、`ProgramKind` の**すべての列挙子**を、文の ID と次の操作に写す（レビュー前は主なものだけで、`RedirectNotAllowed` などが抜けていた）。英語の診断は「技術的な詳細」と［詳細をコピー］に入れる。
 
-「種類」は、30 日の知らせ（E.3）の文と、案内の向き先を決める。**一時**: 時間をおけば直りうる（もう一度試す）。**構造**: この版の MKLM では直らない見込み（リリース ページへ案内する）。**—**: どちらでもない（状態の説明）。
+「種類」は、30 日の知らせ（E.3）の文と、案内の向き先を決める。**一時**: 時間をおけば直りうる（もう一度試す）。**構造**: この版の MKLM では直らない見込み、または改ざんのしるし（リリース ページへ案内する）。**—**: どちらでもない（状態の説明）。種類は `ErrorClass::{Transient, Structural}` の 2 つだけで、表の「—」は失敗の記録の対象外を表す（FIX-VERIFICATION-12）。
+
+**確認の失敗の分類**（`mklm_client::update::classify::classify(&CheckError, not_found_days) -> Option<(ErrorClass, &'static str)>`。F.4 のテストがすべての列挙子を確かめる）
+
+- `None`（`last_failure` に書かない。`last_check` も進めない。30 日の数え始めにならない）: `CheckError::Fetch(FetchError::Cancelled)`、`CheckError::Fetch(FetchError::Transport(TransportError::Cancelled))`、`CheckError::Unavailable(Availability::NotConfigured)`、`CheckError::Unavailable(Availability::NotInstalledCopy { .. })`（確認だけは行うので、ふつうは起きない）。
+- `Some((class, id))`: 下の表の種類と文の ID。`Rollback` は `Structural`（`upd-rollback`）とし、E.3 の警告のバナーも別に出す。
+- `check` が返さないもの（`Purpose::Check` では起きない `NotNewer`、`ManualUpdateRequired`、helper だけの拒否（`Busy` 以下））は、万一来れば `Some((Transient, "upd-prepare-failed"))` にし、ログに不具合として書く。
 
 | 列挙子 | 種類 | 文の ID | 文（日本語 UI） | 次の操作 |
 |---|---|---|---|---|
@@ -1245,7 +1326,7 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
 | `UpdateRefusal::{SignatureTooLarge, SignatureMalformed, WrongTrustedComment, UnknownKey, BadSignature, RevokedKey, SignerNotListed, IllegalRevocation}` | 構造 | `upd-sig` | 「更新情報の署名を確かめられませんでした。安全のため、この更新は使いません。GitHub のリリース ページで最新の案内を確かめてください。」 | ［リリース ページを開く］ |
 | `UpdateRefusal::{ManifestTooLarge, ManifestMalformed, UnsupportedSchema, WrongProduct, WrongChannel, BadVersion, BadTimestamps, AssetMalformed, NoAssetForArch}` | 構造 | `upd-format` | 「更新情報の形式が、この版の MKLM と合いません。GitHub のリリース ページから新しい版を入れてください。」 | ［リリース ページを開く］ |
 | `UpdateRefusal::TagMismatch` | 一時 | `upd-race` | 「更新情報を取得している間に、新しい版が公開されたようです。しばらくしてからもう一度確かめてください。」 | ［もう一度確認］ |
-| `UpdateRefusal::Rollback` | 警告 | `upd-rollback` | 「以前に確かめたものより古い更新情報が届いたため、使いませんでした。新しい版が取り下げられたか、途中で古い情報に差し替えられた可能性があります。GitHub のリリース ページで最新の版を確かめてください。」（自動の確認でも出す。E.3） | ［リリース ページを開く］ |
+| `UpdateRefusal::Rollback` | 構造（加えて警告のバナー。E.3） | `upd-rollback` | 「以前に確かめたものより古い更新情報が届いたため、使いませんでした。新しい版が取り下げられたか、途中で古い情報に差し替えられた可能性があります。GitHub のリリース ページで最新の版を確かめてください。」（自動の確認でも出す。E.3） | ［リリース ページを開く］ |
 | `UpdateRefusal::NotNewer` | — | `upd-not-newer` | 「この更新は、今の MKLM より新しくありません（すでに入っているようです）。」 | ［今すぐ確認］ |
 | `UpdateRefusal::ManualUpdateRequired`、`OfferKind::ManualRequired` | — | `upd-manual` | 「この版からは自動で更新できません。リリース ページからインストーラーをダウンロードして実行してください。」 | ［リリース ページを開く］ |
 | `UpdateRefusal::NotConfigured`、`Availability::NotConfigured` | — | `upd-not-configured` | 「この MKLM には更新を確かめるための鍵が入っていないため、自動更新は使えません。」 | — |
@@ -1261,9 +1342,9 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
 | `StageEnd::HandedOff` | — | `upd-handoff` | E.4 のオーバーレイの文 | ［OK］ |
 | `UpdateOutcome::Installed`（この利用者の更新） | — | `upd-installed` | 「MKLM を 0.2.1 に更新しました。」 | ［リリースノートを開く］ |
 | `UpdateOutcome::Installed`（ほかの利用者の更新） | — | `upd-installed-other` | 「MKLM は 0.2.1 に更新されました（別のユーザーが更新しました）。」 | ［リリースノートを開く］ |
-| `NotInstalledReason::InstanceBusy` | 一時 | `upd-instance-busy` | 「ほかのユーザーの MKLM が、キーボードの変更の途中か確認を待っていたため、更新しませんでした（MKLM は 0.2.0 のままです）。その変更が終わってから、もう一度［今すぐ更新］を押してください。」 | ［今すぐ更新］ |
-| `NotInstalledReason::{ProgramsStillRunning, CallerDidNotExit}`、`InstallerExit::{HelperRunning, CliRunning, GuiRunning}`（`InstallerRefused` の中） | 一時 | `upd-programs-running` | 「ほかの MKLM（<プログラム>）が動いていたため、更新しませんでした（MKLM は 0.2.0 のままです）。それを終了してから、もう一度［今すぐ更新］を押してください。」 | ［今すぐ更新］ |
-| `NotInstalledReason::FilesInUse`、`InstallerExit::FilesInUse` | 一時 | `upd-files-in-use` | 「別のプログラムが MKLM のファイルを開いていたため、更新しませんでした（MKLM は 0.2.0 のままです）。ほかのユーザーのプログラムや、ウイルス対策ソフトのことがあります。しばらくしてから、もう一度［今すぐ更新］を押してください。」 | ［今すぐ更新］ |
+| `NotInstalledReason::InstanceBusy` | 一時 | `upd-instance-busy` | 「ほかのユーザーの MKLM が、キーボードの変更の途中か確認を待っていたため、更新しませんでした（MKLM は 0.2.0 のままです）。その変更が終わってから、もう一度［今すぐ更新］を押してください。」（技術的な詳細に、`busy` を返した MKLM のセッション ID） | ［今すぐ更新］［詳細をコピー］ |
+| `NotInstalledReason::{ProgramsStillRunning, CallerDidNotExit}`、`InstallerExit::{HelperRunning, CliRunning, GuiRunning}`（`InstallerRefused` の中） | 一時 | `upd-programs-running` | 「ほかの MKLM（<プログラム>）が動いていたため、更新しませんでした（MKLM は 0.2.0 のままです）。それを終了してから、もう一度［今すぐ更新］を押してください。」（技術的な詳細に `holders`。ほかのユーザーのセッションの `mklm-cli` のこともある） | ［今すぐ更新］［詳細をコピー］ |
+| `NotInstalledReason::FilesInUse`、`InstallerExit::FilesInUse` | 一時 | `upd-files-in-use` | 「別のプログラムが MKLM のファイルを開いていたため、更新しませんでした（MKLM は 0.2.0 のままです）。ほかのユーザーのプログラムや、ウイルス対策ソフトのことがあります。しばらくしてから、もう一度［今すぐ更新］を押してください。何度試しても同じなら、［詳細をコピー］の内容（ファイルを開いているプログラムとセッションの番号）を管理者に伝えてください。」（技術的な詳細に `holders` の PID、セッション ID、実行ファイルの名前。RED-TEAM-3） | ［今すぐ更新］［詳細をコピー］ |
 | `NotInstalledReason::SessionEnding` | — | `upd-session-ending` | 「サインアウトかシャットダウンが始まったため、更新しませんでした（MKLM は 0.2.0 のままです）。」 | ［今すぐ更新］ |
 | `NotInstalledReason::InstallerNotStarted { code: 225 / 226 }` | — | `upd-av-blocked` | 「インストーラーがウイルス対策ソフトに止められました。Windows セキュリティ → ウイルスと脅威の防止 → 保護の履歴 で確かめてください。MKLM は 0.2.0 のままです。」 | ［詳細をコピー］ |
 | `NotInstalledReason::InstallerNotStarted`（ほかのコード） | 一時 | `upd-installer-not-started` | 「インストーラーを起動できませんでした。MKLM は 0.2.0 のままで、キーボードの設定も変わっていません。」 | ［今すぐ更新］［詳細をコピー］ |
@@ -1288,9 +1369,9 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
 
 - `.slint` の固定の文言は `@tr` と `translations/ja/LC_MESSAGES/mklm.po`。`tests/translations.rs` が漏れを検出する（m3 D.2）。Rust の文は `i18n.rs`（E.6）。利用者向けの文言を `i18n.rs` と `.po` の外に置かない（m3 I 章のレビュー規則）。
 - 日本語の出力のラテン文字の検査（`vm::unexpected_latin`、m3 H.1）: `LATIN_ALLOWED` に `GitHub`、`x64`、`ARM64`、`MB` を足す。`FILE_NAMES_ALLOWED` に `mklm-cli` と `mklm-helper` を足す（`upd-programs-running` の文と `ProgramKind` の名前のため。今は `mklm-helper.exe` だけで、`.exe` のない形は単語に分けられて検出される）。インストーラーの名前（`MKLM-Setup-0.2.1-x64.exe`）とインストール先のパスは、テストで `names` の引数に渡す（OPS-UX-TEST-16）。
-- 読み上げ: ページの見出しにフォーカス（m3 E.1）。進捗は `accessible-label`「ダウンロード: 45 %」、25 % ごとに polite で読み上げる。結果、失敗、引き継ぎは assertive（引き継ぎのオーバーレイは 5 秒以上出すので、読み終わる前に消えない。WCAG 2.2.1）。バナーの［詳細…］の読み上げ名は「MKLM の更新の詳細を開く」。ボタンはすべて読み上げ名を持つ（「0.2.1 をスキップ」「今すぐ 0.2.1 に更新」「0.2.1 をダウンロード」「インストーラーを実行（管理者の許可が要ります）」）。
+- 読み上げ: ページの見出しにフォーカス（m3 E.1）。進捗は `accessible-label`「ダウンロード: 45 %」、25 % ごとに polite で読み上げる。結果、失敗、引き継ぎは assertive（引き継ぎのオーバーレイは［OK］か 15 秒で閉じる。同じ内容は UAC の前の更新のページにもある。E.4。WCAG 2.2.1）。バナーの［詳細…］の読み上げ名は「MKLM の更新の詳細を開く」。ボタンはすべて読み上げ名を持つ（「0.2.1 をスキップ」「今すぐ 0.2.1 に更新」「0.2.1 をダウンロード」「インストーラーを実行（管理者の許可が要ります）」）。
 - 状態を色だけで示さない。キーボードだけで操作できる。ボタンの行は本文のスクロールの外（m3 B.0、E.4）。
-- リンク（リリースノート、リリース ページ）は `mklm_win::ui::open_release_page(version)` で開く。固定の接頭辞と厳密な版から URL を作り、`ShellExecuteW` に渡す。［インストーラーを実行］は `mklm_win::ui::run_installer_interactive(path)`（`ShellExecuteExW` の `runas`。利用者のキャッシュの、検証し直したインストーラーだけ）。どちらも m3 I 章の「`ShellExecuteW` に渡してよいもの」に足す。
+- リンク（リリースノート、リリース ページ）は `mklm_win::ui::open_release_page(version)` で開く。固定の接頭辞と厳密な版から URL を作り、`ShellExecuteW` に渡す。［インストーラーを実行］は `mklm_win::ui::run_installer_interactive(path)`（`ShellExecuteExW` の `runas`。利用者のキャッシュのインストーラーだけ。大きさと SHA-256 の照合は壊れたファイルを避けるためで、安全の保証ではない。D.13。RED-TEAM-2）。どちらも m3 I 章の「`ShellExecuteW` に渡してよいもの」に足す。
 
 ### E.8 開発用のビルド
 
@@ -1313,9 +1394,11 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
 | 用途の分離 | 本番の鍵で `mklm-dev-latest-json v1` → `WrongTrustedComment`。本番の鍵で `mklm-key-drill v1` → `WrongTrustedComment`。開発用の cfg のテスト（F.3 と同じ条件）だけ: 開発用の鍵で本番の接頭辞 → `WrongTrustedComment`、開発用の接頭辞 → 通るが、記録（`recorded`）は何も変えない |
 | 違う鍵 | 信頼の起点にない鍵 → `UnknownKey`。ID だけ同じで違う鍵（base64 の手直し）→ `BadSignature` |
 | `key_ids` | 空、3 つ、重複、形の誤り → `ManifestMalformed`。署名の鍵を含まない → `SignerNotListed`。知らない ID を含む（移行の間）→ 通る |
-| 失効（SECURITY-3） | ビルドの `revoked` → `RevokedKey`。記録の失効（ID と指紋が一致）→ `RevokedKey`。**記録の失効が同じ ID で別の指紋 → 効かない**（後のビルドが同じ ID の別の鍵を信頼する場合）。自分を失効 → `IllegalRevocation`。通常用がバックアップ用を失効 → `IllegalRevocation`。バックアップ用が通常用を失効 → 通り、`recorded` の後は通常用の更新情報が `RevokedKey`。**通常用が埋め込みにない ID を失効 → 無視され、記録に入らない**。ビルドで失効済みの ID → 何も起きない |
+| 失効（SECURITY-3） | ビルドの `revoked` → `RevokedKey`。記録の失効（ID と指紋が一致）→ `RevokedKey`。**記録の失効が同じ ID で別の指紋 → 効かない**（後のビルドが同じ ID の別の鍵を信頼する場合）。自分を失効 → `IllegalRevocation`。**通常用がバックアップ用を失効 → 通り、何も記録しない**（`VerifiedManifest::revoked` にも入らず、`recorded` の後もバックアップ用の鍵の更新情報が通る。B.2 の規則 2。FIX-VERIFICATION-1）。バックアップ用が通常用を失効 → 通り、`recorded` の後は通常用の更新情報が `RevokedKey`。**通常用が埋め込みにない ID を失効 → 無視され、記録に入らない**。ビルドで失効済みの ID → 何も起きない |
 | 巻き戻し（B.2） | `issued_at` がしきい値より小さい → `Rollback`。同じ → 通る。しきい値は鍵をまたいだ最大値（鍵 A の大きな値で鍵 B の古い更新情報が拒否される）。失効した鍵の値は除かれる。**その更新情報自身が失効させる鍵の値も除かれる**（漏れた P1 の未来の日付の後でも、B1 の P1 失効の更新情報が通る）。`recorded` は `min(issued_at, now)` を記録する（未来の日付の更新情報を受け取った後、正しい日付の次の更新情報が通る） |
 | 鍵の移行（SECURITY-4、OPS-UX-TEST-1） | 古い版の信頼の起点（P1、B1）と新しい版（P2、B1、revoked P1）で: (a) 移行の版 N（主 B1、副 P2、`revoked_keys` [P1]）を古い版が主署名で通し、P1 の失効を記録する。(b) **N を見逃した古い版**が N+1（主 P2、副 B1）を受け取る: 主署名は `UnknownKey` → `tries_alternate` が true → 副署名で通り、P1 の失効を記録する。(c) 新しい版は N+1 を主署名で通す。(d) P1 の失効を記録した古い版は、P1 で署名した偽の更新情報（主）を `RevokedKey` とし、副署名がなければ拒否のまま。(e) `BadSignature` などでは `tries_alternate` が false |
+| バックアップ用の鍵の回転（FIX-VERIFICATION-1） | 信頼の起点が (P1、B1)、(P1、B2、revoked B1)、(P2、B1、revoked P1)、(P2、B2、revoked P1、revoked B1) の 4 つの版で: (a) B1 が漏れた後の版 N（主 P1、`revoked_keys` [B1]）を、(P1、B1) の版と (P1、B2、revoked B1) の版の両方が通す。前者は B1 を記録しない（後で B1 の更新情報もまだ通る）。後者は何もしない（ビルドで失効済み）。(b) 移行の窓の後の回転の版（主 P2、`revoked_keys` [P1、B1]）を、(P2、B1、revoked P1) と (P2、B2、revoked P1、revoked B1) の両方が通す。(c) (P1、B1) の版は (b) を `UnknownKey` で拒む（窓の外として意図どおり） |
+| `apply_trust_report`（SECURITY-5。FIX-VERIFICATION-6） | (a) 機械の記録より新しい更新情報 → `Ok(Some(merged))`: 署名した鍵の最大値が `min(issued_at, now)`、失効が足される。(b) 機械の記録と同じ更新情報をもう一度 → `Ok(None)`。(c) 1 バイト変えた署名 → `Err(BadSignature)`、機械の記録は変わらない。(d) 機械の記録より古い更新情報 → `Err(Rollback)`。(e) 開発用の鍵の更新情報（開発用の cfg のテスト）→ `Ok(None)`。(f) 入っている版より古い版の更新情報でも（`Purpose::Check` なので）記録は進む |
 | 期限 | 期限切れ → `Check` でも `Install` でも通り、`Freshness::Expired`。`issued_at >= expires`、差が 800 日を超える → `BadTimestamps` |
 | アーキテクチャ | アセットが 1 つしかない、同じ arch が 2 つ、名前が違う（版、arch、大文字小文字、パス区切り）→ `AssetMalformed`。自分の arch を選ぶ |
 | ハッシュ | `sha256` が 63 桁、大文字、16 進でない → `AssetMalformed`。`Stager` で中身が違う → `InstallerHashMismatch` |
@@ -1334,8 +1417,10 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
 
 - `prepare-release`: 正常（`latest.json`、trusted comment、`SIGN-OFFLINE.txt`、`prepare.json`）。拒否するもの: プレリリースの tag、手元の HEAD とタグとコミットの不一致、GitHub のタグのコミットの不一致、下書きでない、余分なアセット、`SHA256SUMS` の食い違い、`digest` の食い違い、来歴の証明の失敗、手元の時計と `Date` の差が 5 分を超える、`issued_at` が公開中のもの以下（未来の日付の公開中のものは `--published-misdated` のときだけ通る）、公開中の失効を引き継いでいない（`--revoke` の欠け）、B.2 に反する `--revoke`、取り残しの検査で受け付けない版がある（`--allow-strand` で通る）。
 - `publish`: 通る組、プレリリースの tag の拒否、`prepare.json` の後に下書きの `digest` が変わった、署名が対象の版で通らない、trusted comment の不一致、アップロード後のファイルの組の不一致。
-- `check-keys`: 過去のタグで同じ ID が別の公開鍵を指す → 拒否。
-- `key-drill check`: 正しいバックアップ用の鍵 → 通る。古い（埋め込みにない）バックアップ用の鍵 → 拒否。通常用の鍵 → 拒否。nonce の不一致 → 拒否。
+- `prepare-release` の取り残しの検査（FIX-VERIFICATION-1、FIX-VERIFICATION-2）: F.1 の「バックアップ用の鍵の回転」の 4 つの版を窓の中に置き、(a) と (b) の更新情報が拒否されないこと（`--allow-strand` なしで通る）。`window_targets` の B.3 の例の時系列（v0.4.0 が v0.5.0 の公開から 60 日で窓の中 → v0.6.0 の主 P2 だけの準備は拒否、副 B1 を付ければ通る）。後継の公開から 399 日と 401 日の境目。公開後にプレリリースの印を付けた安定版の形のタグは対象に入り、`-` のタグは入らない。
+- `check-keys`: 過去のタグで同じ ID が別の公開鍵を指す → 拒否。過去のタグで `revoked` にした ID を埋め込む → 拒否。浅いリポジトリ、`v*` のタグがない、ファイルを持つ最初のタグより後のタグでファイルが読めない → 飛ばさずに失敗（FIX-VERIFICATION-15）。
+- `prepare-release --dev`（FIX-VERIFICATION-17）: B.3 の文法どおりの出力（`latest.json`、`trusted-comment.txt` の開発用の接頭辞、`SIGN-OFFLINE.txt` の 1 行）。`--dev-pub` の鍵 ID が本番の信頼の起点にある → 拒否。`--dev` なしの `--dist` などの拒否。`--only-arch` の埋め物。
+- `key-drill check`: 正しいバックアップ用の鍵 → 通る。古い（埋め込みにない）バックアップ用の鍵 → 拒否。通常用の鍵 → 拒否。別の `nonce.bin`（前回の点検のもの）の署名 → 拒否。trusted comment が `mklm-key-drill v1` でない → 拒否。対象の版は `window_targets` と同じ。
 - `pubkey-line`: 公式の `minisign -G` の `.pub` の形（テストのデータに、形を写したもの）から正しい行と ID。
 - 本番のコマンドが、開発用の cfg のビルドで失敗すること（開発用の cfg のテストで）。
 
@@ -1344,6 +1429,13 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
 - `mklm_ipc`: 新しいメッセージ（`RecordTrust`、`StartingRunner`、`TrustRecorded`、`TrustNotRecorded` を含む）の serde の往復と JSON の形の固定（`PROTOCOL_VERSION` 3）。64 KiB のチャンクのフレームが `MAX_FRAME_LEN` に収まること。16 進の厳密さ（大文字、奇数の長さ）。`RunUpdateArgs` の差分テスト（D.7）。`is_uninstall_restore` と `HelperArgs::parse` が `--run-update …` を受け付けないこと、その逆。
 - `mklm_ipc::staging::receive_installer`（偽のリンクと偽の書き込み先）: 正常、順番違い、途中の `Bye`、途中の切断、期限切れ、大きさの超過、ハッシュ違い、`InstallerChunk` の代わりに `Request` が来る。`Stager` は使い捨ての鍵で作った `VerifiedManifest` から作る。
 - **H1 の駆動部**（`mklm_ipc::staging::stage_update`、偽の `StagerEnv` と偽のリンク。OPS-UX-TEST-10）: D.4 の各手順で失敗を 1 つずつ注入し、終わりの記録（`Run`、`Trust`、`LastResult`、フォルダー）、送ったメッセージ、ロックの解放、H2 を止めたか、終了コードを表で確かめる。特に: 呼び出し元が 13 の途中で去る → フォルダーと `Run` が消え、`LastResult` を書かない。H2 が `ready` の前に終わる、120 秒の期限 → H2 を止めて終わりを待ってから消す（順序）、`Refused(HandOffFailed)`。`Run` に生きた `installer` → `UpdateInProgress`。空き容量の不足 → `DiskFull`。
+- **`RecordTrust` の処理**（`mklm_ipc::staging::record_trust` と `CallerOrder`、偽の `StagerEnv`。SECURITY-5。FIX-VERIFICATION-6）:
+  - 新しい更新情報 → `TrustRecorded { changed: true }`、偽の環境の `Trust` が `apply_trust_report` の結果になり、ロックを取って放した。同じものをもう一度 → `TrustRecorded { changed: false }`、書かない。
+  - 署名の誤り → `TrustNotRecorded(BadSignature)`、書かない。ロックが `TRUST_LOCK_WAIT`（2 秒）で取れない → `TrustNotRecorded(Busy)`、書かない。
+  - どの返事の後も、`CallerOrder` は続く `Request` を受け付ける（セッションは続く）。
+  - `CallerOrder`: `Welcome` の直後の `RecordTrust` → 受け付ける。`Request` の後、2 つ目の `RecordTrust`、`StageUpdate` の後の `RecordTrust` → プロトコルの誤り（helper は `HelperMessage::Error` を返して切断）。
+  - **記録の後の巻き戻し**: 偽の環境で `record_trust`（更新情報 M2）の後、同じセッションで `stage_update`（M2 より `issued_at` の古い、正しく署名された M1）→ `Refused(Rollback)`、`Run` もフォルダーも作らない。
+- 結合テスト（`crates/mklm-client/tests/update_staging.rs` に足す。WP-C が書き、統合の後に通る。F.4）: 利用者の記録が進んでいるとき、`mklm-client` のセッションの開始が `RecordTrust` を送り、偽の helper の側で `record_trust` が機械の記録を進める。進んでいなければ送らない。
 - **H2 の駆動部**（`mklm_update::run_flow::run_update`、偽の `RunnerEnv`）: D.12 の表の各行について、D.7 の各手順で失敗を注入し、終わりの `Run` と `LastResult`、起動し直したか、終了コードを確かめる。固定する順序: `Run = installing`（`installer` 付き）を書いてから `ResumeThread`。その書き込みの失敗 → 一時停止のままのインストーラーを止め、`NotInstalled(Refused(Storage))`。`LastResult` を書いて `Run` を消し、ロックを放してから後片付け、最後に起動し直す。15 分の期限 → `Failed(InstallerTimedOut)` を書き、`Run` を残して待ち続け、60 分以内に終われば本当の結果で書き直す。60 分 → `Run` を残し、起動し直さず、7。`ready` / `waiting` でのセッションの終了 → インストーラーを作らず `NotInstalled(SessionEnding)`。`installing` でのセッションの終了 → 止める答え。
 - `mklm_update::run`（WP-H）: `classify_installer_exit` の表（25 は `Other`）、`leaves_old_files`、`decide_outcome` の表（D.13。26 と 27 を含む）、`classify_run`（すべての段階 × 起動 ID の変化 × `stager`、`runner`、`installer` の生死。`installing` で runner が死に installer が生きている → `InProgress`）、`interrupted_result`、`RunId` の文法、JSON の往復と形の固定（H.5）。
 - `mklm_update::gate::check_journal`: `mklm_core::fixtures` のジャーナルで、読めない項目、書き込み中、確認待ち、再起動待ち、衝突、閉じたものだけ。
@@ -1352,12 +1444,15 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
   - `update_store` の名前の関所（キーを開く前に拒否することだけ。書き込みは実機）、`update_dir` の名前の検査。
   - `elevation::environment_block`: 並び順（大文字小文字を区別しない）、`名前=値\0` の連結と最後の `\0`、空の値、`=` を含む名前の拒否。`runner_environment` が決めた変数だけを持ち、`__COMPAT_LAYER` や利用者の `PATH` を持たないこと（SECURITY-6）。
   - `instance::parse_instance_pipe_name`: 正しい名前（`S-1-5-21-…`、`S-1-12-1-…`）、`/`、`..`、`\`、NUL、ASCII 以外、桁の多すぎる数、余分な部分 → `None`。`pipe::check_pipe_path` が `/`、`.`、`..` だけの名前、ASCII 以外、制御文字を拒否すること（SECURITY-7）。
+  - `instance::instance_pipe_candidates`（純粋。FIX-VERIFICATION-5）: GUI のプロセスと `process_users` の結果から、`instance_pipe_path` の名前を作る。SID がない、セッション ID が食い違う、SID が正規表現に合わない（`S-1-5-18` など）GUI は飛ばす。16 本を超えた分は捨てる。同じ入力から同じ順序。
+  - `update_dir` の `FileHolder` の変換（Restart Manager の結果の PID、セッション ID、名前。RED-TEAM-3）: 名前の長さの上限、制御文字の除去。
   - `InstanceCommand::QuitIfIdle` の wire（13 バイト、`MAX_INSTANCE_MESSAGE` 以内）と `parse`。
 - `installer/check-nsi.ps1` の規則（D.9.3）を、わざと壊したスクリプトの断片で確かめる Pester のテスト（WP-H。Windows PowerShell 5.1 の同梱の Pester 3 で動く形）。
 
 ### F.3 ループバックの HTTP テスト（`mklm-update`、feature `winhttp`、Windows、開発用の cfg）
 
-- `$env:RUSTFLAGS = "--cfg mklm_update_dev"; $env:CARGO_TARGET_DIR = "target\dev-update"; cargo test -p mklm-update --features winhttp --locked`（ci.yml に足す 1 ステップ。別の `CARGO_TARGET_DIR` で、ふだんのビルドのキャッシュを壊さない）。ループバックの経路は `cfg(all(debug_assertions, mklm_update_dev))` なので、この形でだけ走る（A.10）。
+- `$env:RUSTFLAGS = "--cfg mklm_update_dev"; $env:CARGO_TARGET_DIR = "target\dev-update"; cargo test -p mklm-update --features winhttp --locked; cargo test -p mklm-win --features net --test net_proxy --locked`（ci.yml に足す 1 ステップ。別の `CARGO_TARGET_DIR` で、ふだんのビルドのキャッシュを壊さない）。ループバックの経路は `cfg(all(debug_assertions, mklm_update_dev))` なので、この形でだけ走る（A.10）。
+- 同じステップの続きで `cargo build -p mklm -p mklm-cli -p mklm-helper --locked` を行い、3 つの exe に目印の文字列が**ある**ことを `installer/find-marker.ps1` で確かめる。なければ失敗（A.10 の陽性の対照。FIX-VERIFICATION-3）。
 - テストの中の小さなサーバー（`std::net::TcpListener` を `127.0.0.1:0` に。全インターフェイスに開かないので、Windows ファイアウォールの確認は出ない）が、台本どおりの応答（状態、ヘッダー、本文の分割、遅延）を返す。プロキシを通さないセッション（`new_without_proxy`）を使う。
 
 | テスト | 期待 |
@@ -1375,9 +1470,21 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
 | 全体の期限 | `DeadlineExceeded` |
 | 404 / 429 / 500 | `NotFound` / `RateLimited` / `HttpStatus` |
 | **401 に `WWW-Authenticate: NTLM` と `Negotiate`** | `HttpStatus { 401 }`。サーバーが受け取ったどの要求にも `Authorization` がない（SECURITY-13） |
-| **407 に `Proxy-Authenticate: NTLM`** | `Transport(ProxyAuthRequired)`。どの要求にも `Proxy-Authorization` がない |
+| **407 に `Proxy-Authenticate: NTLM`**（プロキシなしのセッション） | `Transport(ProxyAuthRequired)`（状態の番号の写し方だけの試験。WinHTTP はこのサーバーをプロキシとして扱わないので、プロキシの認証の経路は通らない） |
 | `Content-Encoding: gzip` | `UnexpectedEncoding` |
 | 取り消しのフラグ | `Cancelled` |
+
+**プロキシの認証の試験**（`crates/mklm-win/tests/net_proxy.rs`、feature `net`、開発用の cfg。SECURITY-13。FIX-VERIFICATION-4）
+
+上の 407 の行は、WinHTTP がループバックのサーバーをプロキシとして扱わないので、自動ログオンの方針がプロキシの認証に効くかを何も示さない。そこで、名前付きのプロキシのセッションで確かめる。
+
+- `HttpSession::open_named_proxy(user_agent, "127.0.0.1:<port>", AutologonLevel)`（開発用の cfg だけ。H.3）: `WINHTTP_ACCESS_TYPE_NAMED_PROXY`、バイパスの一覧なし、ほかのオプションは `open` と同じ。
+- 要求先はループバックでない名前 `https://update.invalid/latest.json`（`.invalid` は名前解決されない予約の名前。WinHTTP の暗黙のループバックのバイパスも効かない）。WinHTTP はプロキシに `CONNECT update.invalid:443` を送るので、外には何も出ない。
+- テストのサーバー（プロキシ役）は、すべての `CONNECT` に `407`、`Proxy-Authenticate: NTLM` と `Proxy-Authenticate: Negotiate`、`Content-Length: 0` を返し、接続を保つ。受け取ったすべての要求の見出しを記録する。**NTLM のチャレンジ（Type 2）は決して返さない**ので、どの場合も資格情報から計算した応答（Type 3）は作られない。
+- 期待（`AutologonLevel::High`。製品と同じ）: 結果は `NetErrorKind::ProxyAuth`（か状態 407）で、3 秒のあいだ、どの要求にも `Proxy-Authorization` がない。
+- **対照**（`AutologonLevel::Low`）: 同じ台本で、`Proxy-Authorization: NTLM …` か `Negotiate …` が少なくとも 1 回届くこと。届かなければ、この環境では HIGH の試験が何も示さないので、テストを失敗させる（L 章に結果を書く）。
+- 平文の `http://update.invalid/` の `GET` をプロキシに送る形も同じ期待で試す（`HttpGet.secure = false` は、開発用の cfg で名前付きのプロキシのセッションに限り、`.invalid` の名前にも許す）。
+- この試験が通るまで、L 章の「HIGH がプロキシへの既定の資格情報の送信も止める」は未確認のままにする。`AUTOMATIC_PROXY`（WPAD と PAC）の経路そのものは、この試験でも通らない（自動ログオンの方針がセッションの設定で、プロキシの見つけ方によらず効くという前提は未確認）。
 
 ### F.4 GUI と CLI
 
@@ -1385,17 +1492,19 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
   - 確認の予定（前回の時刻、乱数の範囲、復帰、**未来の `last_check` と `last_success`**。RELIABILITY-8）。
   - 自動ダウンロードの条件（スキップ、`auto_check` のオフ）。スキップした版の［ダウンロード］。
   - ボタンの可否（D.2 の条件）。セッションは同時に 1 つ（更新とキーボードの変更の排他）。
-  - **`quit-if-idle`**（RELIABILITY-1、OPS-UX-TEST-4）: `Idle` → `Effect::Quit`、RunOnce の登録、`closed_by_update`、返事 `ok`。`Launching`、`Running`（カウントダウン、書き込み中、再接続待ち）、`Updating` の各段階、`quit_pending`、`QuitConfirm` / `RecoveryConfirm` のオーバーレイ → 返事 `busy` で、**`AppState` がまったく変わらず、効果が空**。4 秒を過ぎて届いたもの → 何もしない。
+  - **`quit-if-idle`**（RELIABILITY-1、OPS-UX-TEST-4）: `Idle` → `Effect::Quit`、RunOnce の登録、`closed_by_update`、返事 `ok`。`Launching`、`Running`（カウントダウン、書き込み中、再接続待ち）、`Updating` の各段階（**`HandedOff` を含む**。FIX-VERIFICATION-8）、`quit_pending`、`QuitConfirm` / `RecoveryConfirm` のオーバーレイ → 返事 `busy` で、**`AppState` がまったく変わらず、効果が空**（`closed_by_update` も RunOnce も書かない）。4 秒を過ぎて届いたもの → 何もしない。
   - E.4.1 の表の各升（×、終了、`quit`、`quit-if-idle`、`activate`、セッションの終了 × 更新のセッションの 4 段階）。
-  - `HandedOff` → `started_run`、RunOnce、5 秒以上のオーバーレイ、終了。最後のチャンクの後の `Lost` で、`Run.caller` が自分で `ready` なら引き継ぎとして扱う。
-  - 起動時の `InProgress` → すぐ終了（RunOnce を消さない）。
+  - `session_purpose`（FIX-VERIFICATION-11）: 更新のボタン → `Launching` と `Some(Update)`。変更の適用 → `Launching` と `Some(Change)`。`Notice::Connected` で、`Update` なら `Updating { Sending }`、`Change` なら `Running`。セッションが終われば `None`。
+  - `HandedOff` → `started_run`、RunOnce、オーバーレイ、終了。［OK］で即座に終了の経路へ。［OK］なしでは `HANDOFF_OVERLAY_MAX`（15 秒）で終了の経路へ（FIX-VERIFICATION-13）。定数の関係 `HANDOFF_OVERLAY_MAX + 2 秒 < CALLER_EXIT_WAIT` を固定するテスト。最後のチャンクの後の `Lost` で、`Run.caller` が自分で `ready` なら引き継ぎとして扱う。
+  - 起動時の `InProgress`（`ready` 以降）→ すぐ終了。セッションが `Run.caller_session` と同じ → RunOnce を消さず、何も書かない。違う、または `caller_session` がない → 昇格していなければ RunOnce を登録し、`closed_by_update` を書いてから終了（FIX-VERIFICATION-9）。
+  - `classify`（FIX-VERIFICATION-12）: `CheckError` のすべての列挙子について、E.6 の表と同じ種類と文の ID。`Cancelled`（2 つ）と `NotConfigured` → `None` で、`last_failure` と `last_check` が変わらない。`Rollback` → `Structural`。30 日の間 `Rollback` だけが続いた後のバナーは構造の文（`upd-stale-structural`）と巻き戻しの警告。
   - 結果の表示の条件（D.13）: 14 日を過ぎた `LastResult`、今の版と合わない `LastResult`、ほかの利用者の更新（中立の文）、失敗はほかの利用者に出さない、中断は利用者ごとに 1 回だけ、表示するものがなければ `unregister_after_update`。
   - バナー: 30 日以上確認できていない（一時 / 構造）、期限切れ、30 日に 1 回、巻き戻しの警告（同じ `issued_at` に 1 回）。
   - UAC の説明の画面の行き先（`UacNoticeOrigin::Update` で［キャンセル］→ 更新のページ）。
 - `vm::update` のスナップショット（日英、m3 H.3）: E.2 の各状態、E.6 の表のすべての行。ラテン文字の検査（E.7）。
 - `mklm-client::update`: 偽の `Transport` で `check`（主署名、副署名の取得の条件、キャッシュ、記録の更新、スキップ、巻き戻しの記録、最後の失敗の種類と最初の時刻）と `download`。偽の `Link` で `stage`（正常、`Refused`、途中の取り消し、元のファイルの変化、helper の喪失、`SendInstaller` の中身が申し出と違う、`StartingRunner` の後の Heartbeat の間の待ち）。`pending_trust_report`（利用者の記録が進んでいるときだけ）。
 - 結合テスト（統合の後に通る。WP-C が書く）: `crates/mklm-client/tests/update_staging.rs` で、`mklm_client::update::stage` と `mklm_ipc::staging::stage_update`（偽の `StagerEnv`）をメモリ上の双方向のリンクでつなぐ。
-- CLI: `update --check` と `--status` の出力と終了コード（0 / 20 / 21 / 22 / 1 / 2。偽の `Transport` と偽の記録で）。更新中の早い終了（6）。
+- CLI: `update --check` と `--status` の出力と終了コード（0 / 20 / 21 / 22 / 6 / 1 / 2。偽の `Transport` と偽の記録で）。更新中の早い終了: 書き込みのコマンドと `update --check` → 6。`list`、`status`、`global status`、`journal`、`update --status` → 早い終了をせず、ふだんどおり（FIX-VERIFICATION-14）。`--json` に `issued_at` があること（RED-TEAM-1）。
 
 ### F.5 インストーラーの CI の試験
 
@@ -1407,18 +1516,18 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 
 **準備**
 
-- 公式の `minisign.exe`（B.5 の準備で確かめたもの）を使う。リハーサルも本番と同じ道具で署名する。
+- 公式の `minisign.exe` を使う。リハーサルも本番と同じ道具で署名する。**B.5 の準備の最初の項目（zip のダウンロードと `cargo xtask verify-signer`）を、このリハーサルの前に済ませておく**（G.1。FIX-VERIFICATION-17）。確かめた zip から `minisign.exe` を `%USERPROFILE%\mklm-dev-keys\minisign.exe` に取り出し、`Get-FileHash` が記録した値と一致することを確かめる。本物の鍵の USB メモリはリハーサルの間つながない。
 - 開発用の鍵は `%TEMP%` ではなく `%USERPROFILE%\mklm-dev-keys\` に置き、最後に消す（SECURITY-9）。
 - 作業は使い捨てのブランチで行う: 統合したコミットから `git switch -c rehearsal/m5b`。版の変更は `Cargo.lock` も変えるので（`--locked` のビルドが失敗するため）、このブランチにだけコミットする。
 
 **手順**
 
-1. 開発用の鍵: `minisign.exe -G -W -p %USERPROFILE%\mklm-dev-keys\mklm-dev.pub -s %USERPROFILE%\mklm-dev-keys\mklm-dev.key`（`-W` はパスワードなし）。`.pub` の 2 行目（base64）を、**その PowerShell の中だけで** `$env:MKLM_UPDATE_DEV_PUBKEY` に入れる（`setx` は使わない。OPS-UX-TEST-7）。
+1. 開発用の鍵: `%USERPROFILE%\mklm-dev-keys\minisign.exe -G -W -p %USERPROFILE%\mklm-dev-keys\mklm-dev.pub -s %USERPROFILE%\mklm-dev-keys\mklm-dev.key`（`-W` はパスワードなし）。`.pub` の 2 行目（base64）を、**その PowerShell の中だけで** `$env:MKLM_UPDATE_DEV_PUBKEY` に入れる（`setx` は使わない。OPS-UX-TEST-7）。
 2. MKLM を全部終わらせる: `& "C:\Program Files\SHIN DATA CENTER\MKLM\mklm.exe" --quit`、`target\` の下で動いている `mklm.exe` にも `--quit`。タスク マネージャーで `mklm*.exe` がないことを確かめる（E.8。2 つ目の起動は `activate` を送って終わり、`--update-endpoint` が届かないため。`target\` の GUI が同じセッションの多重起動のパイプを持っていると、H2 が `NotOurs` から `ProgramsStillRunning` になるため）。
-3. 0.2.0: ブランチで `[workspace.package] version = "0.2.0"` → `cargo update -w --offline`（ワークスペースのメンバーの版だけを `Cargo.lock` に反映）→ コミット → `.\installer\build-installer.ps1 -Arch x64 -Profile dev`（`RUSTFLAGS=--cfg mklm_update_dev` を自分の子の `cargo` にだけ渡し、dev プロファイルで 3 つの exe をビルドし、`dist-dev\0.2.0\MKLM-Setup-0.2.0-x64.exe` と、そのフォルダーだけの `SHA256SUMS` を書く）→ そのインストーラーを手で実行して入れる。入れた GUI が起動すると、HKCU の Run の値はインストールした場所を指すように直る（m3 F.3 の `needs_repair`）。
+3. 0.2.0: ブランチで `[workspace.package] version = "0.2.0"` → `cargo update -w --offline`（ワークスペースのメンバーの版だけを `Cargo.lock` に反映）→ コミット → `.\installer\build-installer.ps1 -Arch x64 -Profile dev`（`RUSTFLAGS=--cfg mklm_update_dev` を自分の子の `cargo` にだけ渡し、dev プロファイルで 3 つの exe をビルドし、3 つに目印があることを確かめ（なければ失敗。A.10 の陽性の対照）、`dist-dev\0.2.0\MKLM-Setup-0.2.0-x64.exe` と、そのフォルダーだけの `SHA256SUMS` を書く）→ そのインストーラーを手で実行して入れる。入れた GUI が起動すると、HKCU の Run の値はインストールした場所を指すように直る（m3 F.3 の `needs_repair`）。
 4. 0.2.1: 同じく版を 0.2.1 にして `cargo update -w --offline` → コミット → `build-installer.ps1 -Arch x64 -Profile dev` → `dist-dev\0.2.1\`。
-5. `cargo xtask prepare-release --dev --tag v0.2.1 --dist dist-dev\0.2.1 --dev-pub %USERPROFILE%\mklm-dev-keys\mklm-dev.pub --only-arch x64 --out dist-dev\0.2.1`（ARM64 のアセットは埋め物。ARM64 のクロスビルドの道具は要らない）。この `xtask` は `RUSTFLAGS` のない別の PowerShell でビルドされてもよい（`--dev` のコマンドは cfg を問わない）。
-6. `dist-dev\0.2.1\SIGN-OFFLINE.txt` の `minisign.exe -S …` を実行する（開発用の接頭辞の trusted comment）。
+5. `cargo xtask prepare-release --dev --tag v0.2.1 --dist dist-dev\0.2.1 --dev-pub %USERPROFILE%\mklm-dev-keys\mklm-dev.pub --minisign %USERPROFILE%\mklm-dev-keys\minisign.exe --only-arch x64 --out dist-dev\0.2.1`（文法は B.3 の「`prepare-release --dev` の文法」。ARM64 のアセットは埋め物。ARM64 のクロスビルドの道具は要らない）。この `xtask` は `RUSTFLAGS` のない別の PowerShell でビルドされてもよい（`--dev` のコマンドは cfg を問わない）。
+6. `dist-dev\0.2.1\SIGN-OFFLINE.txt` の 1 行（`%USERPROFILE%\mklm-dev-keys\minisign.exe -S -s %USERPROFILE%\mklm-dev-keys\mklm-dev.key -m dist-dev\0.2.1\latest.json -x dist-dev\0.2.1\latest.json.minisig -t "mklm-dev-latest-json v1 version=0.2.1 issued_at=…"`）を実行する。
 7. `cargo xtask serve-releases --dir dist-dev --port 8421`（`127.0.0.1` だけで待ち受け、`/releases/latest/download/…` → `/releases/download/v0.2.1/…` のリダイレクトを GitHub と同じ形で返す。「最新」は `latest.json` のある最も新しい版のフォルダー）。
 8. 手順 2 と同じく MKLM を全部終わらせてから、インストールしたデバッグの GUI を `"C:\Program Files\SHIN DATA CENTER\MKLM\mklm.exe" --update-endpoint=http://127.0.0.1:8421` で起動 → 確認 → ダウンロード → ［今すぐ更新］→ UAC（「詳細を表示」でプログラムの場所を確かめる）→ 更新 → 起動し直し → 結果。
 9. 変えた版はブランチごと捨てる（`main` にはコミットしない）。
@@ -1437,7 +1546,7 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 
 1. デバッグの MKLM をアンインストールする（「設定」→「アプリ」）。この PC で MKLM を使うなら、公開中のリリース ビルドを入れ直す。
 2. 任意（昇格した PowerShell、ユーザーの同意の上で）: リハーサルの `HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Update` の `Run` と `LastResult`（開発用の鍵は `Trust` を変えないので、`Trust` は残してよい）と、`%ProgramData%\SHIN DATA CENTER\MKLM\Updates\` の残り（D.11 の掃除でも消える）。
-3. `%USERPROFILE%\mklm-dev-keys\` と `dist-dev\` を消す。`MKLM_UPDATE_DEV_PUBKEY` を入れた PowerShell を閉じる。ブランチ `rehearsal/m5b` を消す。
+3. `%USERPROFILE%\mklm-dev-keys\`（取り出した `minisign.exe` を含む）と `dist-dev\` を消す。`MKLM_UPDATE_DEV_PUBKEY` を入れた PowerShell を閉じる。ブランチ `rehearsal/m5b` を消す。
 4. この PC で本物の署名をするなら、その前に 1〜3 が済んでいることを確かめる（B.6）。
 
 - リリース ビルドにはこの経路がない（A.10）。本番の鍵とサーバーでの確かめは F.7 と F.8。
@@ -1452,7 +1561,7 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 
 - [ ] T-UPD-1: v0.2.0 を起動して 3 分待つ → バナー「新しい版（0.2.1）」、更新のページが準備完了。`%LOCALAPPDATA%\SHIN DATA CENTER\MKLM\update\` にインストーラーと `state.json`
 - [ ] T-UPD-2: 設定で自動の確認をオフ → 次の起動で通信しない（`mklm.log`）。［今すぐ確認］で確認できる
-- [ ] T-UPD-3 ★: ［今すぐ更新］→ UAC の説明（初回）→ UAC（「詳細を表示」でプログラムの場所が `C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe`、発行元「不明」を記録）→「はい」→ 引き継ぎの案内が 5 秒以上出る → MKLM が消え、数十秒で 0.2.1 が開き「0.2.1 に更新しました」。起動した GUI が昇格していない。`HKLM\…\MKLM\Update` の `LastResult`、`Updates` の片付け（runner のフォルダーは次の昇格した MKLM まで残る）、`update.log`、`PendingFileRenameOperations` に何も足されていないこと。キーボードの値が変わっていない（`status --json` の比較）
+- [ ] T-UPD-3 ★: ［今すぐ更新］→ UAC の説明（初回）→ UAC（「詳細を表示」でプログラムの場所が `C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe`、発行元「不明」を記録）→「はい」→ 引き継ぎの案内が出る（［OK］を押さなければ 15 秒で閉じる）→ MKLM が消え、数十秒で 0.2.1 が開き「0.2.1 に更新しました」。起動した GUI が昇格していない。`HKLM\…\MKLM\Update` の `LastResult`、`Updates` の片付け（runner のフォルダーは次の昇格した MKLM まで残る）、`update.log`、`PendingFileRenameOperations` に何も足されていないこと。キーボードの値が変わっていない（`status --json` の比較）
 - [ ] T-UPD-4 ★: UAC で「いいえ」→「取り消しました」。何も変わらない
 - [ ] T-UPD-5A ★（`Busy`、キーボードに書かない代わり）: 昇格した PowerShell で `$f=[IO.File]::Open("$env:ProgramData\SHIN DATA CENTER\MKLM\mklm.lock",'Open','ReadWrite','ReadWrite'); $f.Lock(0,1)`（`FileLock` の共有は読み取りと書き込みで、この開き方と両立する。`LockFileEx` の排他のロックが byte 0 にかかる）→ ［今すぐ更新］→ UAC の後に「別の MKLM が処理中です」→ `$f.Unlock(0,1); $f.Close()`
 - [ ] T-UPD-6A ★（`ProgramsStillRunning`、キーボードに書かない代わり）: 別のターミナルで `mklm-cli set <キーボード> --layout <配列>` を実行し、`Continue? [y/N]` で止めておく（答えるまで何も書かず、UAC も出ない。`commands.rs` の `confirm`）→ ［今すぐ更新］→ 30 秒ほどで「ほかの MKLM（mklm-cli）が動いていたため、更新しませんでした」、0.2.0 のまま → CLI に `n` と答える
@@ -1485,7 +1594,7 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 | v0.2.0 のタグの前 | `cargo xtask fetch-smoke`（本番の経路で v0.1.0 の `SHA256SUMS`。リダイレクトの各段、tag の取り出し、TLS、本文） | 開発機。プロキシの内側の PC があればそこでも |
 | 毎回のリリース（下書きの前） | `cargo xtask fetch-smoke` | release.yml の x64 のジョブ |
 | 公開の直後 | `xtask publish` の公開後の確認（`verify --remote --installers` と同じ） | メンテナーの PC |
-| 公開の直後と毎週 | `cargo xtask verify --remote --installers --min-days-left 60` と `cargo xtask fetch-smoke` | `update-canary.yml`（`release: published`、毎週、手動） |
+| 公開の直後と毎週 | `cargo xtask verify --remote --installers --min-days-left 60 --newest-published` と `cargo xtask fetch-smoke` | `update-canary.yml`（`release: published`、毎週、手動） |
 | v0.2.0 の公開の後 | v0.2.0 を入れた PC で `mklm-cli update --check --json` → `"status":"up-to-date"`、`"freshness":"fresh"`、終了コード 0 | 開発機 |
 
 ---
@@ -1497,7 +1606,7 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 1. **WP-0**（1 人）: 骨組み。コンパイルが通り、既存のテストがすべて通る状態で渡す（G.2）。
 2. **WP-U、WP-H、WP-C**（並行）: ファイルの持ち主は重ならない（G.3〜G.5）。互いの実装を待たずに、H 章の約束に対して書く。
 3. **統合**: 3 つを合わせ、F.4 の結合テストを含めて `cargo test --workspace`、F.3 の開発用の cfg のテスト、`clippy -D warnings`（x64 と ARM64）、`fmt` を通す。
-4. **レビュー**（G.6 の確認事項。`minisign-verify` のソースの読み合わせを含む）→ F.6 のリハーサル（と後片付け）→ 鍵の生成（メンテナー。B.5 の準備）→ `fetch-smoke`（F.8）→ v0.2.0 → F.7 のグループ A → （キーボードを調べた後）グループ B。
+4. **レビュー**（G.6 の確認事項。`minisign-verify` のソースの読み合わせを含む）→ 公式の `minisign` の用意と `xtask verify-signer`（メンテナー。B.5 の準備の最初の項目。F.6 がこれを使う。FIX-VERIFICATION-17）→ F.6 のリハーサル（と後片付け）→ 鍵の生成（メンテナー。B.5 の準備の残り。J 章の質問 6 が (c) なら署名専用のアカウントを先に作る）→ `fetch-smoke`（F.8）→ v0.2.0 → F.7 のグループ A → （キーボードを調べた後）グループ B。
 
 ### G.2 WP-0: 骨組み
 
@@ -1523,7 +1632,7 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
   [alias]
   xtask = "run --package xtask --locked --"
   ```
-- `apps/build_id.rs`: `HASHED_CRATES` に `"crates/mklm-update"` を足す（配列の長さ 5）。ipc のメッセージが `mklm-update` の型を含むため（m2 A.5 の「版を上げ忘れた変更の検出」）。
+- `apps/build_id.rs`: `HASHED_CRATES` に `"crates/mklm-update"` を足す（配列の長さ 5）。ipc のメッセージが `mklm-update` の型を含むため（m2 A.5 の「版を上げ忘れた変更の検出」）。加えて、各クレートの `Cargo.toml` と `src/` の外にあってビルドに埋め込まれるファイルの一覧 `HASHED_FILES: [&str; 1] = ["crates/mklm-update/trust/anchors.txt"]` を足し、ハッシュと `watched_paths` の両方に入れる（FIX-VERIFICATION-15。信頼の起点ファイルは `include_str!` で埋め込まれるので、鍵だけが違う 2 つのビルドが同じビルド ID にならないように）。`build_id.rs` は 3 つの `build.rs` が `#[path]` で読むだけでテストがないので、WP-0 が一度「`anchors.txt` の行を 1 つ変えると、3 つの exe の `MKLMBuildId` が変わる」ことを手で確かめ、結果を L 章に書く。
 - `apps/{mklm,mklm-cli,mklm-helper}/build.rs`: `VS_FF_DEBUG` を `PROFILE` ではなく `CARGO_CFG_DEBUG_ASSERTIONS` の有無から決める（A.10）。`CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true` のリリース ビルドで `IsDebug` が true になるかを確かめ、結果を L 章に書き足す。
 - `crates/mklm-update/Cargo.toml`（新規）:
   ```toml
@@ -1591,10 +1700,10 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 | 持つファイル | 内容 |
 |---|---|
 | `crates/mklm-update/src/{lib,keys,manifest,verify,state,version,refusal,url,fetch,stage,winhttp,base64,dev}.rs`、`crates/mklm-update/tests/*`（`nsis_exit_codes.rs` を除く）、`crates/mklm-update/trust/anchors.txt` の形（鍵はメンテナーが入れる） | C 章、A.4〜A.10、B.2 |
-| `crates/mklm-win/src/net.rs` | WinHTTP の FFI（A.7、A.9。自動ログオンの方針）。unsafe にはすべて `// SAFETY:` |
+| `crates/mklm-win/src/net.rs`、`crates/mklm-win/tests/net_proxy.rs`（新規） | WinHTTP の FFI（A.7、A.9。自動ログオンの方針）。unsafe にはすべて `// SAFETY:`。プロキシの認証の試験（F.3。FIX-VERIFICATION-4） |
 | `xtask/**` | B.3 のすべてのコマンド、F.6 の `prepare-release --dev` と `serve-releases`、`ReleaseHost`（`gh` の呼び出し） |
 | `docs/maintainer/release-signing.ja.md`（新規） | B.5〜B.7、公式の `minisign` の SHA-256 の記録、点検の記録の欄 |
-| `docs/install-guide.ja.md`、`README.md` | 自動更新の説明、UAC の「詳細を表示」でプログラムの場所を確かめる手順（SECURITY-14）、公開鍵と `minisign` による手での検証、インストーラーの `/S` と終了コード（D.9.1）、`mklm-cli update --check` の終了コード（D.14） |
+| `docs/install-guide.ja.md`、`README.md` | 自動更新の説明、UAC の「詳細を表示」でプログラムの場所を確かめる手順（SECURITY-14）、公開鍵と `minisign` による手での検証、インストーラーの `/S` と終了コード（D.9.1）、`mklm-cli update --check` の終了コード（6 を含む。D.14）、ほかの利用者の PC で管理者として承認するときの注意（D.13。RED-TEAM-2） |
 
 完了の条件: F.1、F.3 が通る。`xtask` のテスト。
 
@@ -1606,9 +1715,9 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 | `crates/mklm-ipc/src/{lib,message,update,staging,args}.rs`、`crates/mklm-ipc/tests/*` | D.3、D.4 の駆動部（`stage_update` と `StagerEnv`）、D.7 のコマンドライン、F.2 |
 | `crates/mklm-win/src/{update_store,update_dir,shell_launch,proc_identity,instance,pipe,os,elevation,session_end}.rs`（`pipe` は `check_pipe_path` だけ。`elevation` は環境ブロックと `spawn_clean` だけ。`session_end` は `shut_down_first`、`spawn_with_answer`、`set_block_reason` だけ）、`protected_dir.rs` と `journal_store.rs`（`RunDir` と `UpdateStore` に要る内部の関数を公開する変更だけ） | D.5〜D.11、C.7 |
 | `apps/mklm-helper/src/{main,session,update,run_update}.rs` | D.4、D.7、D.15、`RecordTrust`、通常のセッションの片付け（D.11）、`StageUpdate` の間の `busy` |
-| `installer/nsis/mklm.nsi`、`installer/build-installer.ps1`（`-Profile dev`）、`installer/check-nsi.ps1`（新規）、`installer/smoke-test.ps1`（新規）、`installer/tests/*.Tests.ps1`（新規） | D.9、F.5、F.6 |
+| `installer/nsis/mklm.nsi`、`installer/build-installer.ps1`（`-Profile dev`、目印の陽性の対照）、`installer/check-nsi.ps1`（新規）、`installer/smoke-test.ps1`（新規）、`installer/check-build-env.ps1`（新規。A.10 のビルドの前の検査）、`installer/find-marker.ps1`（新規。目印の「ある / ない」の検査）、`installer/tests/*.Tests.ps1`（新規） | D.9、F.5、F.6、A.10 |
 | `.github/workflows/{ci,release,installer,update-canary}.yml` | G.6 |
-| `docs/recovery.md` | 「更新が途中で止まったとき」「更新の後に MKLM が起動しないとき」（D.13） |
+| `docs/recovery.md` | 「更新が途中で止まったとき」「更新の後に MKLM が起動しないとき」（D.13）。「更新がいつも『ファイルを開いていた』『ほかの MKLM が動いていた』で止まるとき」（`holders` の読み方、タスク マネージャーで止める、再起動の直後に更新する。D.8。RED-TEAM-3）。「ほかの利用者の PC で管理者として承認するとき」（D.13。RED-TEAM-2） |
 
 完了の条件: F.2、F.5 が通る。F.6 のリハーサルの手順が動く（実施は同意の後）。
 
@@ -1618,7 +1727,7 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 |---|---|
 | `crates/mklm-client/src/update/**`、`crates/mklm-client/src/lib.rs`、`crates/mklm-client/src/session.rs`（セッションの開始の `RecordTrust` と `Update` の返事の扱いだけ）、`crates/mklm-client/tests/update_*.rs` | H.4、D.2、D.3 の送る側、C.4 の利用者の記録と `RecordTrust` |
 | `crates/mklm-win/src/{user_dirs.rs,ui/open_url.rs}`、`crates/mklm-win/src/session.rs`（`register_after_update` / `unregister_after_update` だけ） | E.1、E.7、D.10 |
-| `apps/mklm/**`（`state.rs` の `SessionPhase::Updating`、`UacNoticeOrigin`、`quit_if_idle`、`state/update.rs`、`vm/update.rs`、`vm/mod.rs` の許可リスト、`i18n.rs`、`ui/screens/update.slint`、`app.slint`、`translations/`、`settings.rs`、`args.rs`（`--after-update`、開発用の `--update-endpoint`）、`worker.rs`、`app.rs`（`instance_command` の `QuitIfIdle`）、`single_instance.rs`（遅れて届いた `quit-if-idle` の扱い）、`tray.rs`、`tests/*`） | E 章 |
+| `apps/mklm/**`（`state.rs` の `SessionPhase::Updating`、`SessionPurpose` と `AppState::session_purpose`、`UacNoticeOrigin`、`quit_if_idle`、`state/update.rs`、`vm/update.rs`、`vm/mod.rs` の許可リスト、`i18n.rs`、`ui/screens/update.slint`、`app.slint`、`translations/`、`settings.rs`、`args.rs`（`--after-update`、開発用の `--update-endpoint`）、`worker.rs`、`app.rs`（`instance_command` の `QuitIfIdle`）、`single_instance.rs`（遅れて届いた `quit-if-idle` の扱い）、`tray.rs`、`tests/*`） | E 章 |
 | `apps/mklm-cli/src/{update.rs,main.rs}` | D.14（終了コード、更新中の早い終了） |
 
 完了の条件: F.4 が通る（結合テストは統合の後）。
@@ -1627,7 +1736,7 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 
 **ci.yml に足すもの**（WP-H）
 
-- F.3: `RUSTFLAGS=--cfg mklm_update_dev`、`CARGO_TARGET_DIR=target\dev-update` で `cargo test -p mklm-update --features winhttp --locked`。
+- F.3: `RUSTFLAGS=--cfg mklm_update_dev`、`CARGO_TARGET_DIR=target\dev-update` で `cargo test -p mklm-update --features winhttp --locked` と `cargo test -p mklm-win --features net --test net_proxy --locked`、続けて同じ設定で 3 つの exe をビルドし、目印が**ある**ことを確かめる（A.10 の陽性の対照。FIX-VERIFICATION-3）。
 - `cargo tree -p mklm-helper -e features --locked` の出力に `mklm-win feature "net"` と `mklm-update feature "winhttp"` がないこと。
 - `installer/check-nsi.ps1` と、その Pester のテスト（D.9.3、F.2）。
 
@@ -1639,9 +1748,10 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 **release.yml に足すもの**（WP-H）
 
 - 権限: `build` のジョブに `id-token: write` と `attestations: write`（来歴の証明）、`contents: read`。`draft-release` は `contents: write` のまま。
+- `build` のジョブの `actions/checkout` に `fetch-depth: 0` を付ける（すべての履歴とタグ。`check-keys` が過去のタグの信頼の起点ファイルを `git show` で読むため。今は既定の 1 で、タグを取らない。FIX-VERIFICATION-15）。`persist-credentials: false` はそのまま。
 - ビルドの前:
-  - A.10 の守り（`RUSTFLAGS` などの環境変数、`.cargo/config.toml` の表）。
-  - `cargo xtask check-keys`（鍵がない、壊れた、役割の数が違う、ID の使い回しのリリースを止める。B.2）。
+  - A.10 の守り（`installer/check-build-env.ps1`: `RUSTFLAGS`、`CARGO_TARGET_*_RUSTFLAGS`、`RUSTC_WRAPPER` などの環境変数、リポジトリと親のフォルダーと `CARGO_HOME` の Cargo の設定ファイル）。ワークフローのどのコマンドにも `--config` を書かない。
+  - `cargo xtask check-keys`（鍵がない、壊れた、役割の数が違う、ID の使い回し、失効させた ID の再利用のリリースを止める。過去のタグを読めなければ失敗。B.2、B.3）。
   - **NSIS の固定**（SECURITY-1）: `choco install nsis` をやめ、公式の `nsis-3.12.zip`（SourceForge）をダウンロードし、ワークフローに書いた SHA-256 と一致しなければ失敗。展開した `makensis.exe` を `build-installer.ps1 -Makensis` に渡す。SHA-256 の値は、WP-H が一度ダウンロードし、SourceForge が表示するハッシュと照らしてから書く（L 章）。
 - ビルドの後:
   - 3 つの exe の `VersionInfo.IsDebug` が false。6 つの exe（2 つのジョブ）に目印の文字列がない（A.10）。
@@ -1657,8 +1767,9 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 **update-canary.yml（新規。WP-H。OPS-UX-TEST-3）**
 
 - きっかけ: `release: [published]`、毎週（例: 月曜 03:17 UTC）、`workflow_dispatch`。
-- 権限: `contents: read` だけ。secrets を使わない。`runs-on: windows-latest`。
-- `cargo xtask verify --remote --installers --min-days-left 60` と `cargo xtask fetch-smoke`。更新情報がない、署名が通らない、tag が合わない、期限まで 60 日未満、インストーラーの大きさかハッシュが違えば失敗し、GitHub がメンテナーにメールで知らせる。
+- 権限: `contents: read` だけ。自分で登録した secrets を使わない（`gh` には自動の `GITHUB_TOKEN` を `GH_TOKEN` として渡す）。`runs-on: windows-latest`。
+- `cargo xtask verify --remote --installers --min-days-left 60 --newest-published` と `cargo xtask fetch-smoke`。更新情報がない、署名が通らない、tag が合わない、期限まで 60 日未満、インストーラーの大きさかハッシュが違えば失敗し、GitHub がメンテナーにメールで知らせる。
+- `--newest-published`（RED-TEAM-1）: 配られている `latest.json` の版が、`gh release list --exclude-drafts` の安定版の形のタグ（公開後にプレリリースの印を付けたものを含む）の最も新しい版より古ければ失敗する。「最新」の印を外された（事故か、リポジトリを握った攻撃者による凍結）ことを、メンテナーが知るため。事故の手順（B.5）で印を外した後は、次の版を出すまで失敗し続ける（それでよい）。
 - 注: 公開のリポジトリの定期のワークフローは、60 日間リポジトリに活動がないと GitHub が止める（GitHub のドキュメント。今回は確かめ直していない）。カレンダーの予定（B.5 の注）を残す。
 
 **レビューで確かめること**（m2 K、m3 I の規則への追加）
@@ -1670,9 +1781,11 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 - helper の固定のコマンドラインは 3 つ（パイプのセッション、`--uninstall-restore`、`--run-update`）で、どれも手書きの厳密なパーサー。
 - **H1 が H2 を、H2 が NSIS を起動するときは、`runner_environment` の最小の環境ブロックを明示し、親の環境を引き継がない**。作業フォルダーは System32（SECURITY-6）。
 - **H2 は、ほかのどの COM の呼び出しより前に `CoInitializeSecurity`（`RPC_C_IMP_LEVEL_IDENTIFY`、`EOAC_NO_CUSTOM_MARSHAL | EOAC_DISABLE_AAA`）を呼ぶ**（SECURITY-8）。
-- **H2 は、多重起動のパイプを名前の厳密な検査に通してから開く**。`quit` を送らず、`quit-if-idle` だけを送る（SECURITY-7、RELIABILITY-1）。
+- **H2 は、多重起動のパイプを列挙せず、動いている `$INSTDIR\mklm.exe` のプロセスのセッションと SID から名前を計算し、厳密な検査にも通してから開く**（FIX-VERIFICATION-5）。`quit` を送らず、`quit-if-idle` だけを送る（SECURITY-7、RELIABILITY-1）。
+- 通常用の鍵の署名の中の、埋め込みのバックアップ用の鍵の失効は無視され、記録されない（B.2 の規則 2。F.1 の「バックアップ用の鍵の回転」。FIX-VERIFICATION-1）。
+- `LastResult` の `holders` に利用者の SID を入れない（RED-TEAM-3）。［インストーラーを実行］の周りの文に「検証済み」がない（RED-TEAM-2）。
 - **WinHTTP は `WINHTTP_OPTION_AUTOLOGON_POLICY` を HIGH にし、`WinHttpSetCredentials` を呼ばない**（SECURITY-13）。
-- 本番以外の URL、平文 HTTP、開発用の鍵が `#[cfg(all(debug_assertions, mklm_update_dev))]` の外にない（A.10）。
+- 本番以外の URL、平文 HTTP、開発用の鍵が `#[cfg(all(debug_assertions, mklm_update_dev))]` の外にない（A.10）。開発用の分岐が `black_box(&DEV_MARKER)` で目印を参照している。ワークフローに `--config` と、フラグを足す環境変数がない。
 - **`xtask` に秘密鍵のファイルを開くコードがなく、パスワードを尋ねない。`xtask` の通常の依存に `minisign` のクレートがない**（B.1、B.3）。
 - `verify_manifest` は署名を確かめる前に更新情報の中身を解析しない（C.3 の 6）。失効の規則（B.2 の表）と、巻き戻しのしきい値（記録は `min(issued_at, now)`、判断は鍵をまたいだ最大値）が F.1 のテストと合っている。
 - H2 はインストーラーのハンドルを `CreateProcessW` まで閉じない。インストーラーを一時停止で作り、`Run.installer` を書いてから再開する。H2 は自分のトークンで GUI を起動せず、起動し直しは最後の手順。
@@ -1694,17 +1807,24 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 7. **有効期限の失効**: メンテナーが 13 か月リリースしないと、全員に期限切れの情報とバナーが出る（B.4）。見張りが 60 日前から知らせる。
 8. **鍵をなくす**: 両方をなくすと自動更新が止まり、手で入れ直してもらうしかない（B.7）。**バックアップ用の鍵の漏れは、通常用の漏れと同じかそれ以上に重い**（B.2 の規則 4）。通常用を替えた後の移行の窓では、バックアップ用の鍵をリリースのたびに使う。
 9. **feature の統合**: ワークスペースのビルドで helper にも WinHTTP のコードがコンパイルされる。リンカーが落とす前提で、release.yml のインポートの検査で守る（A.9）。
-10. **ほかの利用者の MKLM を終わらせる**: 何もしていない MKLM は、その利用者の同意なしに終わり、**その利用者が開き直すかサインインし直すまで戻らない**（ユーザーの切り替えで戻るのは再接続で、Run キーは動かない。D.8、J 章の質問 2）。
+10. **ほかの利用者の MKLM を終わらせる**: 何もしていない MKLM は、その利用者の同意なしに終わり、**その利用者が開き直すかサインインし直すまで戻らない**（ユーザーの切り替えで戻るのは再接続で、Run キーは動かない。D.8、J 章の質問 2）。更新の途中（`ready` から `finishing`）にサインインした、または MKLM を開いたほかの利用者の MKLM も、起動を見送り、次に開くかサインインするまで動かない（D.13 の 1。FIX-VERIFICATION-9）。
 11. **ロックの受け渡しの隙間**: H1 がロックを放してから H2 が取るまでの間に、ほかの書き手が操作を始めうる。H2 がジャーナルを確かめ直して止めるので安全だが、更新はやり直しになる（D.7 の 10）。
 12. **ジョブ オブジェクト**: H1 が kill-on-close のジョブに入っていると、H1 の終了で H2 も終わる。H1 は UAC（AppInfo）が作るので呼び出し元のジョブには入らないはずだが、確かめていない。H2 は `ready` の前に H1 に見られているので、止められても `Interrupted` として検出される。
 13. **更新とアンインストールの同時実行**: アンインストーラー（`--uninstall-restore` はロックで待つが、ファイルの削除は止まらない）と重なると、結果が壊れうる。起こりにくいので、検出（D.13）に任せる。
 14. **x64 版を ARM64 の PC で使っている利用者**: ARM64 版に切り替わらない（C.7。J 章の質問 1）。
 15. **リハーサルと本番の違い**: F.6 はデバッグ ビルドと平文の HTTP で、TLS、GitHub、リリース ビルドの最適化は F.7 と F.8 でしか確かめられない。本番の取得の経路は `fetch-smoke` で v0.2.0 の前に確かめる。
-16. **ほかの利用者による妨害**（SECURITY-10）: 標準ユーザーは Program Files のファイルを開いたままにして、更新と手でのインストールを遅らせられる。半端には入らない（D.9.2）が、防ぎようがない。多重起動のパイプの偽物を大量に作って H2 を 20 秒待たせることもできる（D.8）。
+16. **ほかの利用者による妨害**（SECURITY-10。FIX-VERIFICATION-7、RED-TEAM-3 で書き直した）: この PC の**どの利用者も、期限なしに、すべての更新（セキュリティの修正を含む）と手でのインストールを止め続けられる**。半端には入らない（D.9.2）が、防ぎようがなく、自動で抜ける方法もない。方法は少なくとも次の 4 つ。
+    - `$INSTDIR` の exe を削除の共有なしで開いたままにする（D.8 の 4 の `FilesInUse`、NSIS の 26）。
+    - 自分の MKLM を何かの途中（キーボードの変更の確認待ちなど）にしておく、または自分の MKLM に手を加えて `quit-if-idle` にいつも `busy` を返させる（`InstanceBusy`）。
+    - `mklm-cli`（`set` の `Continue? [y/N]` など）を入力待ちのまま置く（`ProgramsStillRunning`。F.7 の T-UPD-6A と同じ形）。
+    - GUI より先に、その利用者の多重起動のパイプの名前を作っておく（その GUI は `NotOurs` になり、3 の待ちで `ProgramsStillRunning`。D.8 の 2）。
+    - 管理者への手がかりとして、結果と `update --status` に相手のプロセス（PID、セッション ID、名前）を残す（D.8、E.6）。管理者はそのプロセスを止めるか、PC を再起動してほかの利用者がサインインする前に更新する（`docs/recovery.md`）。J 章の質問 2 のどの選択肢でも、この妨害は変わらない。
 17. **認証の要るプロキシ**（SECURITY-13）: Windows の資格情報を自動で送らないので、統合認証のプロキシの内側では自動更新が使えない（J 章の質問 8）。
 18. **機械の記録の遅れ**（SECURITY-5）: 機械の記録が進むのは誰かが helper を起動したときだけなので、悪意のある利用者が管理者に古い正しい版を入れさせる攻撃は、記録が進んでいない PC では防げない（C.4）。
 19. **来歴の証明とレビューの限界**（SECURITY-1）: 来歴の証明は「どのワークフローが、どのコミットから作ったか」を示すだけ。依存のクレートや GitHub のランナーそのものが侵されていれば防げない。差分のレビューと、任意の手元のビルドとの比べ合わせで減らす。
 20. **公式の `minisign` の信頼**: 秘密鍵に触れる唯一の道具なので、初回に作者の署名で確かめ、ハッシュを固定し、鍵と同じ媒体に置く（B.5）。作者の鍵そのものが侵されれば防げない。
+21. **署名する PC で動く開発のコード**（FIX-VERIFICATION-16）: `prepare-release` とふだんの開発は、依存のクレートのビルド スクリプトと proc-macro をメンテナーの権限で実行する。侵された依存が常駐すれば、数分後につなぐ鍵のファイルとパスワードを盗める（B.6 の「残る危険」）。署名専用の Windows のアカウント（J 章の質問 6 の (c)）で、利用者の権限の常駐を締め出す。管理者の権限まで奪われた場合と、署名する中身を作る `xtask` そのものが侵された場合は、それでも防げない（19 と同じく、来歴の証明、公開後の検査、見張りで後から見つける）。
+22. **凍結**（RED-TEAM-1）: GitHub のリポジトリに書ける攻撃者（「最新」の印を外す、リリースを消す）か、TLS を検査するプロキシを握った攻撃者は、正しく署名された古い更新情報を見せ続けて、新しい版（セキュリティの修正を含む）を隠せる。確認は成功し続け、画面は「最新です」のまま。自動で知らせるのは `expires` だけで、最長で有効期限の長さ（既定 400 日）かかる（B.4 の 4）。期限を短くすれば早まる（J 章の質問 3）。時刻の新しさだけを頻繁に保証する別の鍵（TUF の timestamp の役割）は、オンラインの鍵が要るので、今の決定（秘密鍵はオフラインだけ）の外にある。
 
 ---
 
@@ -1766,7 +1886,8 @@ pub const MAX_SIGNATURE_LEN: usize = 4 * 1024;
 pub const MAX_INSTALLER_LEN: u64 = 64 * 1024 * 1024;
 pub const MAX_VALIDITY_SECS: u64 = 800 * 86_400;
 pub const DEFAULT_VALIDITY_DAYS: u64 = 400;
-/// Releases published this recently must accept a new manifest's signatures (xtask, B.3).
+/// A release stays a strand-check target until this many days after its successor was published
+/// (xtask `window_targets`, design m5b B.3; FIX-VERIFICATION-2).
 pub const TRANSITION_WINDOW_DAYS: u64 = 400;
 /// `key_ids` holds 1 or 2 IDs.
 pub const MAX_KEY_IDS: usize = 2;
@@ -2031,7 +2152,8 @@ pub struct VerifiedManifest {
     pub signer_is_dev: bool,
     pub key_ids: Vec<KeyId>,
     /// The revocations this build records: embedded primary keys other than the signer, with
-    /// their fingerprints (design m5b B.2 rule 2). Unknown IDs are not here.
+    /// their fingerprints (design m5b B.2 rule 2). Unknown IDs, and the embedded backup key in a
+    /// primary-signed manifest (ignored, FIX-VERIFICATION-1), are not here.
     pub revoked: std::collections::BTreeMap<KeyId, KeyFingerprint>,
     pub min_from_version: Option<Version>,
     pub asset: SelectedAsset,
@@ -2566,15 +2688,48 @@ impl InstallState {
     pub fn consistent_version(&self) -> Option<Version>;
 }
 
+/// A process that kept the update from running (RED-TEAM-3): for the administrator, in the
+/// technical details and `update --status`. No user SID (`LastResult` is readable by Users).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileHolder {
+    pub pid: u32,
+    pub session_id: u32,
+    /// Executable file name (Restart Manager's `strAppName` or the image's file name), at most
+    /// 260 characters, control characters removed.
+    pub name: String,
+}
+
+/// A running installed MKLM program (design m5b D.8 step 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningProgram {
+    pub identity: ProcessIdentity,
+    pub kind: ProgramKind,
+    pub session_id: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "kebab-case")]
 pub enum NotInstalledReason {
     Refused(UpdateRefusal),
     CallerDidNotExit,
-    InstanceBusy,
-    ProgramsStillRunning { programs: Vec<ProgramKind> },
-    /// Opened by another process without delete sharing (SECURITY-10).
-    FilesInUse { programs: Vec<ProgramKind> },
+    /// The sessions whose MKLM answered `busy` (RED-TEAM-3).
+    InstanceBusy {
+        #[serde(default)]
+        sessions: Vec<u32>,
+    },
+    ProgramsStillRunning {
+        programs: Vec<ProgramKind>,
+        #[serde(default)]
+        holders: Vec<FileHolder>,
+    },
+    /// Opened by another process without delete sharing (SECURITY-10); `holders` from the
+    /// Restart Manager, empty when it could not tell (RED-TEAM-3).
+    FilesInUse {
+        programs: Vec<ProgramKind>,
+        #[serde(default)]
+        holders: Vec<FileHolder>,
+    },
     DiskFull { needed: u64, available: u64 },
     /// The session began to end before the installer was started (RELIABILITY-3).
     SessionEnding,
@@ -2700,8 +2855,10 @@ pub mod timing {
     pub const HANDOFF_WAIT: Duration = Duration::from_secs(150);
     /// Caller: reading `Run` after losing the helper past the last chunk.
     pub const CALLER_RUN_POLL: Duration = Duration::from_secs(30);
-    /// GUI: the hand-off overlay stays at least this long (OPS-UX-TEST-15).
-    pub const HANDOFF_OVERLAY_MIN: Duration = Duration::from_secs(5);
+    /// GUI: the hand-off overlay closes by itself after this long; [OK] closes it at once
+    /// (OPS-UX-TEST-15; FIX-VERIFICATION-13 replaced the 5 s minimum). Must stay well below
+    /// `CALLER_EXIT_WAIT` (tested: MAX + 2 s < CALLER_EXIT_WAIT).
+    pub const HANDOFF_OVERLAY_MAX: Duration = Duration::from_secs(15);
     /// GUI: results older than this are marked seen silently (OPS-UX-TEST-6).
     pub const RESULT_SHOW_DAYS: u64 = 14;
     /// GUI: the "no successful check" / "expired" banner (SECURITY-11, OPS-UX-TEST-5).
@@ -2754,10 +2911,13 @@ pub trait RunnerEnv {
     fn free_space_program_files(&mut self) -> Result<u64, String>;
     fn read_install_state(&mut self) -> InstallState;
     // Other MKLM programs (D.8)
-    fn quit_idle_instances(&mut self) -> Vec<InstanceAnswer>;
-    fn running_programs(&mut self) -> Vec<(ProcessIdentity, ProgramKind)>;
-    /// Retried for `FILES_IN_USE_RETRY`; the programs whose file stays in use.
-    fn files_in_use(&mut self) -> Vec<ProgramKind>;
+    /// Each GUI's answer with the session of its pipe (FIX-VERIFICATION-5: names computed from
+    /// the GUI processes, never enumerated).
+    fn quit_idle_instances(&mut self) -> Vec<(InstanceAnswer, u32)>;
+    fn running_programs(&mut self) -> Vec<RunningProgram>;
+    /// Retried for `FILES_IN_USE_RETRY`; the programs whose file stays in use, and who holds them
+    /// (Restart Manager; empty when unknown. RED-TEAM-3).
+    fn files_in_use(&mut self) -> (Vec<ProgramKind>, Vec<FileHolder>);
     // Session end (RELIABILITY-3)
     /// Atomically: if the session end has not begun, answer later WM_QUERYENDSESSION with "block"
     /// and return true; else false.
@@ -3020,6 +3180,24 @@ pub fn stage_update(
     link: &mut dyn StageLink,
     request: &StageUpdateRequest,
 ) -> StageFlowEnd;
+
+/// The helper's handling of `CallerMessage::RecordTrust` (design m5b C.4; SECURITY-5,
+/// FIX-VERIFICATION-6): `acquire_lock(TRUST_LOCK_WAIT)` (else `TrustNotRecorded(Busy)`), reads
+/// the machine record again, `apply_trust_report` against it with `env.anchors()`,
+/// `env.version()`, `env.arch()`, `env.now_unix()`, writes it when changed, releases the lock.
+/// Returns the reply to send; the session goes on whatever it is.
+pub fn record_trust(env: &mut dyn StagerEnv, report: &TrustReport) -> UpdateMessage;
+
+/// The order rule of the caller's messages the helper session enforces (design m5b D.3):
+/// `RecordTrust` only as the first message after `Welcome`. The helper's `serve` loop feeds every
+/// message after `Welcome` through it; `Err` is a protocol violation (`HelperMessage::Error`,
+/// then disconnect).
+#[derive(Debug, Default)]
+pub struct CallerOrder { /* private */ }
+impl CallerOrder {
+    pub fn new() -> CallerOrder;
+    pub fn check(&mut self, message: &CallerMessage) -> Result<(), &'static str>;
+}
 ```
 
 ### H.3 `mklm-win`
@@ -3039,7 +3217,8 @@ pub struct HttpTimeouts {
 
 #[derive(Debug, Clone, Copy)]
 pub struct HttpGet<'a> {
-    /// false only in development builds and only to 127.0.0.1 (refused otherwise).
+    /// false only in development builds: to 127.0.0.1, or to a `.invalid` host through an
+    /// `open_named_proxy` session (F.3); refused otherwise.
     pub secure: bool,
     pub host: &'a str,
     pub port: u16,
@@ -3058,7 +3237,25 @@ impl HttpSession {
     pub fn open(user_agent: &str) -> Result<HttpSession, NetError>;
     #[cfg(all(debug_assertions, mklm_update_dev))]
     pub fn open_direct(user_agent: &str) -> Result<HttpSession, NetError>;
+    /// Tests only (F.3 proxy authentication; FIX-VERIFICATION-4): `WINHTTP_ACCESS_TYPE_NAMED_PROXY`
+    /// with `proxy` = `127.0.0.1:<port>` (anything else refused), no bypass list, the other
+    /// options as `open`, and the given autologon level (`Low` only for the control case).
+    #[cfg(all(debug_assertions, mklm_update_dev))]
+    pub fn open_named_proxy(
+        user_agent: &str,
+        proxy: &str,
+        autologon: AutologonLevel,
+    ) -> Result<HttpSession, NetError>;
     pub fn get(&self, request: &HttpGet<'_>) -> Result<HttpResponse<'_>, NetError>;
+}
+
+#[cfg(all(debug_assertions, mklm_update_dev))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutologonLevel {
+    /// `WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH` (what `open` always uses).
+    High,
+    /// `WINHTTP_AUTOLOGON_SECURITY_LEVEL_LOW`: the F.3 control case only.
+    Low,
 }
 
 impl HttpResponse<'_> {
@@ -3175,6 +3372,11 @@ pub fn read_build_ids(install_dir: &std::path::Path) -> [Option<String>; 3];
 /// Indices into `names` of the files in `install_dir` that cannot be opened with `DELETE` and
 /// full sharing (another handle lacks FILE_SHARE_DELETE). Missing files are not in use.
 pub fn files_in_use(install_dir: &std::path::Path, names: &[&str]) -> Result<Vec<usize>, Error>;
+/// Who holds `paths` open (Restart Manager: `RmStartSession`, `RmRegisterResources`, `RmGetList`,
+/// `RmEndSession`): (PID, session ID, application name) each (RED-TEAM-3). Best effort; the
+/// callers treat an error as "unknown". Whether `RmGetList` reports plain open handles (not only
+/// loaded images) is unverified (design m5b I.16).
+pub fn file_holders(paths: &[std::path::PathBuf]) -> Result<Vec<(u32, u32, String)>, Error>;
 /// `GetDiskFreeSpaceExW` for the caller: free bytes on the volume of `path`.
 pub fn free_space(path: &std::path::Path) -> Result<u64, Error>;
 ```
@@ -3213,6 +3415,18 @@ pub struct ImageProcess {
 }
 /// Every process whose image NT path equals one of `nt_paths` (case-insensitive).
 pub fn processes_with_images(nt_paths: &[String]) -> Result<Vec<ImageProcess>, Error>;
+
+/// One row of `WTSEnumerateProcessesW(WTS_CURRENT_SERVER_HANDLE)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessUser {
+    pub session_id: u32,
+    /// `pUserSid` as `S-1-…` text (`ConvertSidToStringSidW`); `None` when absent.
+    pub user_sid: Option<String>,
+}
+/// PID → session and user SID of every process (design m5b D.8 step 2; FIX-VERIFICATION-5).
+/// Whether `pUserSid` is filled for other users' processes when called from an elevated,
+/// non-SYSTEM process is unverified (design m5b I.12).
+pub fn process_users() -> Result<std::collections::HashMap<u32, ProcessUser>, Error>;
 /// Polls `process_liveness` every 250 ms; true when all are gone within `timeout`.
 pub fn wait_for_exit(processes: &[ProcessIdentity], timeout: std::time::Duration) -> Result<bool, Error>;
 ```
@@ -3240,6 +3454,8 @@ pub enum QuitAnswer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceQuit {
     pub pipe: String,
+    /// The session in the pipe's name.
+    pub session_id: u32,
     pub server_pid: Option<u32>,
     pub answer: QuitAnswer,
 }
@@ -3249,13 +3465,23 @@ pub struct InstanceQuit {
 /// (SECURITY-7). Anything else: `None`, and the pipe is never opened.
 pub fn parse_instance_pipe_name(name: &str) -> Option<(u32, String)>;
 
-/// Design m5b D.8 step 2: only pipes whose name parses and whose session is in `sessions`; at most
-/// `max_pipes`; `per_pipe` each and `total` for all; `pipe::open_client` (SQOS identification,
-/// overlapped I/O); the server process pinned by a handle (or compared by identity before and
-/// after) and checked to run `gui_nt_path` in the pipe's session; sends `quit-if-idle` only.
+/// Pure (FIX-VERIFICATION-5): for each GUI process (from `processes_with_images`) whose
+/// `process_users` row has a SID and the same session, `instance_pipe_path(session, sid)` —
+/// kept only if its name also passes `parse_instance_pipe_name`; at most `max_pipes`, in input
+/// order. Returns (pipe path, the GUI process).
+pub fn instance_pipe_candidates(
+    guis: &[crate::proc_identity::ImageProcess],
+    users: &std::collections::HashMap<u32, crate::proc_identity::ProcessUser>,
+    max_pipes: usize,
+) -> Vec<(String, crate::proc_identity::ImageProcess)>;
+
+/// Design m5b D.8 step 2: finds the processes running `gui_nt_path`, computes their pipe names
+/// with `instance_pipe_candidates` (never enumerates `\\.\pipe\`), opens each with
+/// `pipe::open_client` (SQOS identification, overlapped I/O), `per_pipe` each and `total` for all;
+/// the server must be that GUI's PID, pinned by a handle (or compared by identity before and
+/// after), running `gui_nt_path` in the pipe's session; sends `quit-if-idle` only.
 pub fn quit_idle_instances(
     gui_nt_path: &str,
-    sessions: &[u32],
     per_pipe: std::time::Duration,
     total: std::time::Duration,
     max_pipes: usize,
@@ -3364,9 +3590,11 @@ pub fn update_cache_dir() -> Result<std::path::PathBuf, Error>;
 // crates/mklm-win/src/ui/open_url.rs  (feature "gui", WP-C)
 /// Opens `<repository>/releases/tag/v<version>`; `version` must be `X.Y.Z` digits.
 pub fn open_release_page(version: &str) -> Result<(), Error>;
-/// `ShellExecuteExW` with `runas` of a verified installer in the user's update cache, on the
-/// user's button press only (design m5b D.13; RELIABILITY-2). `Error::Cancelled` when UAC is
-/// declined.
+/// `ShellExecuteExW` with `runas` of an installer in the user's update cache, on the user's button
+/// press only (design m5b D.13; RELIABILITY-2). The caller's size and SHA-256 check only catches a
+/// corrupted file: the signed-in user can swap the file afterwards, so this path is no more
+/// trusted than running a downloaded installer by hand (RED-TEAM-2). `Error::Cancelled` when UAC
+/// is declined.
 pub fn run_installer_interactive(installer: &std::path::Path) -> Result<(), Error>;
 ```
 
@@ -3486,8 +3714,11 @@ impl UpdateCache {
 ```rust
 // update/classify.rs
 /// Design m5b E.6: the class and message ID of a check failure. `not_found_days` = days since the
-/// run of failures began (NotFound turns structural after `NOT_FOUND_STRUCTURAL_DAYS`).
-pub fn classify(error: &CheckError, not_found_days: u64) -> (ErrorClass, &'static str);
+/// run of failures began (NotFound turns structural after `NOT_FOUND_STRUCTURAL_DAYS`). `None`
+/// for what is not a failure (both `Cancelled`s, `Unavailable(NotConfigured)`,
+/// `Unavailable(NotInstalledCopy)`): not recorded, `last_check` unchanged. `Rollback` is
+/// `Structural` (FIX-VERIFICATION-12).
+pub fn classify(error: &CheckError, not_found_days: u64) -> Option<(ErrorClass, &'static str)>;
 ```
 
 ```rust
@@ -3643,10 +3874,11 @@ impl HandOffProbe for RunRecordProbe { /* … */ }
 
 | 名前 | 場所 | 中身 |
 |---|---|---|
-| `SessionPhase::Updating { id: SessionId, stage: UpdateStage }` | `apps/mklm/src/state.rs` | 更新のセッション（接続の後）。UAC の間は今の `SessionPhase::Launching { id }` を使い、セッションの種類で区別する |
+| `SessionPhase::Updating { id: SessionId, stage: UpdateStage }` | `apps/mklm/src/state.rs` | 更新のセッション（接続の後）。UAC の間は今の `SessionPhase::Launching { id }` を使い、下の `session_purpose` で区別する |
+| `SessionPurpose::{Change, Update}`、`AppState::session_purpose: Option<SessionPurpose>` | 同上 | `Launching` にするのと同時に書き、セッションが終わったら `None`。`Notice::Connected` で `Update` なら `Updating { stage: Sending }`、`Change` なら `Running` へ（E.4.1。FIX-VERIFICATION-11）。名前を `SessionKind` にしないのは、`mklm_client::session::SessionKind { Request, Recovery }`（`Notice::Connected` の中身）とぶつかるため |
 | `UpdateStage::{Sending { sent: u64, total: u64 }, StartingRunner, HandedOff}` | 同上 | E.4.1 の列 |
 | `UacNoticeOrigin::{Change, Update}`（`AppState::uac_origin`） | 同上 | UAC の説明の画面の［続ける］と［キャンセル］の行き先（E.4） |
-| `OverlayKind::UpdateHandOff` | 同上 | 引き継ぎのオーバーレイ（5 秒以上） |
+| `OverlayKind::UpdateHandOff` | 同上 | 引き継ぎのオーバーレイ（［OK］か `HANDOFF_OVERLAY_MAX` の 15 秒で閉じる。E.4） |
 | `state::quit_if_idle(&mut AppState, received: Instant) -> (Vec<Effect>, InstanceReply)` | 同上 | E.4.1 の `quit-if-idle` の決まり |
 | `Settings.update.{auto_check, skipped_version, result_seen, started_run, closed_by_update, stale_notice_at, rollback_notice_for}` | `apps/mklm/src/settings.rs` | E.1 |
 
@@ -3685,8 +3917,13 @@ JSON の例（形を固定するテストの期待値に使う）:
 ```
 
 ```json
-// LastResult: not installed, another user's MKLM was busy
-{"schema":1,"run_id":"0.2.1-3f9a0c2b7d1e4a65","from_version":"0.2.0","to_version":"0.2.1","arch":"x64","finished_at":1792022490000,"outcome":{"kind":"not-installed","detail":{"reason":"instance-busy"}},"installer_exit":null,"installed_version":"0.2.0","gui_relaunch_attempted":true}
+// LastResult: not installed, another user's MKLM (session 2) was busy
+{"schema":1,"run_id":"0.2.1-3f9a0c2b7d1e4a65","from_version":"0.2.0","to_version":"0.2.1","arch":"x64","finished_at":1792022490000,"outcome":{"kind":"not-installed","detail":{"reason":"instance-busy","sessions":[2]}},"installer_exit":null,"installed_version":"0.2.0","gui_relaunch_attempted":true}
+```
+
+```json
+// LastResult: not installed, H2 found mklm.exe held open (RED-TEAM-3)
+{"schema":1,"run_id":"0.2.1-3f9a0c2b7d1e4a65","from_version":"0.2.0","to_version":"0.2.1","arch":"x64","finished_at":1792022490000,"outcome":{"kind":"not-installed","detail":{"reason":"files-in-use","programs":["gui"],"holders":[{"pid":7120,"session_id":2,"name":"powershell.exe"}]}},"installer_exit":null,"installed_version":"0.2.0","gui_relaunch_attempted":true}
 ```
 
 ```json
@@ -3726,12 +3963,14 @@ JSON の例（形を固定するテストの期待値に使う）:
 7. **サインアウトとインストール**（D.7、D.12）: `installing` の間はセッションの終了を止めることにした。0x3FF の H2 に `WM_QUERYENDSESSION` が NSIS より先に届くこと、Windows が理由の文をどう見せるかは、F.6 と T-UPD-16 で確かめる。
 8. **`ProgramData` の先回り**（m2 I.18）: `Updates` も先回りして作られうる。隔離の仕組み（m2 S1）がそのまま効くが、隔離できない場合は更新も `Storage` で止まる。
 9. **従量制の接続**（E.1）: ダウンロードを自動で行う。問題になれば、`NetworkInformation` の接続の費用を見て止める。
-10. **`CARGO_CFG_DEBUG_ASSERTIONS`**（A.10）: ビルド スクリプトに、対象のデバッグの表明の設定が渡るか。WP-0 が確かめる。渡らなくても、目印の検査が守る。
+10. **`CARGO_CFG_DEBUG_ASSERTIONS`**（A.10）: ビルド スクリプトに、対象のデバッグの表明の設定が渡るか。WP-0 が確かめる。渡らなくても、ビルドの前の環境の検査と、陽性の対照つきの目印の検査が守る。
 11. **ほかの利用者のセッションでの起動し直し**（D.8）: `quit-if-idle` で終わらせたほかの利用者の GUI は、その利用者が開き直すかサインインし直すまで戻らない。タスク スケジューラーの 1 回だけのタスク（その利用者の SID、`TASK_LOGON_INTERACTIVE_TOKEN`、`RunLevel` LUA）で戻す案は、管理者がパスワードなしで登録できるか未確認で、コードも増えるので採らなかった（J 章の質問 2）。
-12. **ほかの利用者の GUI のプロセスを開けるか**（D.8）: 昇格した H2 が、ほかの利用者の `mklm.exe` を `PROCESS_QUERY_LIMITED_INFORMATION` で開けるかは確かめていない。開けなければ、作成時刻付きの識別を前後で比べる方式に落ちる。
+12. **ほかの利用者の GUI のプロセスを開けるか、SID が取れるか**（D.8）: 昇格した H2 が、ほかの利用者の `mklm.exe` を `PROCESS_QUERY_LIMITED_INFORMATION` で開けるかは確かめていない。開けなければ、作成時刻付きの識別を前後で比べる方式に落ちる。また、パイプの名前を計算するのに使う `WTSEnumerateProcessesW` の `pUserSid` が、SYSTEM でない昇格したプロセスから見て、ほかの利用者のプロセスについても入っているかを、この PC で確かめていない（Microsoft Learn は「プロセスのプライマリ トークンの利用者の SID」とだけ書く。FIX-VERIFICATION-5）。入っていなければ、その GUI は飛ばされ、D.8 の 3 の待ちで `ProgramsStillRunning` になる（安全側）。F.6 の任意の 2 つ目のアカウントか T-UPD-7 で確かめる。
 13. **再現可能なビルド**（B.5 の 5）: 同じコミットを手元でビルドして CI と同じハッシュになるかは確かめていない（PDB のパス、時刻、NSIS の圧縮など）。比べるのは任意で、違っても直ちに異常とはしない。
 14. **ウイルス対策ソフトの遅れ**（D.4、RELIABILITY-5）: H2 の起動から `ready` までの時間。F.6 と T-UPD-15 で測り、120 秒で足りなければ見直す。
 15. **最小の環境ブロック**（D.9.4）: NSIS、プラグイン、`mklm.exe --quit` が、ほかの環境変数を必要としないか。F.6 と煙の試験で確かめる。
+16. **Restart Manager でファイルを開いているプロセスが分かるか**（D.8 の 4。RED-TEAM-3）: `RmGetList` は、読み込まれたモジュールだけでなく、ふつうに開いたファイルのハンドルの持ち主も返すと理解しているが、確かめていない。煙の試験の 4（PowerShell でファイルを開いたまま）と同じ状態で `file_holders` が `powershell.exe` を返すかを、F.6 で確かめる。返さなければ `holders` は空のままで、理由の文は変わらない。
+17. **凍結への備え**（B.4 の 4。RED-TEAM-1）: 自動の信号は `expires` だけ。期限を短くするか（J 章の質問 3）、将来、オンラインの鍵で新しさだけを保証する仕組み（TUF の timestamp）を足すかは、ユーザーの判断に残る。
 
 ---
 
@@ -3740,10 +3979,10 @@ JSON の例（形を固定するテストの期待値に使う）:
 | # | 質問 | 選択肢 | おすすめ |
 |---|---|---|---|
 | 1 | ARM64 の PC で x64 版を使っている利用者を、自動更新で ARM64 版に切り替えるか | (a) 切り替えない（今のアーキテクチャのまま） (b) 自動で切り替える (c) 画面で尋ねる | (a)。ARM64 版は実機で試していない（M6 で試した後に見直す） |
-| 2 | 更新のとき、ほかの利用者（ユーザーの切り替え）の MKLM が何もせず動いていたら | (a) 終わらせて更新する。その利用者の MKLM は、その利用者が開き直すか、サインアウトしてサインインし直すまで戻らない（ユーザーの切り替えで戻るのは再接続で、自動起動は動かない）。次のサインインで結果と「いったん終了していました」が出る (b) 更新をやめて「別のユーザーの MKLM が開いています。そのユーザーに終了してもらってから更新してください」と出す (c) (a) に加えて、タスク スケジューラーでその利用者のセッションに MKLM を起動し直す（コードが増え、動くか未確認） | (a)。自動起動が既定でオンなので、共有の PC ではほかの利用者の MKLM がほぼいつも動いており、(b) では更新がほとんどできない。キーボードの操作の途中や確認待ちなら、どれでも更新をやめる |
-| 3 | 更新情報の有効期限 | (a) 400 日（年 1 回のリリースで切れない） (b) 180 日（5 か月ごとのリリースが要る） (c) 2 年 | (a)。期限は凍結に気付かせるための助言で、30 日以上確認できないときのバナーと、古い更新情報の警告も加えた（E.3）。メンテナーが半年ごとにリリースできるなら (b) の方が、隠された新しい版に早く気付ける |
+| 2 | 更新のとき、ほかの利用者（ユーザーの切り替え）の MKLM が何もせず動いていたら | (a) 終わらせて更新する。その利用者の MKLM は、その利用者が開き直すか、サインアウトしてサインインし直すまで戻らない（ユーザーの切り替えで戻るのは再接続で、自動起動は動かない）。次のサインインで結果と「いったん終了していました」が出る (b) 更新をやめて「別のユーザーの MKLM が開いています。そのユーザーに終了してもらってから更新してください」と出す (c) (a) に加えて、タスク スケジューラーでその利用者のセッションに MKLM を起動し直す（コードが増え、動くか未確認） | (a)。自動起動が既定でオンなので、共有の PC ではほかの利用者の MKLM がほぼいつも動いており、(b) では更新がほとんどできない。キーボードの操作の途中や確認待ちなら、どれでも更新をやめる。**注**（FIX-VERIFICATION-7）: どの選択肢でも、この PC のほかの利用者は更新を期限なしに止め続けられる。MKLM のファイルを開いたままにする、自分の MKLM を何かの途中にしておく（または手を加えていつも `busy` を返させる）、`mklm-cli` を入力待ちのまま置く、などで（G.7 の 16）。半端には入らず、管理者には相手のプロセスが示される |
+| 3 | 更新情報の有効期限（凍結に気付くまでの最長の時間でもある） | (a) 400 日（年 1 回のリリースで切れない） (b) 180 日（5 か月ごとのリリースが要る。見張りは期限の 60 日前に知らせる） (c) 2 年 | **(b) に変えた**（RED-TEAM-1）。レビュー第 1 回の後の版は「30 日以上確認できないときのバナーと巻き戻しの警告も凍結に気付かせる」として (a) を勧めたが、誤りだった: 正しく署名された古い更新情報を見せ続けられると、確認は成功し続け、どちらも出ない。凍結を自動で知らせるのは期限だけで、期限の長さがそのまま、隠されたセキュリティの修正に気付くまでの最長の時間になる（B.4 の 4）。期限はインストールの門ではないので、メンテナーがリリースできなかったときの代償は、利用者に出る「期限切れ」の情報の表示（とバナー 30 日に 1 回）だけ。年に 2 回以上リリースできないなら (a) |
 | 4 | CLI からインストールできるようにするか | (a) 確認と状態の表示だけ (b) インストールもできる | (a)。スクリプトはインストーラーを直接 `/S` で実行できる |
-| 6 | 署名をする PC | (a) 普段の開発機。ただし、署名の間はネットワークを切る、F.6 のデバッグ ビルドと開発用の鍵が残っていない、署名は鍵の USB の公式の `minisign` だけで行う（B.6） (b) 専用のオフラインの PC | (a)。パート タイムの 1 人のメンテナーには (b) は重い。秘密鍵に触れるのが固定のハッシュの 1 つの実行ファイルだけになったので、(a) の危険は小さくなった |
+| 6 | 署名をする PC | (a) 普段の開発機の、普段のアカウント。署名の間はネットワークを切る、F.6 のデバッグ ビルドと開発用の鍵が残っていない、署名は鍵の USB の公式の `minisign` だけで行う（B.6）。**残る危険**: `prepare-release` とふだんの開発は、依存のクレートのビルド スクリプトと proc-macro を同じアカウントで実行する。侵された依存が常駐すれば、数分後につなぐ鍵のファイルと、打ち込むパスワードを盗み、ネットワークが戻った後に送り出せる（FIX-VERIFICATION-16） (b) 専用のオフラインの PC（または毎回きれいな状態から起動する仮想マシンやライブ USB） (c) 普段の開発機に、署名専用の標準ユーザーのアカウントを 1 つ作る。そのアカウントでは cargo も git も実行しない。署名の前に開発用のアカウントから**サインアウト**してから、そのアカウントで署名する（B.5 の手順 7〜10） | **(c)**。アカウントを 1 つ作り、署名のたびにサインアウトとサインインを 1 回ずつ足すだけで、(a) の残る危険のうち、利用者の権限で常駐するものを締め出せる。管理者の権限まで奪われた場合は (b) でなければ防げない |
 | 7 | 従量制の接続でも自動でダウンロードするか | (a) する（数 MB） (b) しない | (a) |
 | 8 | 認証の要るプロキシ（Windows の統合認証）への対応 | (a) Windows の資格情報を自動で送らない。そのプロキシの内側では自動更新が使えず、リリース ページへ案内する (b) プロキシにだけ既定の資格情報を送る（同じネットワークの攻撃者が WPAD でプロキシを名乗ると、利用者の NetNTLM の応答が渡る） | (a)。署名で更新の中身は守られても、資格情報の漏れは守れない（SECURITY-13） |
 | 9 | 秘密鍵を扱う道具 | (a) 公式の `minisign` 0.12 の Windows 版（作者の鍵で確かめ、ハッシュを固定し、鍵と同じ媒体に置く。ISC ライセンスで、同意の操作はない） (b) minisign をソースから自分でビルドする（Zig か CMake と libsodium が要る） (c) 一度だけ、読み合わせたコミットから `xtask` の署名の道具をビルドし、鍵と一緒に保管する | (a)。手間が最も少なく、作者の署名で出どころを確かめられる |
@@ -3772,7 +4011,7 @@ JSON の例（形を固定するテストの期待値に使う）:
 | 12 | 確認は起動時と 24 時間ごと（計画 4.2） | 起動の 60〜180 秒後（前回から 24 時間以上なら）と、24 時間 + 0〜60 分ごと（E.1）。未来の時刻の記録は無視する | サインイン直後の負荷を避け、利用者の間で時刻を散らす。時計の誤りで確認が止まらないように（RELIABILITY-8） |
 | 13 | 計画 4.3: `xtask sign-release` が鍵で署名する | 秘密鍵に触れるのは、固定した公式の `minisign` だけ。`xtask` は署名の前の確認（`prepare-release`）と後の確認・公開（`publish`）を行う（B.3、B.5） | 署名の瞬間に、タグのソースと crates.io の依存を、鍵のつながった PC でコンパイルして実行しないため（SECURITY-2） |
 | 14 | 依頼: 更新情報の `key_id`（1 つ）と署名ファイル 1 つ | `key_ids`（1〜2）と、移行の間だけの副署名（A.2、A.4、B.7） | 鍵を替えた後も、古い版が新しい版の更新情報を受け付けられるように（SECURITY-4、OPS-UX-TEST-1） |
-| 15 | 依頼: `revoked_keys` で鍵を失効させる | 失効させられるのは、検証する版の信頼の起点にある通常用の鍵だけ。知らない ID は無視し、記録は指紋で範囲を決める。バックアップ用の鍵は新しい版の信頼の起点でだけ失効させる（B.2） | 漏れた鍵で後継の鍵を先回りして失効させる攻撃を防ぐ（SECURITY-3） |
+| 15 | 依頼: `revoked_keys` で鍵を失効させる | 失効させられるのは、検証する版の信頼の起点にある通常用の鍵だけ。知らない ID は無視し、記録は指紋で範囲を決める。バックアップ用の鍵は新しい版の信頼の起点でだけ失効させ、通常用の鍵の署名の中のバックアップ用の鍵の失効は無視する（拒否しない。FIX-VERIFICATION-1）（B.2） | 漏れた鍵で後継の鍵を先回りして失効させる攻撃を防ぐ（SECURITY-3） |
 | 16 | 依頼: `issued_at` で巻き戻しを防ぐ | 記録は `min(issued_at, 受け取った時刻)` を鍵ごとに持ち、判断は鍵をまたいだ最大値（失効した鍵を除く）で行う（B.2）。`issued_at` は GitHub の時刻から決める（B.3） | 署名した PC の時計の誤りで以後の更新が止まらないように。helper がこの PC の知る最新より古い更新情報を入れないように（SECURITY-5、SECURITY-12、RELIABILITY-6） |
 | 17 | m3 F.5 の A12: 多重起動のパイプの `quit` は更新に使わない | 副作用のない `quit-if-idle` を足し、H2 はそれだけを使う（D.8、E.4.1。m3 F.1、F.5、A12 を合わせて改めた） | `quit` は `busy` を返す前に取り消しと「後で終了」を立て、確認の画面を出すため（RELIABILITY-1、OPS-UX-TEST-4） |
 | 18 | 計画 4.2: 「N 日間、更新情報がない」ときも「更新を確認できません」 | 30 日以上確認に成功していなければ、30 日に 1 回のバナーと設定の行で知らせる（E.3） | レビュー前はこの規則を黙って落としていた（OPS-UX-TEST-5） |
@@ -3790,8 +4029,11 @@ JSON の例（形を固定するテストの期待値に使う）:
 - 公式の `minisign` 0.12: `-S` は既定で prehashed、`-l` で legacy、`-t` で trusted comment、`-x` で署名ファイル、`-W` でパスワードなしの鍵。Windows 版は `minisign-0.12-win64.zip`。作者の公開鍵 `RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3`（README）。
 - Cargo のドキュメント: ビルド スクリプトで `PROFILE` を使うのは勧められない。`CARGO_CFG_<cfg>` はビルドするパッケージの cfg。
 - この PC のレジストリ（読み取りだけ）: ShellWindows の AppID の `RunAs` は `Interactive User`、`LocalServer32` は `rundll32.exe shell32.dll,SHCreateLocalServerRunDll {9BA05972-…}`。
-- コード（main の 37989f8）: `state.rs` の `quit_requested` は、`Running` で `quit_pending` と `CancelSession` を立て、再接続待ちでは終了の確認を出す。`app.rs` の `instance_command` は返事によらず `QuitRequested` を送る。helper の `write_loop` は `busy` の間だけ Heartbeat を送り、`busy` は `Request` の間だけ立つ。`FileLock` の共有は読み取りと書き込み。`mklm.nsi` の 25 は `un.onInit` だけ。各 `build.rs` は `PROFILE` で `VS_FF_DEBUG` を決めている。
+- コード（main の 37989f8）: `state.rs` の `quit_requested` は、`Running` で `quit_pending` と `CancelSession` を立て、再接続待ちでは終了の確認を出す。`app.rs` の `instance_command` は返事によらず `QuitRequested` を送る。helper の `write_loop` は `busy` の間だけ Heartbeat を送り、`busy` は `Request` の間だけ立つ。`FileLock` の共有は読み取りと書き込み。各 `build.rs` は `PROFILE` で `VS_FF_DEBUG` を決めている。`mklm.nsi` には `SetErrorLevel` が 3010 の 1 つしかなく、`.onInit` の拒否は `Abort`、`CloseMklm` と `un.onInit` の拒否は `SetErrorLevel` のない `Quit`（「25 は `un.onInit` だけ」はこの設計の決定で、コードの事実ではない。レビュー第 1 回の後の版は事実として書いていた。FIX-VERIFICATION-10）。`mklm-win::instance` の多重起動のパイプは `FILE_FLAG_FIRST_PIPE_INSTANCE` と最大 1 インスタンスで作られ、名前は `instance_pipe_path(session, sid)`。`mklm_client::session::SessionKind` は `{Request, Recovery}`（H.4 の `SessionPurpose` の名前の理由）。`apps/build_id.rs` は各クレートの `Cargo.toml` と `src/` だけをハッシュし、テストを持たない。release.yml の `actions/checkout` は `fetch-depth` を指定していない（既定の 1。タグなし）。
 - NSIS の `Main.c`: `errlvl` が設定されていれば、それが終了コード（レビューが確認）。
+- NSIS の `util.c` の `myOpenFile`: `CreateFile` の共有は `FILE_SHARE_READ` だけ（2026-09-29 に kichik/nsis の master のソースで確認）。`FileOpen` の `a` が書き込みだけか読み書きかは確かめていない（D.9.3 の結論には影響しない）。
+- Microsoft Learn の `WTS_PROCESS_INFOW`: `SessionId`、`ProcessId`、`pProcessName`、`pUserSid`（「プロセスのプライマリ トークンの利用者の SID」）を持つ（2026-09-29）。
+- Microsoft Learn の `WinHttpOpen`: `WINHTTP_ACCESS_TYPE_NAMED_PROXY` はバイパスの一覧に当たらない名前をプロキシに送る。`<local>` はピリオドのない名前だけをバイパスする（2026-09-29）。
 
 **確かめていないこと**
 
@@ -3800,7 +4042,14 @@ JSON の例（形を固定するテストの期待値に使う）:
 - 公式の `minisign` の Windows 版の配布物が、作者の鍵で署名された `.minisig` を伴うか、legacy の署名か（`verify-signer` は legacy も受け付ける）。ライセンスが ISC であること。
 - `sha2` 0.11.0 と `minisign-verify` 0.3.0 の最低の Rust の版（ツールチェーンは 1.98.1 なので問題ないはず）。
 - `windows` 0.62.2 の feature 名: `Win32_Networking_WinHttp`（`windows::Win32::Networking::WinHttp` のモジュールはドキュメントで確かめた）、`Win32_System_Ole`、`Win32_System_Variant`、`Win32_System_Com`、`IShellDispatch2` などの置き場所。
-- `WINHTTP_OPTION_AUTOLOGON_POLICY` の HIGH が、プロキシへの既定の資格情報の送信も止めること（F.3 の 407 のテストで確かめる）。`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` がループバックの要求をプロキシに送らないか（テストはプロキシなしのセッションを使うので影響しない）。
+- `WINHTTP_OPTION_AUTOLOGON_POLICY` の HIGH が、プロキシへの既定の資格情報の送信も止めること。レビュー第 1 回の後の版は「F.3 の 407 のテストで確かめる」と書いたが、そのテストはプロキシなしのセッションで、プロキシの認証の経路を通らなかった（FIX-VERIFICATION-4）。F.3 の「プロキシの認証の試験」（名前付きのプロキシ、LOW の対照つき）が通るまで未確認。その試験が通っても、`AUTOMATIC_PROXY`（WPAD と PAC）で見つけたプロキシに同じ方針が効くことは前提のまま（未確認）。`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` がループバックの要求をプロキシに送らないか（ループバックのテストはプロキシなしのセッションを使うので影響しない）。
+- `WTSEnumerateProcessesW` の `pUserSid` が、SYSTEM でない昇格したプロセスから、ほかの利用者のプロセスについても得られること（I.12。FIX-VERIFICATION-5）。
+- Restart Manager の `RmGetList` が、ふつうに開いたファイルのハンドルの持ち主を返すこと（I.16。RED-TEAM-3）。`windows` 0.62.2 の feature 名 `Win32_System_RemoteDesktop`（`WTSEnumerateProcessesW`）と `Win32_System_RestartManager`。
+- `std::hint::black_box` で参照した `#[used]` の静的な値が、`/OPT:REF` のリンクの後も 3 つの exe に残ること（A.10。ci.yml と `-Profile dev` の陽性の対照が、残らなければ失敗して知らせる）。
+- `apps/build_id.rs` に `anchors.txt` を足したとき、3 つの exe の `MKLMBuildId` が変わること（WP-0 が一度確かめる。G.2）。
+- `C:\Users\Public` の下に開発用のアカウントが作ったフォルダーに、署名専用のアカウントが書け、その作ったファイルを開発用のアカウントが読めること（B.5 の準備では念のため `icacls` で両方に許可を与える）。
+- 署名専用の Windows のアカウントで、BitLocker To Go の USB メモリの鍵を開けたとき、サインアウトした開発用のアカウントのプロセスが残らないこと（ふつうはサインアウトですべて終わる。B.6）。GitHub の下書きのページがアセットの SHA-256 を表示するか（B.5 の手順 8 の任意の照合の手段にならないか。今の手順は手順 6 の表示と比べるだけ）。
+- 引き継ぎの案内の文（約 110 文字）を、ナレーターが 15 秒で読み終えること（E.4。T-UPD-14 で確かめる）。
 - NSIS: `AllowSkipFiles on` の `File` の失敗のサイレントの既定の答え、`Rename` の失敗が `${Errors}` を立てること、`windows-2025` のランナーが build 26100 であること。NSIS の zip（`nsis-3.12.zip`）の SHA-256（WP-H が SourceForge の表示と照らして記録する）。
 - `CARGO_CFG_DEBUG_ASSERTIONS` がビルド スクリプトに、対象のデバッグの表明の設定として渡ること（I.10）。
 - 昇格したプロセスから `IShellWindows` / `IShellDispatch2` で起動し直す方法が、Windows 11 25H2 で同じ利用者のときに動くこと（M5a では NSIS の `explorer.exe <path>` の方法を確かめた）と、別の管理者のときの COM のアクセスの検査。`EOAC_NO_CUSTOM_MARSHAL | EOAC_DISABLE_AAA` の下で ShellWindows の呼び出しが通ること。
@@ -3817,9 +4066,13 @@ JSON の例（形を固定するテストの期待値に使う）:
 
 ---
 
-## M. レビュー対応（第 1 回、47 件）
+## M. レビュー対応
 
-対応: **採用**（指摘のとおりに変えた）、**一部採用**（目的は受け入れ、方法の一部を変えた、または一部を採らなかった）、**不採用**（採らなかった。理由を書く）。今回は不採用の指摘はない。
+対応: **採用**（指摘のとおりに変えた）、**一部採用**（目的は受け入れ、方法の一部を変えた、または一部を採らなかった）、**不採用**（採らなかった。理由を書く）。
+
+### M.1 第 1 回（47 件）
+
+第 1 回は不採用の指摘はない。第 2 回の検証で誤りが分かった行には「第 2 回で訂正」を書き足した。
 
 | ID | 重さ | 対応 | 何を変えたか / 採らなかった部分とその理由 |
 |---|---|---|---|
@@ -3827,15 +4080,15 @@ JSON の例（形を固定するテストの期待値に使う）:
 | SECURITY-2 | major | 一部採用 | 秘密鍵に触れるのを、作者の鍵で確かめてハッシュを固定した公式の `minisign` 0.12 だけにした（鍵の生成、署名、点検。B.1、B.5、B.6）。`xtask` は秘密鍵のファイルを開くコードもパスワードの入力も持たない。順序: 確認と `latest.json` の作成（オンライン）→ ネットワークを切る → 鍵をつなぐ → 署名 → 外す → つなぐ → 公開。F.6 のデバッグ ビルドと開発用の鍵を残した PC では署名しない（B.6、F.6 の後片付け）。`minisign` のクレートはテストの dev-dependency だけにした。**採らなかった部分**: cargo-deny / cargo-vet の導入。`minisign` のクレートは本物の鍵に触れなくなったので対象から外れ、`minisign-verify` は依存 0 の小さなクレートなので、v0.2.0 の前のソース全体の読み合わせと記録で代える（G.6）。1 人のメンテナーに cargo-vet の運用は重い |
 | SECURITY-3 | major | 採用 | 規則 5 をやめた。失効させられるのは検証する版の信頼の起点にある通常用の鍵だけで、知らない ID は無視する。バックアップ用の鍵は更新情報では失効させられない。記録の失効は (鍵 ID、指紋) の組にした（B.2、C.3 の 10、H.1 の `RevokedKey`）。F.1 にテストを足した |
 | SECURITY-4 | major | 採用 | 副署名 `latest.json.alt.minisig` と `key_ids`（1〜2）。主署名が `UnknownKey` / `RevokedKey` のときだけ副署名を取る（A.4、A.5、C.3）。`prepare-release` は、このタグの失効、公開中の更新情報の失効、`--revoke` の和を `revoked_keys` に求める（B.3 の 9）。B.7 を書き直した（N と N+1 以降の鍵、バックアップ用の鍵の漏れは通常用の漏れと同じかそれ以上、手で入れ直す場合）。回転の版を見逃した利用者の F.1 のテスト |
-| SECURITY-5 | major | 採用 | `CallerMessage::RecordTrust`: GUI と CLI は、どの helper のセッションでも、利用者の記録が機械の記録より進んでいれば、検証済みの更新情報を送り、helper が検証して機械の記録を進める（C.4、D.3）。巻き戻しの判断を鍵をまたいだ最大値（失効した鍵を除く）にした（B.2）。届く範囲の限界を G.7 の 18 に書いた。F.2 と F.1 にテスト |
+| SECURITY-5 | major | 採用 | `CallerMessage::RecordTrust`: GUI と CLI は、どの helper のセッションでも、利用者の記録が機械の記録より進んでいれば、検証済みの更新情報を送り、helper が検証して機械の記録を進める（C.4、D.3）。巻き戻しの判断を鍵をまたいだ最大値（失効した鍵を除く）にした（B.2）。届く範囲の限界を G.7 の 18 に書いた。F.2 と F.1 にテスト（**第 2 回で訂正**: 実際には `RecordTrust` の serde の形しか試していなかった。`apply_trust_report`、helper の処理（`record_trust`、`CallerOrder`）、記録の後の `stage_update` の `Rollback` のテストを足した。FIX-VERIFICATION-6） |
 | SECURITY-6 | major | 採用 | H1 → H2、H2 → NSIS を `CREATE_UNICODE_ENVIRONMENT` の最小の環境ブロック（`runner_environment`）で起動し、`TEMP` / `TMP` は保護された `<run dir>\tmp`、作業フォルダーは System32（D.4 の 18、D.7 の 16、D.9.4）。ブロックの組み立ては純粋な関数とテスト（F.2）、レビューの確認事項（G.6） |
-| SECURITY-7 | major | 一部採用 | パイプの名前を厳密な正規表現に通してから開く（`parse_instance_pipe_name`）。対象は `$INSTDIR\mklm.exe` が動いているセッションだけ、最大 16 本、1 本 5 秒、全体 20 秒、SQOS の識別、サーバーのプロセスをハンドルで固定（開けなければ作成時刻付きの識別を前後で比べる）。`check_pipe_path` も `/`、`.`、`..`、ASCII 以外を拒否（D.8、H.3）。**採らなかった部分**: 列挙をやめて名前を計算する方式。ほかのセッションの利用者の SID を得るには、`WTSQueryUserToken`（SYSTEM の `SE_TCB` が要る）か、ほかの利用者のプロセスのトークンを開く（`SeDebugPrivilege` を有効にするなど、昇格したプロセスの権限を広げる）か、`LookupAccountName`（ドメインのアカウントでは DC が要りうる）が要る。名前の完全な一致の検査で、指摘の UNC への誘導は起こらなくなり、残る遅延は全体の期限で抑えた |
+| SECURITY-7 | major | 採用（第 1 回は一部採用、第 2 回で残りも採用） | パイプの名前を厳密な正規表現に通してから開く（`parse_instance_pipe_name`）。対象は `$INSTDIR\mklm.exe` が動いているセッションだけ、最大 16 本、1 本 5 秒、全体 20 秒、SQOS の識別、サーバーのプロセスをハンドルで固定（開けなければ作成時刻付きの識別を前後で比べる）。`check_pipe_path` も `/`、`.`、`..`、ASCII 以外を拒否（D.8、H.3）。第 1 回では、列挙をやめて名前を計算する方式を採らなかった（理由として「ほかのセッションの利用者の SID には `WTSQueryUserToken`、ほかの利用者のトークンを開くこと、`LookupAccountName` のどれかが要る」と書いた）。**第 2 回で訂正**: その理由は誤りだった。`WTSEnumerateProcessesW` の `WTS_PROCESS_INFOW.pUserSid` で得られる（Microsoft Learn）。列挙をやめ、動いている `$INSTDIR\mklm.exe` のプロセスから名前を計算する方式に改めた（D.8 の 2、H.3。FIX-VERIFICATION-5）。これで偽の名前のパイプで予算を使わせる遅延もなくなった |
 | SECURITY-8 | minor | 採用 | H2 はほかのどの COM の呼び出しより前に `CoInitializeSecurity`（`RPC_C_IMP_LEVEL_IDENTIFY`、`EOAC_NO_CUSTOM_MARSHAL | EOAC_DISABLE_AAA`）を呼ぶ（D.7 の 1、D.10、H.3 の `init_com_for_runner`）。起動し直しは最後の手順（ロックを放し、ハンドルを閉じ、`LastResult` を書いた後）。レジストリの事実を D.10、I.2、L 章に書き、T-UPD-8 を残した |
 | SECURITY-9 | minor | 採用 | 開発用の経路をすべて `cfg(all(debug_assertions, mklm_update_dev))` にした。cfg は F.3 と F.6 のコマンドだけが渡す。`build.rs` は `CARGO_CFG_DEBUG_ASSERTIONS` で `VS_FF_DEBUG` を決める（Cargo が渡すかは WP-0 が確かめる）。release.yml は `RUSTFLAGS` などの環境変数と `.cargo/config.toml` を検査し、6 つの exe の目印を探す（A.10、G.6）。F.6: 開発用の鍵は `%TEMP%` の外に置いて消す、デバッグ ビルドをアンインストールしてから署名する |
-| SECURITY-10 | minor | 採用 | NSIS の 2 段階の置き換え（`.new` に展開、名前の変更で入れ替え、失敗したら戻す）と、終了コード 26（`FILES_IN_USE`）と 27（`FILE_WRITE`）（D.9.1、D.9.2）。H2 は NSIS の前に同じ条件を確かめ、`NotInstalled(FilesInUse)`（D.8 の 4）。ほかの利用者が更新を遅らせられることを G.7 の 16、E.6 の文、J 章の質問 2 の説明に書いた |
+| SECURITY-10 | minor | 採用 | NSIS の 2 段階の置き換え（`.new` に展開、名前の変更で入れ替え、失敗したら戻す）と、終了コード 26（`FILES_IN_USE`）と 27（`FILE_WRITE`）（D.9.1、D.9.2）。H2 は NSIS の前に同じ条件を確かめ、`NotInstalled(FilesInUse)`（D.8 の 4）。ほかの利用者が更新を遅らせられることを G.7 の 16 と E.6 の文に書いた。**第 2 回で訂正**: 「J 章の質問 2 の説明に書いた」は誤りで、書いていなかった。また「遅らせる」ではなく期限のない妨害で、方法もファイルを開くことだけではない（`busy` を返す GUI、入力待ちの CLI、先回りのパイプの名前）。J 章の質問 2 の注、G.7 の 16、D.8 の 4 を書き直し、管理者に相手のプロセスを示す `holders` を足した（FIX-VERIFICATION-7、RED-TEAM-3） |
 | SECURITY-11 | minor | 一部採用 | 30 日以上確認に成功していない、または期限切れのとき、メイン画面のバナーを 30 日に 1 回（E.3）。自動の確認の `Rollback` も警告として見せる（E.3、E.6）。**採らなかった部分**: 期限を 180 日に短くすることは、メンテナーのリリースの頻度（利用者の負担）に関わるので、設計では決めず J 章の質問 3 で尋ねる（おすすめは 400 日のまま。気付かせる仕組みを 2 つ足したため） |
 | SECURITY-12 | minor | 一部採用 | `prepare-release` は `issued_at` を GitHub の `Date` から決め、手元の時計との差が 5 分を超えるか、公開中の `issued_at` 以下なら拒否し、UTC の日付を大きく表示する（B.3 の 7、8）。クライアントの記録は **`min(issued_at, 受け取った時刻)`** にした。**変えた部分**: 指摘の `now + 2 日` ではなく `now` にした。2 日の余裕があると、誤った日付の更新情報を見てから 2 日以内に出た次の正しい版を、毎日確認するクライアントの多くが永久に拒むため（B.2） |
-| SECURITY-13 | minor | 採用 | `WINHTTP_OPTION_AUTOLOGON_POLICY` を HIGH、`WinHttpSetCredentials` を呼ばない、401 と 407 は失敗（A.7、H.3）。F.3 に 401 / 407（NTLM、Negotiate）で `Authorization` を送らないテスト。G.6 の確認事項。統合認証のプロキシの内側で自動更新が使えなくなるので、J 章の質問 8 で確かめる |
+| SECURITY-13 | minor | 採用 | `WINHTTP_OPTION_AUTOLOGON_POLICY` を HIGH、`WinHttpSetCredentials` を呼ばない、401 と 407 は失敗（A.7、H.3）。F.3 に 401 / 407（NTLM、Negotiate）で `Authorization` を送らないテスト（**第 2 回で訂正**: 407 のテストはプロキシなしのセッションで、プロキシの認証の経路を通っていなかった。名前付きのプロキシと LOW の対照の試験を足し、L 章を未確認に戻した。FIX-VERIFICATION-4）。G.6 の確認事項。統合認証のプロキシの内側で自動更新が使えなくなるので、J 章の質問 8 で確かめる |
 | SECURITY-14 | minor | 採用 | 更新のページと UAC の説明の画面に「詳細を表示」でプログラムの場所を確かめる手順と、「MKLM が許可を求めるのは［今すぐ更新］を押した直後だけ」を足した（E.2、E.4）。`install-guide.ja.md` にも書く（G.3） |
 | RELIABILITY-1 | major | 採用 | 副作用のない `quit-if-idle` を足し、H2 はそれだけを使う（D.8、E.4.1、H.3）。`busy` のときは何も変えない。4 秒を過ぎて届いたものは何もしない。m3 F.1、F.5、A12 を改めた。`state.rs` のテスト（F.4） |
 | RELIABILITY-2 | major | 採用 | 2 段階の置き換え（D.9.2）。`.new` の展開の間だけ `AllowSkipFiles on` にして `${Errors}` を見て 27、それ以外は `off`（指摘の「常に `off`」との違いは、置き換える前の失敗を 2 ではなく 27 で報告するため）。終了コード 26 / 27 と 2 の行の訂正（D.9.1）。空き容量の検査（D.4 の 4、D.7 の 12）。CLI の更新中の早い終了（D.14）。キャッシュのインストーラーは成功してそろったときだけ消す（D.11）。そろっていないときの［インストーラーを実行］（D.13）。`docs/recovery.md`（G.4）。煙の試験の 4（D.9.3） |
@@ -3863,12 +4116,39 @@ JSON の例（形を固定するテストの期待値に使う）:
 | OPS-UX-TEST-12 | major | 採用 | `update_dir::read_build_ids` と `InstallState::from_build_ids` の 1 組を H2 と `read_status` が共有（D.13、H.1、H.3、H.4）。`InstanceCommand::QuitIfIdle`（H.3）。E.4.1 の表。GUI の中の名前（`SessionPhase::Updating`、`UacNoticeOrigin` など）を H.4 に固定。各 WP が自分のモジュールの `windows` の features を足してよい（G.2） |
 | OPS-UX-TEST-13 | major | 一部採用 | `key-drill start` / `check`: 公式の `minisign` で nonce に署名し（trusted comment `mklm-key-drill v1`）、`xtask` が最新と 400 日以内のタグのバックアップ用の鍵で確かめる。パスワードの保管を分け、点検の記録を残す（B.6）。**変えた部分**: 指摘の `xtask` が鍵を復号して署名する形は、SECURITY-2 の方針（秘密鍵に触れるのは公式の `minisign` だけ）に反するので、署名は `minisign`、確認は `xtask` に分けた |
 | OPS-UX-TEST-14 | minor | 採用 | release.yml はタグに `-` があれば `--prerelease` の下書き。プレリリースの手順（署名しない、`--latest` を付けない）。`xtask publish` はプレリリースのタグを拒否（B.3、B.5、G.6） |
-| OPS-UX-TEST-15 | minor | 採用 | 引き継ぎのオーバーレイを 5 秒以上、［OK］付き、文を「1 分ほどで自動で開きます。2 分たっても開かない場合は…」に（E.4）。表示する結果がなければ `unregister_after_update`、`--after-update` は `--tray` と同じに（D.13、E.5） |
+| OPS-UX-TEST-15 | minor | 採用 | 引き継ぎのオーバーレイを 5 秒以上（**第 2 回で変更**: 最長 15 秒で自分で閉じ、［OK］でいつでも閉じる。FIX-VERIFICATION-13）、［OK］付き、文を「1 分ほどで自動で開きます。2 分たっても開かない場合は…」に（E.4）。表示する結果がなければ `unregister_after_update`、`--after-update` は `--tray` と同じに（D.13、E.5） |
 | OPS-UX-TEST-16 | minor | 採用 | E.6 をすべての列挙子の表（文の ID、一時 / 構造、次の操作）にした。「スキップした版（未ダウンロード）」と［ダウンロード］（C.5、E.2）。`FILE_NAMES_ALLOWED` に `mklm-cli` と `mklm-helper`、インストーラーの名前は `names` で渡す（E.7） |
 | OPS-UX-TEST-17 | minor | 採用 | SECURITY-9 と合わせて対応（目印の静的な値と release.yml の検査、`CARGO_CFG_DEBUG_ASSERTIONS`）（A.10、G.6） |
 | OPS-UX-TEST-18 | minor | 一部採用 | 鍵をつないでいる間にコンパイルしない点は、SECURITY-2 の対応（署名は公式の `minisign` だけ、`prepare-release` は鍵をつなぐ前）で満たした。時刻の検査は採用したが、差の上限は 1 時間ではなく 5 分にした（RELIABILITY-6 の値。Windows の時刻の同期があれば 5 分で足り、厳しい方が誤りを早く見つける） |
 | OPS-UX-TEST-19 | minor | 採用 | `installer.yml`（PR で `installer/**`、`apps/**`、`Cargo.lock` が変わったとき煙の試験）、直前のリリースからの上書きの試験、`dumpbin` を `vswhere` で探す（D.9.3、G.6） |
 | OPS-UX-TEST-20 | minor | 一部採用 | `update --check` の終了コードを分けた: 0 最新、20 更新あり、21 手で更新が必要、22 このビルドでは使えない、1 確認できなかった、2 使い方の誤り（D.14）。`install-guide.ja.md` に書く。**変えた部分**: 指摘の 10〜12 ではなく 20〜22 にした。書き込みのコマンドの 10（`AWAITING_CONFIRM`）と同じ数が別の意味になるのを避けるため |
 | OPS-UX-TEST-21 | minor | 採用 | RELIABILITY-7 と同じ訂正（D.8、J 章の質問 2、G.7 の 10）。(b) の選択肢の文に「別のユーザー」を入れ、後でその利用者に「いったん終了していました」を出す |
+
+### M.2 第 2 回（20 件: 第 1 回の対応の検証 17 件、新しい攻撃の検討 3 件）
+
+不採用の指摘はない。
+
+| ID | 重さ | 対応 | 何を変えたか / 採らなかった部分とその理由 |
+|---|---|---|---|
+| FIX-VERIFICATION-1 | major | 採用（案 (a)） | 通常用の鍵の署名の中の、埋め込みのバックアップ用の鍵の失効は、`IllegalRevocation` ではなく**無視**（記録しない）にした（B.2 の規則 2 の表と注、規則 4、C.3 の 10、H.1 の `VerifiedManifest::revoked`、K の 15）。攻撃者は失効の行を省けば同じものを作れるので、拒否は何も守っていなかった。B.3 の手順 9 と 10、B.7 の 3、4 行目と注（回転の後の「P2、B2、revoked P1、revoked B1」）を合わせ、F.1 に「バックアップ用の鍵の回転」、`xtask` のテストに取り残しの検査の例を足した。`check-keys` に「過去に失効させた ID を埋め込まない」を足した。案 (b)（手順 9 でバックアップ用の ID を入れない）を採らなかったのは、`revoked_keys` を版ごとに変える規則が複雑になり、引き継ぎの検査（公開中の失効をすべて含む）とぶつかるため |
+| FIX-VERIFICATION-2 | major | 採用 | 取り残しの検査の対象を「窓の中の版」: 後継の公開から 400 日たっていない版と、後継のない版（直前の版）と、このタグ自身、にした（B.3。`xtask::releases::window_targets`）。公開後にプレリリースの印を付けた安定版も含める。0.3 の「移行の窓」、B.7 の 1 行目、`key-drill check`（B.3、B.6。`gh release list` を使うのでネットワークが要る）、H.1 の定数の説明を合わせた。指摘の時系列を `xtask` のテストにした（F.1） |
+| FIX-VERIFICATION-3 | minor | 採用 | 開発用の分岐が `std::hint::black_box(&DEV_MARKER)` で目印を参照する。陽性の対照: ci.yml の F.3 のステップと `build-installer.ps1 -Profile dev` が、開発用の cfg の 3 つの exe に目印が**ある**ことを確かめ、なければ失敗（A.10、F.3、F.6、G.6）。ビルドの前の検査を `CARGO_TARGET_*_RUSTFLAGS`、`RUSTC`、`RUSTC_WRAPPER`、`RUSTC_WORKSPACE_WRAPPER`、`CARGO_BUILD_RUSTC*`、`CARGO_HOME` と親のフォルダーの Cargo の設定ファイル、ワークフローの `--config` に広げた（`installer/check-build-env.ps1`。G.4） |
+| FIX-VERIFICATION-4 | minor | 採用 | `HttpSession::open_named_proxy`（開発用の cfg、`AutologonLevel`）を足し、`https://update.invalid/` への `CONNECT` にプロキシ役のサーバーが 407（NTLM、Negotiate）を返す試験を `crates/mklm-win/tests/net_proxy.rs` に置いた。HIGH では `Proxy-Authorization` が来ないこと、LOW の対照では来ること（来なければ失敗）。チャレンジは返さないので、資格情報からの応答は作られない（F.3、H.3、G.3）。L 章を未確認に戻し、`AUTOMATIC_PROXY` の経路は前提のままと書いた。F.3 の表の 407 の行は状態の番号の写し方の試験と書き直した |
+| FIX-VERIFICATION-5 | minor | 採用 | パイプの列挙をやめ、`processes_with_images` の GUI と `WTSEnumerateProcessesW`（`process_users`）の SID とセッションから `instance_pipe_path` で名前を計算する。正規表現は二重の確かめとして残す（D.8 の 2、H.3 の `instance_pipe_candidates`、`quit_idle_instances` の引数から `sessions` を外した）。多重起動のパイプは最大 1 インスタンスなので、動いている GUI の名前に偽物を足すことはできない。M.1 の SECURITY-7 の行を訂正し、`pUserSid` の未確認を I.12 と L 章に書いた。F.2 に `instance_pipe_candidates` のテスト |
+| FIX-VERIFICATION-6 | minor | 採用 | F.1 に `apply_trust_report`（新しい、同じ、署名の誤り、古い、開発用の鍵、古い版）。helper の処理を純粋な `mklm_ipc::staging::record_trust` と順序の規則 `CallerOrder` にして（H.2）、F.2 に表のテスト（ロックの期限切れで `Busy`、どの返事の後もセッションが続く、2 つ目や遅れた `RecordTrust` はプロトコルの誤り）と、「`RecordTrust`（M2）の後の `StageUpdate`（古い M1）が `Refused(Rollback)`」を足した。結合テストを F.2 に書き、M.1 の SECURITY-5 の行を訂正した |
+| FIX-VERIFICATION-7 | minor | 採用 | J 章の質問 2 に注（どの選択肢でも、ほかの利用者はファイルを開いたままにする、`busy` の GUI（手を加えたものを含む）、入力待ちの CLI などで、更新を止め続けられる）。G.7 の 16 を 4 つの方法に書き直した。M.1 の SECURITY-10 の行を訂正した |
+| FIX-VERIFICATION-8 | minor | 採用 | E.4.1 の `HandedOff` の `quit-if-idle` を `busy`（何も変えない）にした。H2 は呼び出し元の終了を D.8 の 1 で別に待つ。F.4 のテストに `HandedOff` を明記した |
+| FIX-VERIFICATION-9 | minor | 採用 | 起動時に `Run` が `ready` 以降で、セッションが `Run.caller_session` と違う（またはない）GUI は、昇格していなければ自分の RunOnce（`--after-update`）を登録し、`closed_by_update` を書いてから終了する。その利用者の MKLM は、開き直すか次にサインインするまで動かないことを D.13 の 1、E.1、G.7 の 10 に書いた。F.4 のテスト |
+| FIX-VERIFICATION-10 | minor | 採用 | (a) 煙の試験の 3〜5 で `[IO.File]::Open` の権利と共有を正確に決めた（4 は `'Read','ReadWrite'`、5 は `'Read','Read'`）。NSIS の `myOpenFile` の共有が `FILE_SHARE_READ` だけであることは、こちらでも kichik/nsis のソースで確かめた。(b) 26 と 27 の前に `/SD IDOK` の MessageBox（`FILES_IN_USE`、`FILE_WRITE_FAILED`）を出す（D.9.1、D.9.2）。(c) L 章の「25 は `un.onInit` だけ」をこの設計の決定として書き直し、37989f8 の `mklm.nsi` の実際（`SetErrorLevel` は 3010 だけ）を書いた |
+| FIX-VERIFICATION-11 | minor | 採用 | D.7 の 18 と D.13 の `update_dir::read_install_state` を `read_build_ids` と `InstallState::from_build_ids` に直した（環境のトレイトのメソッドの名前はそのまま）。H.4 に `SessionPurpose::{Change, Update}` と `AppState::session_purpose` を足し、E.4.1 と F.4 で使った。`SessionKind` の名前は `mklm_client::session::SessionKind` とぶつかるので避けた |
+| FIX-VERIFICATION-12 | minor | 採用（案: 種類を増やさない） | `classify` を `Option<(ErrorClass, &str)>` にし、すべての `CheckError` の写し方を E.6 に書いた: 2 つの `Cancelled` と `NotConfigured`、`NotInstalledCopy` は記録しない（`last_check` も進めない）。`Rollback` は `Structural`（と別の警告のバナー）。`check` が返さないものは `Transient` と不具合のログ。E.6 の「種類」の列の説明、E.3、H.4、F.4 を合わせた。`Warning` の種類を足さなかったのは、30 日のバナーの文を選ぶ目的には、構造の文（リリース ページへ）で足りるため |
+| FIX-VERIFICATION-13 | minor | 採用 | `HANDOFF_OVERLAY_MIN`（5 秒）を `HANDOFF_OVERLAY_MAX`（15 秒）に替えた。［OK］でいつでも閉じ、押されなければ 15 秒で閉じる。`CALLER_EXIT_WAIT`（30 秒）との関係を F.4 のテストで固定する。15 秒にしたのは、指摘の 10 秒では日本語の案内（約 110 文字）の読み上げが終わらない見込みのため。同じ内容は UAC の前のページにもある（E.4、E.7、H.1、H.4、D.1） |
+| FIX-VERIFICATION-14 | minor | 採用（両方の案を組み合わせた） | 早い終了（6）の対象を、書き込みのコマンドと `update --check` に絞った。読み取りのコマンド（`list`、`status`、`global status`、`journal`、`update --status`）は 1 秒ほどで終わり更新を止めないので、`main.rs` の 0 / 1 / 2 の約束を保つ。`update --check` はネットワークで長く動きうるので 6 を残し、D.14 の表と `install-guide.ja.md` に載せる（G.3）。F.4 のテスト |
+| FIX-VERIFICATION-15 | minor | 採用 | (a) `apps/build_id.rs` に `HASHED_FILES`（`crates/mklm-update/trust/anchors.txt`）を足し、ハッシュと `watched_paths` に入れる（G.2）。`build_id.rs` にテストがないので、WP-0 が手で一度確かめる。(b) release.yml の `build` のジョブの checkout に `fetch-depth: 0`。`check-keys` は浅いリポジトリ、タグなし、読めないタグで、飛ばさずに失敗する（B.3、G.6、F.1） |
+| FIX-VERIFICATION-16 | minor | 採用 | B.6 に「残る危険」（開発のコードが鍵とパスワードを盗みうる）と、安い順の対策（署名専用のアカウント、専用の PC かきれいな起動、`prepare-release` を別の PC で）を書いた。J 章の質問 6 に (c) 署名専用の Windows のアカウントを足し、おすすめにした。B.5 の準備と手順 6〜11、B.6 の点検を (c) の流れにした（受け渡しは `C:\Users\Public\mklm-sign\`）。加えて、書き直しの中で見つけた穴を塞いだ: (c) で開発用のアカウントが書いた `SIGN-OFFLINE.txt` を貼ると、侵されていれば鍵をつないだ署名のセッションで任意のコマンドを実行させられるので、(c) では固定の形のコマンドを打ち、値だけを写す（B.5 の手順 9、B.6 の点検）。そのため鍵の点検の trusted comment を固定の `mklm-key-drill v1` にした（署名が新しい乱数のファイルにかかるので、nonce を写す必要はない）。G.7 に 21 を足した |
+| FIX-VERIFICATION-17 | minor | 採用 | G.1 で「公式の `minisign` の用意と `verify-signer`」を F.6 の前に、鍵の生成を後に分けた（B.5 の準備にも書いた）。B.3 に `prepare-release --dev` の文法（`--dist`、`--dev-pub`、`--minisign`、`--only-arch`、`--issued-at`、`--out`、`SIGN-OFFLINE.txt` の 1 行、拒否するもの）と `serve-releases` を書き、F.6 の手順 1、5、6 と後片付けを合わせた。F.1 にテスト |
+| RED-TEAM-1 | major | 一部採用 | B.4 の 4 を書き直した: 正しく署名された古い更新情報を見せ続ける凍結では、確認が成功し続け、30 日のバナーも巻き戻しの警告も出ない。自動の信号は `expires` だけ（C.6、E.3、G.7 の 22、I.17）。人の手がかりとして、「最新です」の行と `update --check --json` に更新情報の日付（`issued_at`）を出す（E.2、D.14）。見張りに `verify --newest-published`（配られている版が公開済みの最も新しい安定版より古ければ失敗）を足した（B.3、G.6、F.8）。J 章の質問 3 のおすすめを 180 日に変えた（期限は門ではないので、短くする代償は情報の表示だけ）。**採らなかった部分**: 期限とは別の「更新情報の古さ」の警告（たとえば 90 日）。期限をもう 1 つ短く持つのと同じで、メンテナーがその間隔でリリースしなければ全員に誤報が出るので、期限そのものを短くする方を選んだ。オンラインの鍵による新しさの保証（TUF の timestamp）は、秘密鍵をオフラインだけに置く決定の外にあるので、I.17 に残した |
+| RED-TEAM-2 | minor | 採用（主張を取り下げた） | D.13 の［インストーラーを実行］の照合を「壊れたファイルを見つけるためだけで、安全の保証ではない」と書き直した。閉じる案（helper が検証して実行する、管理者だけの場所に写す）は、ファイルの版がそろっていないときは helper を起動できず（ビルド ID の不一致）、GUI 自身がその利用者のプロセスなので、どれもその利用者に対しては何も守れないため採らなかった。画面と読み上げの文で「検証済み」と言わない。ほかの利用者の PC で管理者として承認するときの注意を `recovery.md` と `install-guide.ja.md` に書く（D.13、E.7、H.3、G.3、G.4）。標準ユーザーはこの経路がなくても同じ見た目の UAC を出せるので、新しい昇格の道ではない |
+| RED-TEAM-3 | minor | 採用 | G.7 の 16 と D.8 の 4 を「期限のない妨害で、自動で抜ける方法はない」に書き直した。`FilesInUse` と `ProgramsStillRunning` に相手のプロセス（`FileHolder`: PID、セッション ID、名前。Restart Manager と `processes_with_images` から。利用者の SID は入れない）、`InstanceBusy` にセッション ID を足し、技術的な詳細と `update --status` に出す（H.1、H.3 の `file_holders`、E.6、H.5）。管理者の手順（タスク マネージャーで止める、再起動の直後に更新する）を `recovery.md` に書く（G.4）。Restart Manager が開いたハンドルを返すかは未確認（I.16） |
 
 **m3 への反映**: `docs/design/m3-gui.md` の F.1（コマンドの一覧に `quit-if-idle`）、F.5（M5 の更新の段落）、A12（レビュー対応の表）に、この設計の D.8 と E.4.1 への参照を足した。
