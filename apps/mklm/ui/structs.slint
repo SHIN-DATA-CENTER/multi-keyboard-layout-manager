@@ -296,6 +296,30 @@ export struct RecoveryPageVm {
     later-detail: string,
 }
 
+// "アンインストール時にキーボードの設定を元に戻す" on the settings page (plan 3.13, design m3
+// B.14): machine-wide in HKLM, read unelevated, changed only by the helper after "変更…", the
+// explanation and the button that brings the UAC prompt.
+export struct UninstallRestoreVm {
+    // "アンインストール時にキーボードの設定を元に戻す: オン" (or that it could not be read).
+    status: string,
+    // What the setting does, or why it is unknown.
+    note: string,
+    // "変更…" can be pressed: the value is known and no helper session runs.
+    can-change: bool,
+    // The confirmation below the setting, open after "変更…".
+    confirm-open: bool,
+    // "アンインストール時の設定をオフにします".
+    confirm-title: string,
+    // What the new value means; that it applies to every user.
+    confirm-text: string,
+    // Before this user's first UAC prompt: the whole explanation of the prompt (as on the
+    // standalone page before the first change); later the one line `uac-line` (review U14).
+    uac-explanation: bool,
+    uac-line: string,
+    // "オフにする（次に Windows の確認が出ます）".
+    confirm-button: string,
+}
+
 // One connected keyboard on the wizard's keyboards step (plan 3.1, design m3 B.1; review U3).
 export struct WizardKeyboardVm {
     name: string,

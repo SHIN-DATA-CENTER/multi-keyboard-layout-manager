@@ -22,6 +22,9 @@ msgstr "確認待ちの変更があります"
 msgid "About"
 msgstr "このアプリについて"
 
+msgid "After a keyboard switches, MKLM puts it back unless you keep the new layout within 20 seconds; with this setting, within 60 seconds."
+msgstr "キーボードを切り替えた後、20 秒以内に「このままにする」を選ばないと、MKLM は元に戻します。この設定では 60 秒になります。"
+
 msgid "Advanced keyboard settings"
 msgstr "キーボードの詳細設定"
 
@@ -45,6 +48,9 @@ msgstr "キャンセル"
 
 msgid "Change"
 msgstr "変更する"
+
+msgid "Change what uninstalling MKLM does to the keyboards"
+msgstr "アンインストール時のキーボードの設定の扱いを変更"
 
 msgid "Change…"
 msgstr "変更…"
@@ -180,6 +186,9 @@ msgstr "新しい配列を試している間に、MKLM の管理用プログラ�
 
 msgid "MKLM's administrator program stopped"
 msgstr "MKLM の管理用プログラムが止まりました"
+
+msgid "Main third-party components"
+msgstr "主な第三者のソフトウェア"
 
 msgid "Microsoft IME settings"
 msgstr "Microsoft IME の設定"
@@ -340,6 +349,9 @@ msgstr "PC の標準配列:"
 msgid "The next screen asks \"Do you want to allow this app from an unknown publisher to make changes to your device?\". MKLM is not code-signed yet, so the verified publisher shows as \"Unknown\". Check that mklm-helper.exe is shown in the middle of the screen, then choose Yes."
 msgstr "次の画面に「不明な発行元からのこのアプリがデバイスに変更を加えることを許可しますか?」と表示されます。MKLM はまだコード署名をしていないため、確認済みの発行元が「不明」になります。画面の中ほどに「mklm-helper.exe」と表示されていることを確かめてから「はい」を押してください。"
 
+msgid "The sign-in screen has input methods of its own. To give it yours: Region → Administrative → Copy settings… → turn on \"Welcome screen and system accounts\" → OK (Windows asks for administrator permission)."
+msgstr "サインイン画面の入力方式は、あなたのものとは別に設定されています。サインイン画面にも同じ入力方式を使うには: 地域 →［管理］→［設定のコピー］→「ようこそ画面とシステム アカウント」をオン → OK（Windows が管理者の許可を求めます）。"
+
 msgid "Theme"
 msgstr "テーマ"
 
@@ -351,12 +363,6 @@ msgstr "確認待ちの変更をすべて元に戻す…"
 
 msgid "Undo the change…"
 msgstr "変更を元に戻す…"
-
-msgid "Uninstalling MKLM restores the keyboards: off"
-msgstr "アンインストール時にキーボードの設定を元に戻す: オフ"
-
-msgid "Uninstalling MKLM restores the keyboards: on"
-msgstr "アンインストール時にキーボードの設定を元に戻す: オン"
 
 msgid "Until the PC restarts, no keyboard's layout can be changed."
 msgstr "再起動するまで、ほかのキーボードの配列も変更できません。"

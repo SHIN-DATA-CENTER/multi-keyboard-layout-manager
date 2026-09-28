@@ -24,7 +24,7 @@ use slint::winit_030::winit::window::Theme as WinitTheme;
 use slint::{CloseRequestResponse, ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::args::{Args, StartMode};
-use crate::autostart::{self, AutostartTask};
+use crate::autostart::AutostartTask;
 use crate::i18n::{self, Lang, LangChoice, StartupError};
 use crate::input_capture::InputCapture;
 use crate::journal_ui::JournalUi;
@@ -34,7 +34,7 @@ use crate::settings::{Settings, SettingsStore, load_or_default};
 use crate::single_instance::{self, Claim, InstanceService};
 use crate::state::{
     self, AppMsg, AppState, Effect, OverlayKind, Page, QuitAnswer, SessionId, SessionOutcome,
-    SessionPhase,
+    SessionPhase, SettingsMsg,
 };
 use crate::theme::{ResolvedTheme, ThemeMode, is_dark_rgb};
 use crate::tray;
@@ -212,6 +212,7 @@ impl Controller {
             }
             Effect::SaveSettings(settings) => self.io.send(IoTask::SaveSettings(settings)),
             Effect::Autostart(task) => self.io.send(IoTask::Autostart(task)),
+            Effect::ReadMachineSettings => self.io.send(IoTask::ReadMachineSettings),
             Effect::StartSession {
                 session,
                 request,
@@ -444,18 +445,12 @@ impl Controller {
         self.window
             .set_navigation_enabled(state::navigation_enabled(&state));
         self.window.set_overlay(overlay(state.overlay));
-        // The sign-in start switch shows the Run value itself (design m3 F.3).
-        let switch = autostart::view(state.autostart.as_ref());
-        self.window.set_settings_autostart(switch.on);
+        // The page's controls are off while a dialog is open (design m3 E.1): set together with
+        // the overlay, before the next frame.
         self.window
-            .set_settings_autostart_available(switch.available);
-        self.window.set_settings_autostart_note(
-            switch
-                .note
-                .map(|note| i18n::autostart_note(note, lang))
-                .unwrap_or_default()
-                .into(),
-        );
+            .global::<ui::Modal>()
+            .set_open(state.overlay != OverlayKind::None);
+        self.render_settings(&state, lang);
         self.render_change(&state, lang);
         self.render_session(&state, lang);
         // The restart, post-reboot, conflict, history and recovery pages (also without a read:
@@ -492,6 +487,58 @@ impl Controller {
         self.window
             .set_identify_announcement(main.announcement.into());
         self.update_keyboards(main.rows);
+    }
+
+    /// The settings page (design m3 B.14; WP-U7): the sign-in start shows the Run value itself
+    /// (design m3 F.3), "restore on uninstall" the machine-wide value as last read.
+    fn render_settings(&self, state: &AppState, lang: Lang) {
+        let page = vm::settings::settings_page(&vm::settings::SettingsInput {
+            settings: &state.settings,
+            autostart: state.autostart.as_ref(),
+            restore_on_uninstall: state.settings_page.restore_on_uninstall.as_ref(),
+            confirming: state.settings_page.confirming,
+            idle: state.session == SessionPhase::Idle,
+            elevated: state.elevated,
+            lang,
+        });
+        self.window.set_settings_autostart(page.autostart_on);
+        self.window
+            .set_settings_autostart_available(page.autostart_available);
+        self.window
+            .set_settings_autostart_note(page.autostart_note.into());
+        self.window.set_settings_long_countdown(page.long_countdown);
+        let confirm = page.uninstall.confirm.unwrap_or_default();
+        self.window.set_settings_uninstall(ui::UninstallRestoreVm {
+            status: page.uninstall.status.into(),
+            note: page.uninstall.note.into(),
+            can_change: page.uninstall.can_change,
+            confirm_open: !confirm.title.is_empty(),
+            confirm_title: confirm.title.into(),
+            confirm_text: confirm.text.into(),
+            uac_explanation: confirm.uac_explanation,
+            uac_line: confirm.uac_line.into(),
+            confirm_button: confirm.button.into(),
+        });
+        if state.page == Page::About {
+            let about = vm::settings::about_page(env!("CARGO_PKG_VERSION"), BUILD_ID, lang);
+            self.window.set_about_version(about.version.into());
+            // A new model only when the lines changed (the language): the list is not rebuilt
+            // on every render.
+            let shown: Vec<SharedString> = self.window.get_about_licences().iter().collect();
+            if shown
+                .iter()
+                .map(SharedString::as_str)
+                .ne(about.licences.iter().map(String::as_str))
+            {
+                self.window.set_about_licences(ModelRc::new(VecModel::from(
+                    about
+                        .licences
+                        .into_iter()
+                        .map(SharedString::from)
+                        .collect::<Vec<_>>(),
+                )));
+            }
+        }
     }
 
     /// The change page (design m3 B.4, B.5; WP-U3), also for "今すぐ反映…" (design m3 B.12).
@@ -921,7 +968,6 @@ pub fn run(args: Args) -> ExitCode {
         .set_font_family(lang.font_family().into());
     let icon = crate::icon::app_icon();
     window.set_app_icon(icon.clone());
-    window.set_about_version(format!("{} (build {BUILD_ID})", env!("CARGO_PKG_VERSION")).into());
     window.set_settings_theme_index(theme_mode.index());
     window.set_settings_language_index(args.lang.unwrap_or(settings.language).index());
 
@@ -1111,14 +1157,18 @@ fn shell_event(event: mklm_win::ui::shell_window::ShellEvent) {
                 }
             });
         }
-        ShellEvent::SettingChange(area) if area == "ImmersiveColorSet" => {
+        ShellEvent::SettingChange(area) if area == "intl" => post(AppMsg::Refresh),
+        // "ImmersiveColorSet" (the app mode), and whatever else changed: high contrast is read
+        // again at every WM_SETTINGCHANGE (design m3 C.2) — turning it on or off, or another
+        // contrast theme, arrives as a broadcast whose area names no colour set. Cheap: two
+        // system calls, and properties that did not change redraw nothing.
+        ShellEvent::SettingChange(_) => {
             let _ = slint::invoke_from_event_loop(|| {
                 if let Some(app) = current_app() {
                     app.apply_theme();
                 }
             });
         }
-        ShellEvent::SettingChange(area) if area == "intl" => post(AppMsg::Refresh),
         ShellEvent::Resumed => post(AppMsg::Refresh),
         // Directly: the cancel flag is an atomic outside any RefCell. A countdown is reverted at
         // the relay's next tick; a reconnect wait is left open (it stays waiting for the user).
@@ -1154,7 +1204,6 @@ fn shell_event(event: mklm_win::ui::shell_window::ShellEvent) {
             }
             let _ = slint::quit_event_loop();
         }
-        ShellEvent::SettingChange(_) => {}
     }
 }
 
@@ -1217,11 +1266,19 @@ fn wire_callbacks(window: &AppWindow) {
         dispatch(AppMsg::LanguageChosen { choice, lang });
     });
     window.on_autostart_toggled(|on| dispatch(AppMsg::AutostartToggled(on)));
+    // The rest of the settings page (design m3 B.14; WP-U7). Only "uninstall-confirm" can lead to
+    // a UAC prompt, and only through `state::update` (one session at a time).
+    window.on_long_countdown_toggled(|on| {
+        dispatch(AppMsg::Settings(SettingsMsg::LongCountdown(on)));
+    });
+    window.on_uninstall_change(|| dispatch(AppMsg::Settings(SettingsMsg::UninstallChange)));
+    window.on_uninstall_cancel(|| dispatch(AppMsg::Settings(SettingsMsg::UninstallCancel)));
+    window.on_uninstall_confirm(|| dispatch(AppMsg::Settings(SettingsMsg::UninstallConfirm)));
+    window.on_restore_all(|| dispatch(AppMsg::Settings(SettingsMsg::RestoreAll)));
     wire_change_flow(window);
     // The restart, post-reboot, conflict, history and recovery pages.
     crate::journal_ui::wire(window);
-    // WP-U1, WP-U2, WP-U6 and WP-U7 wire the remaining callbacks (wizard, settings) through
-    // `state::update`.
+    // WP-U2 wires the wizard's callbacks and "run-wizard" (初回セットアップをもう一度行う).
 }
 
 /// The change flow's callbacks (design m3 B.3 to B.7, B.17; WP-U3).

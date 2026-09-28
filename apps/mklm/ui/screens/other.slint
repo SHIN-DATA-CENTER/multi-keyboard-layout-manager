@@ -1,13 +1,16 @@
 // The remaining pages (design m3 B.10 to B.15): conflict resolution, history, the recovery
-// prompt (with its undo and revert previews), the IME guide, settings and About.
+// prompt (with its undo and revert previews), the IME guide, settings and About. Every control is
+// off while a dialog is open over the page (`Modal`, design m3 E.1).
 
 import { AboutSlint, Button, CheckBox, ComboBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 import {
     ChoiceVm, ConflictKeyboardVm, JournalRowVm, RecoveryItemVm, RecoveryPageVm, Tone,
+    UninstallRestoreVm,
 } from "../structs.slint";
 import {
-    Banner, Body, Caption, DialogBody, DialogButtons, PageHeader, RadioList, StubNotice,
+    Banner, Body, Caption, DialogBody, DialogButtons, Modal, PageHeader, RadioList,
+    UacExplanation,
 } from "../widgets.slint";
 
 // Decide what each keyboard of an operation in conflict becomes (design m2 D.8; review U6): one
@@ -79,6 +82,7 @@ export component ConflictScreen inherits VerticalLayout {
             if keyboard.options.length > 0: ComboBox {
                 model: keyboard.options;
                 current-index: keyboard.selected;
+                enabled: !Modal.open;
                 accessible-label: @tr("What {} becomes", keyboard.name);
                 selected => {
                     root.choice(index, self.current-index);
@@ -99,6 +103,7 @@ export component ConflictScreen inherits VerticalLayout {
                     if root.value-options.length > 0: ComboBox {
                         model: root.value-options;
                         current-index: value.selected;
+                        enabled: !Modal.open;
                         accessible-label: @tr("What this value becomes");
                         selected => {
                             root.value-choice(value.record, self.current-index);
@@ -117,6 +122,7 @@ export component ConflictScreen inherits VerticalLayout {
         }
         if root.keyboards.length > 0: CheckBox {
             text: @tr("Show the details");
+            enabled: !Modal.open;
             checked <=> root.show-details;
         }
         if root.can-resolve && root.uac-line != "": Caption {
@@ -128,6 +134,7 @@ export component ConflictScreen inherits VerticalLayout {
         alignment: stretch;
         if root.can-undo: Button {
             text: @tr("Undo every change waiting for you…");
+            enabled: !Modal.open;
             clicked => {
                 root.undo();
             }
@@ -138,6 +145,7 @@ export component ConflictScreen inherits VerticalLayout {
 
         Button {
             text: @tr("Cancel");
+            enabled: !Modal.open;
             clicked => {
                 root.cancel();
             }
@@ -146,6 +154,7 @@ export component ConflictScreen inherits VerticalLayout {
         if root.can-resolve: Button {
             text: @tr("Apply the choices");
             primary: true;
+            enabled: !Modal.open;
             clicked => {
                 root.resolve();
             }
@@ -210,6 +219,7 @@ export component JournalScreen inherits VerticalLayout {
 
                 if row.can-revert: Button {
                     text: @tr("Revert…");
+                    enabled: !Modal.open;
                     accessible-label: row.revert-label;
                     clicked => {
                         root.revert(row.op-id);
@@ -227,6 +237,7 @@ export component JournalScreen inherits VerticalLayout {
         alignment: start;
         Button {
             text: @tr("Open the recovery files folder");
+            enabled: !Modal.open;
             clicked => {
                 root.open-recovery-folder();
             }
@@ -279,12 +290,14 @@ export component RecoveryScreen inherits VerticalLayout {
                 alignment: start;
                 if item.can-keep: Button {
                     text: @tr("Keep");
+                    enabled: !Modal.open;
                     clicked => {
                         root.keep(item.op-id);
                     }
                 }
                 if item.can-revert: Button {
                     text: @tr("Revert…");
+                    enabled: !Modal.open;
                     clicked => {
                         root.revert(item.op-id);
                     }
@@ -313,6 +326,7 @@ export component RecoveryScreen inherits VerticalLayout {
     DialogButtons {
         Button {
             text: root.page.dismiss-text;
+            enabled: !Modal.open;
             clicked => {
                 root.later();
             }
@@ -320,6 +334,7 @@ export component RecoveryScreen inherits VerticalLayout {
 
         if root.page.can-undo: Button {
             text: @tr("Undo every change waiting for you…");
+            enabled: !Modal.open;
             clicked => {
                 root.undo();
             }
@@ -327,6 +342,7 @@ export component RecoveryScreen inherits VerticalLayout {
         if root.page.can-recover: Button {
             text: root.page.primary-text;
             primary: true;
+            enabled: !Modal.open;
             clicked => {
                 root.recover();
             }
@@ -334,9 +350,12 @@ export component RecoveryScreen inherits VerticalLayout {
     }
 }
 
-// How to use per-keyboard layouts with the Japanese IME (plan 3.10): guidance and deep links
-// only; MKLM writes no IME setting.
+// How to use per-keyboard layouts with the Japanese IME (plan 3.10, design m3 B.13): guidance, and
+// buttons that open the allowlisted Windows settings pages (`mklm_win::ui::SettingsPage`). MKLM
+// writes no IME setting.
 export component ImeHelpScreen inherits VerticalLayout {
+    // 0 = Language & region, 1 = Advanced keyboard settings, 2 = Microsoft IME, 3 = Region
+    // (intl.cpl).
     callback open-settings-page(int);
     padding: 16px;
     spacing: 12px;
@@ -350,36 +369,63 @@ export component ImeHelpScreen inherits VerticalLayout {
             text: @tr("Per-keyboard layouts work only while the Japanese IME is the active input method. To type English, turn the IME off (Alt+` or the 半角/全角 key) instead of switching to English (US): while English (US) is active, every keyboard types US.");
         }
 
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Button {
+                text: @tr("Language settings");
+                enabled: !Modal.open;
+                clicked => {
+                    root.open-settings-page(0);
+                }
+            }
+
+            Button {
+                text: @tr("Advanced keyboard settings");
+                enabled: !Modal.open;
+                clicked => {
+                    root.open-settings-page(1);
+                }
+            }
+        }
+
         Body {
             text: @tr("A US keyboard has no 半角/全角 key: turn the IME on and off with Alt+`. To use Ctrl+Space instead: Microsoft IME settings → Keys and touch customization → turn on \"Assign your preferred function to each key/key combination\" → Ctrl + Space: IME on/off.");
         }
-    }
 
-    DialogButtons {
-        alignment: start;
-        Button {
-            text: @tr("Language settings");
-            clicked => {
-                root.open-settings-page(0);
+        HorizontalLayout {
+            alignment: start;
+            Button {
+                text: @tr("Microsoft IME settings");
+                enabled: !Modal.open;
+                clicked => {
+                    root.open-settings-page(2);
+                }
             }
         }
 
-        Button {
-            text: @tr("Advanced keyboard settings");
-            clicked => {
-                root.open-settings-page(1);
-            }
+        Body {
+            text: @tr("The sign-in screen has input methods of its own. To give it yours: Region → Administrative → Copy settings… → turn on \"Welcome screen and system accounts\" → OK (Windows asks for administrator permission).");
         }
 
-        Button {
-            text: @tr("Microsoft IME settings");
-            clicked => {
-                root.open-settings-page(2);
+        HorizontalLayout {
+            alignment: start;
+            Button {
+                text: @tr("Region (copy settings)");
+                enabled: !Modal.open;
+                clicked => {
+                    root.open-settings-page(3);
+                }
             }
         }
     }
 }
 
+// The settings (design m3 B.14). Theme and language apply at once; the sign-in start is the HKCU
+// Run value itself; "確認の時間を長くする" and "非表示と未接続も表示" are kept in settings.toml;
+// "アンインストール時にキーボードの設定を元に戻す" is machine-wide: "変更…" opens a confirmation
+// with what it means and what the Windows prompt looks like, and only its button starts the
+// helper (design m3 0.2 principle 6).
 export component SettingsScreen inherits VerticalLayout {
     // 0 = light, 1 = dark, 2 = system.
     in-out property <int> theme-index;
@@ -391,15 +437,26 @@ export component SettingsScreen inherits VerticalLayout {
     in property <string> autostart-note;
     // "確認の時間を長くする（60 秒）" (review U10).
     in-out property <bool> long-countdown;
-    in property <bool> restore-on-uninstall: true;
-    in property <string> restore-note;
+    // "非表示と未接続のキーボードも表示する", the same setting as on the main screen.
+    in-out property <bool> show-hidden;
+    in property <UninstallRestoreVm> uninstall;
     callback theme-selected(int);
     callback language-selected(int);
     callback autostart-toggled(bool);
     callback long-countdown-toggled(bool);
-    callback change-restore-on-uninstall();
+    callback show-hidden-toggled(bool);
+    callback uninstall-change();
+    callback uninstall-cancel();
+    callback uninstall-confirm();
     callback restore-all();
     callback run-wizard();
+    // The confirmation closed: the focus goes back to its "変更…" button.
+    private property <bool> confirm-open: root.uninstall.confirm-open;
+    changed confirm-open => {
+        if (!self.confirm-open && !Modal.open) {
+            change-button.focus();
+        }
+    }
     padding: 16px;
     spacing: 12px;
 
@@ -419,6 +476,7 @@ export component SettingsScreen inherits VerticalLayout {
             ComboBox {
                 model: [@tr("Light"), @tr("Dark"), @tr("System")];
                 current-index <=> root.theme-index;
+                enabled: !Modal.open;
                 accessible-label: @tr("Theme");
                 selected => {
                     root.theme-selected(self.current-index);
@@ -434,9 +492,11 @@ export component SettingsScreen inherits VerticalLayout {
                 vertical-alignment: center;
             }
 
+            // Each language by its own name.
             ComboBox {
                 model: ["日本語", "English", @tr("System")];
                 current-index <=> root.language-index;
+                enabled: !Modal.open;
                 accessible-label: @tr("Language");
                 selected => {
                     root.language-selected(self.current-index);
@@ -447,7 +507,7 @@ export component SettingsScreen inherits VerticalLayout {
         CheckBox {
             text: @tr("Start MKLM on the taskbar (inside \"^\") when I sign in");
             checked <=> root.autostart;
-            enabled: root.autostart-available;
+            enabled: root.autostart-available && !Modal.open;
             toggled => {
                 root.autostart-toggled(self.checked);
             }
@@ -459,36 +519,122 @@ export component SettingsScreen inherits VerticalLayout {
         CheckBox {
             text: @tr("Give me more time to check a new layout (60 seconds)");
             checked <=> root.long-countdown;
+            enabled: !Modal.open;
             toggled => {
                 root.long-countdown-toggled(self.checked);
             }
         }
 
+        Caption {
+            text: @tr("After a keyboard switches, MKLM puts it back unless you keep the new layout within 20 seconds; with this setting, within 60 seconds.");
+        }
+
+        CheckBox {
+            text: @tr("Show hidden and disconnected keyboards");
+            checked <=> root.show-hidden;
+            enabled: !Modal.open;
+            toggled => {
+                root.show-hidden-toggled(self.checked);
+            }
+        }
+
         HorizontalLayout {
             spacing: 8px;
-            alignment: start;
             Body {
-                text: root.restore-on-uninstall ? @tr("Uninstalling MKLM restores the keyboards: on") : @tr("Uninstalling MKLM restores the keyboards: off");
+                text: root.uninstall.status;
                 vertical-alignment: center;
+                horizontal-stretch: 1;
             }
 
-            Button {
+            change-button := Button {
                 text: @tr("Change…");
+                enabled: root.uninstall.can-change && !root.uninstall.confirm-open && !Modal.open;
+                accessible-label: @tr("Change what uninstalling MKLM does to the keyboards");
                 clicked => {
-                    root.change-restore-on-uninstall();
+                    root.uninstall-change();
                 }
             }
         }
 
-        Caption {
-            text: root.restore-note;
+        if root.uninstall.note != "": Caption {
+            text: root.uninstall.note;
         }
+        // The confirmation (design m3 B.14): what the new value means, then the Windows prompt.
+        if root.uninstall.confirm-open: Rectangle {
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 6px;
+            min-height: confirm.preferred-height;
+            accessible-role: AccessibleRole.groupbox;
+            accessible-label: root.uninstall.confirm-title;
+            confirm := VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                // Takes the focus when the confirmation opens, so that it is read first.
+                heading := FocusScope {
+                    enabled: !Modal.open;
+                    min-height: heading-text.preferred-height + 4px;
+                    accessible-role: AccessibleRole.text;
+                    accessible-label: root.uninstall.confirm-title;
+                    accessible-description: root.uninstall.confirm-text;
+                    init => {
+                        self.focus();
+                    }
 
+                    Rectangle {
+                        border-width: heading.has-focus ? Theme.focus-width : 0px;
+                        border-color: Theme.focus-ring;
+                        border-radius: 4px;
+                    }
+
+                    heading-text := Text {
+                        x: 2px;
+                        width: parent.width - 4px;
+                        text: root.uninstall.confirm-title;
+                        font-size: Theme.font-body;
+                        font-weight: 600;
+                        color: Theme.text;
+                        wrap: word-wrap;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Body {
+                    text: root.uninstall.confirm-text;
+                }
+
+                if root.uninstall.uac-explanation: UacExplanation { }
+                if !root.uninstall.uac-explanation && root.uninstall.uac-line != "": Caption {
+                    text: root.uninstall.uac-line;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    Button {
+                        text: @tr("Cancel");
+                        enabled: !Modal.open;
+                        clicked => {
+                            root.uninstall-cancel();
+                        }
+                    }
+
+                    Button {
+                        text: root.uninstall.confirm-button;
+                        primary: true;
+                        enabled: !Modal.open;
+                        clicked => {
+                            root.uninstall-confirm();
+                        }
+                    }
+                }
+            }
+        }
         HorizontalLayout {
             spacing: 8px;
             alignment: start;
             Button {
                 text: @tr("Run the setup again…");
+                enabled: !Modal.open;
                 clicked => {
                     root.run-wizard();
                 }
@@ -496,6 +642,7 @@ export component SettingsScreen inherits VerticalLayout {
 
             Button {
                 text: @tr("Put every keyboard back to before MKLM…");
+                enabled: !Modal.open;
                 clicked => {
                     root.restore-all();
                 }
@@ -504,9 +651,13 @@ export component SettingsScreen inherits VerticalLayout {
     }
 }
 
+// About MKLM (plan 3.12, design m3 B.15): the product, its version and build ID, the copyright and
+// licence, the main third-party components (the full list generated at M5 replaces them), and
+// the "Made with Slint" badge (AboutSlint) that Slint's royalty-free licence asks for.
 export component AboutScreen inherits VerticalLayout {
     in property <string> version;
-    in property <string> licences;
+    // "Slint — Royalty-free License 2.0" and the like.
+    in property <[string]> licences;
     padding: 16px;
     spacing: 12px;
 
@@ -515,28 +666,35 @@ export component AboutScreen inherits VerticalLayout {
         subtitle: root.version;
     }
 
-    Body {
-        text: "© 2026 SHIN DATA CENTER";
-    }
+    DialogBody {
+        Body {
+            text: "© 2026 SHIN DATA CENTER";
+        }
 
-    Caption {
-        text: @tr("Licensed under the Apache License 2.0.");
-    }
+        Caption {
+            text: @tr("Licensed under the Apache License 2.0.");
+        }
 
-    ScrollView {
-        vertical-stretch: 1;
+        Body {
+            text: @tr("Main third-party components");
+            font-weight: 600;
+        }
+
         VerticalLayout {
-            Caption {
-                text: root.licences;
-            }
-
-            StubNotice {
-                package: "WP-U7";
+            spacing: 2px;
+            accessible-role: AccessibleRole.list;
+            accessible-label: @tr("Main third-party components");
+            for line in root.licences: Caption {
+                text: line;
+                accessible-role: AccessibleRole.list-item;
+                accessible-label: line;
             }
         }
     }
 
     AboutSlint {
-        height: 200px;
+        vertical-stretch: 0;
+        height: 140px;
     }
 }
+

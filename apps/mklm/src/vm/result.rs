@@ -190,15 +190,25 @@ fn finished(
         next: class_next(class),
         op: result.op_id.clone(),
     };
-    match (&result.failure, result.outcome) {
-        (Some(failure), _) => {
+    // A machine-wide setting (design m3 B.14) changes no layout: say what is saved.
+    let machine_setting = match context.request {
+        Some(Request::SetMachineSettings {
+            restore_on_uninstall,
+        }) => Some(*restore_on_uninstall),
+        _ => None,
+    };
+    match (&result.failure, result.outcome, machine_setting) {
+        (Some(failure), _, _) => {
             parts
                 .message
                 .push(i18n::failure(failure, reset_phase(context.view), lang))
         }
+        (None, Outcome::Confirmed, Some(on)) => {
+            parts.message.push(i18n::uninstall_restore_saved(on, lang));
+        }
         // The recovered rows say what happened.
-        (None, Outcome::Recovered) if !result.recovered.is_empty() => {}
-        (None, outcome) => parts.message.push(i18n::result_outcome(outcome, lang)),
+        (None, Outcome::Recovered, _) if !result.recovered.is_empty() => {}
+        (None, outcome, _) => parts.message.push(i18n::result_outcome(outcome, lang)),
     }
     for recovered in &result.recovered {
         let what = operation_text(after, &recovered.op_id, lang);

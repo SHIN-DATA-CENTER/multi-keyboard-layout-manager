@@ -4,10 +4,10 @@
 // explanation next to the button. The standalone UAC explanation is shown the first time only.
 
 import { Button, CheckBox } from "std-widgets.slint";
-import { Theme } from "../theme.slint";
 import { ChangeVm, ChoiceVm, KeyTestVm, PlanLineVm, Tone } from "../structs.slint";
 import {
-    Banner, Body, Caption, DialogBody, DialogButtons, KeyTestArea, PageHeader, RadioList,
+    Banner, Body, Caption, DialogBody, DialogButtons, KeyTestArea, Modal, PageHeader, RadioList,
+    UacExplanation,
 } from "../widgets.slint";
 
 component PlanLine inherits HorizontalLayout {
@@ -87,12 +87,14 @@ export component ChangeScreen inherits VerticalLayout {
 
             if root.vm.detect-choose-text != "": Button {
                 text: root.vm.detect-choose-text;
+                enabled: !Modal.open;
                 clicked => {
                     root.use-detected();
                 }
             }
             Button {
                 text: @tr("Start again");
+                enabled: !Modal.open;
                 clicked => {
                     root.restart-detection();
                 }
@@ -150,6 +152,7 @@ export component ChangeScreen inherits VerticalLayout {
         }
         if root.vm.lines.length > 0 || root.vm.details != "": CheckBox {
             text: @tr("Show the technical details");
+            enabled: !Modal.open;
             checked <=> root.show-details;
         }
         if root.show-details: VerticalLayout {
@@ -171,6 +174,7 @@ export component ChangeScreen inherits VerticalLayout {
         alignment: stretch;
         if !root.vm.restore-mode: Button {
             text: @tr("Back to before MKLM…");
+            enabled: !Modal.open;
             clicked => {
                 root.restore-baseline();
             }
@@ -182,6 +186,7 @@ export component ChangeScreen inherits VerticalLayout {
 
         Button {
             text: @tr("Cancel");
+            enabled: !Modal.open;
             clicked => {
                 root.cancel();
             }
@@ -190,7 +195,7 @@ export component ChangeScreen inherits VerticalLayout {
         Button {
             text: root.vm.apply-text != "" ? root.vm.apply-text : @tr("Change");
             primary: true;
-            enabled: root.vm.can-apply;
+            enabled: root.vm.can-apply && !Modal.open;
             clicked => {
                 root.apply();
             }
@@ -213,60 +218,13 @@ export component UacNoticeScreen inherits VerticalLayout {
     }
 
     DialogBody {
-        Body {
-            text: @tr("The next screen asks \"Do you want to allow this app from an unknown publisher to make changes to your device?\". MKLM is not code-signed yet, so the verified publisher shows as \"Unknown\". Check that mklm-helper.exe is shown in the middle of the screen, then choose Yes.");
-        }
-
-        // A text mock of the prompt (review U18).
-        Rectangle {
-            border-width: 1px;
-            border-color: Theme.border;
-            border-radius: 6px;
-            min-height: mock.preferred-height;
-            accessible-role: AccessibleRole.groupbox;
-            accessible-label: @tr("What the Windows prompt looks like");
-            mock := VerticalLayout {
-                padding: 12px;
-                spacing: 4px;
-                Caption {
-                    text: @tr("User Account Control");
-                }
-
-                Body {
-                    text: @tr("Do you want to allow this app from an unknown publisher to make changes to your device?");
-                    font-weight: 600;
-                }
-
-                Body {
-                    text: "mklm-helper.exe";
-                }
-
-                Caption {
-                    text: @tr("Verified publisher: Unknown");
-                }
-
-                Caption {
-                    text: @tr("File origin: Hard drive on this computer");
-                }
-
-                Caption {
-                    text: @tr("[Yes] [No]");
-                }
-            }
-        }
-
-        Body {
-            text: @tr("On an account that is not an administrator, Windows asks for an administrator's password or PIN instead.");
-        }
-
-        Caption {
-            text: @tr("Nothing is changed if you choose No.");
-        }
+        UacExplanation { }
     }
 
     DialogButtons {
         Button {
             text: @tr("Cancel");
+            enabled: !Modal.open;
             clicked => {
                 root.cancel();
             }
@@ -275,6 +233,7 @@ export component UacNoticeScreen inherits VerticalLayout {
         Button {
             text: @tr("Continue to the prompt");
             primary: true;
+            enabled: !Modal.open;
             clicked => {
                 root.go();
             }
