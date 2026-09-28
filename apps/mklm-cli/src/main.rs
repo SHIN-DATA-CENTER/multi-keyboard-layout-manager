@@ -3,10 +3,15 @@
 //! `list`, `status`, `global status` (milestone M1) and `journal` only read the system. The write
 //! commands of milestone M2 (`set`, `migrate`, `revert`, `restore`, `recover`, `keep`, `reboot`,
 //! `post-reboot`) are defined in [`mod@write`]; see docs/design/m2-engine.md, section F.
+//! `update --check` and `update --status` (M5b) are in [`mod@update`]; see
+//! docs/design/m5b-updater.md, D.14.
 //! Output is English for now; the GUI is localized.
 //! Results go to standard output; read problems go to standard error as `warning:` lines (and into
 //! the `issues` array of the JSON output). Read-only commands exit with 0 on success, 1 on failure
-//! and 2 on usage errors; write commands use [`write::exit_code`].
+//! and 2 on usage errors; write commands use [`write::exit_code`]; `update --check` has its own
+//! codes (0 / 20 / 21 / 22 / 6 / 1 / 2). While an MKLM update runs, the write commands and
+//! `update --check` end at once with 6 ([`update::RUNNING_MESSAGE`]); the read-only commands are
+//! never held up.
 //! Redirected output is ASCII-only JSON, or text in the console's code page (as PowerShell and cmd
 //! decode it).
 
@@ -15,6 +20,7 @@
 mod json;
 mod table;
 mod text;
+mod update;
 mod write;
 
 use std::borrow::Cow;
@@ -92,14 +98,44 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Check for a new version of MKLM (--check), or show the state of updates (--status).
+    /// Installing is done by MKLM itself, or by running the installer.
+    Update(update::UpdateArgs),
 }
 
 impl Command {
-    /// Runs a write command (or `journal`) and returns its exit code; `None` for the read-only
-    /// commands handled by [`run`].
+    /// True for the commands an MKLM update holds up (design m5b D.14): the write commands and
+    /// `update --check`. The read-only ones (`list`, `status`, `global status`, `journal`,
+    /// `update --status`) end within a second and are never held up (FIX-VERIFICATION-14).
+    fn waits_for_updates(&self) -> bool {
+        match self {
+            Command::Set(_)
+            | Command::Migrate(_)
+            | Command::Revert(_)
+            | Command::Undo(_)
+            | Command::Resolve(_)
+            | Command::Restore(_)
+            | Command::Recover(_)
+            | Command::Keep { .. }
+            | Command::Reboot { .. }
+            | Command::PostReboot => true,
+            Command::Update(args) => args.check,
+            Command::List { .. }
+            | Command::Status { .. }
+            | Command::Global { .. }
+            | Command::Journal { .. } => false,
+        }
+    }
+
+    /// Runs a write command (or `journal`, `update`) and returns its exit code; `None` for the
+    /// read-only commands handled by [`run`].
     fn run_m2(&self) -> Option<Result<i32>> {
         Some(match self {
             Command::List { .. } | Command::Status { .. } | Command::Global { .. } => return None,
+            #[cfg(windows)]
+            Command::Update(args) => update::run(args),
+            #[cfg(not(windows))]
+            Command::Update(_) => Err(anyhow::anyhow!("mklm-cli runs on Windows only")),
             Command::Set(args) => write::set(args),
             Command::Migrate(args) => write::migrate(args),
             Command::Revert(args) => write::revert(args),
@@ -151,6 +187,18 @@ fn main() -> ExitCode {
         Err(error) => eprintln!("warning: could not restrict DLL loading to System32: {error}"),
     }
     let cli = Cli::parse();
+    // An MKLM update past `ready` waits for this program to end (design m5b D.14).
+    #[cfg(windows)]
+    if cli.command.waits_for_updates() && update::blocked_by_update() {
+        eprintln!("{}", update::RUNNING_MESSAGE);
+        return exit_with(update::UPDATE_RUNNING);
+    }
+    // Every helper session of this process first reports the user's newest verified update
+    // information when the machine's record is behind (design m5b C.4).
+    #[cfg(windows)]
+    let _ = mklm_client::session::set_trust_reporter(Box::new(
+        mklm_client::update::trust_report::CurrentUser::default(),
+    ));
     if let Some(result) = cli.command.run_m2() {
         return match result {
             Ok(code) => exit_with(code),
@@ -468,6 +516,69 @@ mod tests {
         // Not on the commands that have nothing to plan.
         assert!(parse(&["mklm-cli", "revert", "0f8c2d4e", "--dry-run"]).is_err());
         assert!(parse(&["mklm-cli", "keep", "0f8c2d4e", "--dry-run"]).is_err());
+    }
+
+    /// `update` takes exactly one of `--check` and `--status` (a usage error, exit code 2,
+    /// otherwise), and only `--check` and the write commands wait for a running update (design
+    /// m5b D.14; FIX-VERIFICATION-14).
+    #[test]
+    fn update_commands() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|cli| cli.command);
+        let check = parse(&["mklm-cli", "update", "--check", "--json"]).unwrap();
+        assert!(matches!(
+            &check,
+            Command::Update(update::UpdateArgs {
+                check: true,
+                status: false,
+                json: true,
+                ..
+            })
+        ));
+        assert!(check.waits_for_updates());
+        let status = parse(&["mklm-cli", "update", "--status"]).unwrap();
+        assert!(!status.waits_for_updates());
+        for bad in [
+            &["mklm-cli", "update"][..],
+            &["mklm-cli", "update", "--check", "--status"][..],
+            &["mklm-cli", "update", "--install"][..],
+            &["mklm-cli", "update", "--json"][..],
+        ] {
+            let error = parse(bad).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{bad:?}");
+        }
+        // The development endpoint does not exist in this build.
+        #[cfg(not(all(debug_assertions, mklm_update_dev)))]
+        assert!(
+            parse(&[
+                "mklm-cli",
+                "update",
+                "--check",
+                "--update-endpoint",
+                "http://127.0.0.1:8080"
+            ])
+            .is_err()
+        );
+        for (args, waits) in [
+            (&["mklm-cli", "list"][..], false),
+            (&["mklm-cli", "status"][..], false),
+            (&["mklm-cli", "global", "status"][..], false),
+            (&["mklm-cli", "journal"][..], false),
+            (&["mklm-cli", "keep", "0f8c2d4e"][..], true),
+            (&["mklm-cli", "reboot"][..], true),
+            (&["mklm-cli", "post-reboot"][..], true),
+            (&["mklm-cli", "recover"][..], true),
+            (&["mklm-cli", "undo"][..], true),
+            (&["mklm-cli", "revert", "0f8c2d4e"][..], true),
+            (&["mklm-cli", "restore", "--baseline", "--all"][..], true),
+            (&["mklm-cli", "set", "#1", "--layout", "jis"][..], true),
+            (&["mklm-cli", "migrate"][..], true),
+            (
+                &["mklm-cli", "resolve", "0f8c2d4e", "--all", "keep-current"][..],
+                true,
+            ),
+        ] {
+            assert_eq!(parse(args).unwrap().waits_for_updates(), waits, "{args:?}");
+        }
     }
 
     /// `--yes` with `#n` is a usage error (exit code 2), refused before anything is read or

@@ -277,22 +277,50 @@ pub fn unregister_post_reboot() -> Result<(), Error> {
 
 // ---- M5b: the GUI's fallback relaunch after an update (design m5b D.10, D.13; WP-C) ----
 
+/// The second value MKLM puts under the RunOnce key: the GUI after an update (design m5b H.5).
 pub const AFTER_UPDATE_VALUE: &str = "SHINDATACENTER.MKLM.AfterUpdate";
 
-/// HKCU RunOnce `SHINDATACENTER.MKLM.AfterUpdate` = `command_line`.
-#[allow(unused_variables)] // Skeleton (M5b)
+/// The only arguments the after-update value may carry (`mklm_update::GUI_AFTER_UPDATE_ARG`).
+const AFTER_UPDATE_ARGUMENTS: &str = " --after-update";
+
+/// HKCU RunOnce `SHINDATACENTER.MKLM.AfterUpdate` = `command_line`. The GUI registers it before it
+/// quits for an update (after `HandedOff`, or `quit-if-idle`), unelevated only: the next sign-in
+/// shows the result even when the runner could not start the GUI again (design m5b D.10, D.13).
+///
+/// `command_line` must be `"<absolute path>\mklm.exe" --after-update` and fit what Windows runs
+/// (checked like the post-reboot command line); anything else fails with
+/// `ERROR_INVALID_PARAMETER` before anything is written.
 pub fn register_after_update(command_line: &str) -> Result<(), Error> {
-    Err(Error::Win32 {
-        function: "register_after_update (m5b skeleton)",
-        code: 50,
-    }) // Skeleton (M5b): WP-C
+    set_user_string(
+        RUN_ONCE_KEY,
+        AFTER_UPDATE_VALUE,
+        command_line,
+        is_after_update_command(command_line),
+    )
 }
 
+/// Removes [`AFTER_UPDATE_VALUE`] (missing is fine): the GUI that started with nothing left to
+/// show (design m5b D.13 step 5).
 pub fn unregister_after_update() -> Result<(), Error> {
-    Err(Error::Win32 {
-        function: "unregister_after_update (m5b skeleton)",
-        code: 50,
-    }) // Skeleton (M5b): WP-C
+    remove_user_value(RUN_ONCE_KEY, AFTER_UPDATE_VALUE)
+}
+
+/// A RunOnce-style command line ([`is_run_once_command`]) that starts `mklm.exe` (any case) with
+/// exactly `--after-update`.
+fn is_after_update_command(command_line: &str) -> bool {
+    if !is_run_once_command(command_line) {
+        return false;
+    }
+    let Some((exe, arguments)) = command_line
+        .strip_prefix('"')
+        .and_then(|tail| tail.split_once('"'))
+    else {
+        return false;
+    };
+    arguments == AFTER_UPDATE_ARGUMENTS
+        && Path::new(exe)
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case(AUTOSTART_EXE))
 }
 
 /// Writes the `REG_SZ` value `name` = `data` under `HKCU\<key>` (created if missing), or fails
@@ -581,5 +609,36 @@ mod tests {
         }
         let long = format!(r#""C:\{}\mklm.exe" --tray"#, "a".repeat(250));
         assert!(!is_autostart_command(&long));
+    }
+
+    /// Only `"<absolute path>\mklm.exe" --after-update` is ever written as the after-update value
+    /// (design m5b H.5). The writes themselves are never made in tests.
+    #[test]
+    fn after_update_commands_are_checked_before_writing() {
+        assert_eq!(AFTER_UPDATE_VALUE, "SHINDATACENTER.MKLM.AfterUpdate");
+        assert!(is_after_update_command(
+            r#""C:\Program Files\SHIN DATA CENTER\MKLM\mklm.exe" --after-update"#
+        ));
+        assert!(is_after_update_command(
+            r#""D:\MKLM\MKLM.EXE" --after-update"#
+        ));
+        for bad in [
+            r"C:\MKLM\mklm.exe --after-update",
+            r#""mklm.exe" --after-update"#,
+            r#""C:\MKLM\mklm-helper.exe" --after-update"#,
+            r#""C:\MKLM\mklm.exe" --tray"#,
+            r#""C:\MKLM\mklm.exe""#,
+            r#""C:\MKLM\mklm.exe" --after-update --quit"#,
+            r#""C:\MKLM\mklm.exe"  --after-update"#,
+            r#""C:\MKLM\mklm.exe" --AFTER-UPDATE"#,
+            "\"C:\\MKLM\\mklm.exe\" --after-update\0",
+        ] {
+            assert!(!is_after_update_command(bad), "{bad}");
+        }
+        // Refused before anything is written.
+        assert!(matches!(
+            register_after_update(r#""C:\MKLM\cmd.exe" --after-update"#),
+            Err(Error::Registry { code, .. }) if code == ERROR_INVALID_PARAMETER.0
+        ));
     }
 }

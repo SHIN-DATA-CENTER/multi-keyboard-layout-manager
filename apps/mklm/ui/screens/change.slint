@@ -215,6 +215,9 @@ export component ChangeScreen inherits VerticalLayout {
 // button (review U14). The text follows the Windows 11 prompt for an unsigned program (review
 // U18); T-APPLY-1 checks it against the real prompt.
 export component UacNoticeScreen inherits VerticalLayout {
+    // Before an update: how to check the prompt's program location with "Show more details"
+    // (design m5b E.4; SECURITY-14). Empty otherwise.
+    in property <string> location-line;
     callback go();
     callback cancel();
     padding: 16px;
@@ -226,6 +229,9 @@ export component UacNoticeScreen inherits VerticalLayout {
 
     DialogBody {
         UacExplanation { }
+        if root.location-line != "": Body {
+            text: root.location-line;
+        }
     }
 
     DialogButtons {

@@ -30,6 +30,9 @@ pub mod journal_pages;
 /// The first-run wizard (WP-U2).
 pub mod wizard;
 
+/// Updates (M5b, design m5b E).
+pub mod update;
+
 /// A language the GUI speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lang {
@@ -2360,6 +2363,7 @@ mod tests {
                 include_str!("i18n/journal_pages.rs"),
             ),
             ("src/i18n/wizard.rs", include_str!("i18n/wizard.rs")),
+            ("src/i18n/update.rs", include_str!("i18n/update.rs")),
             (
                 "translations/ja/LC_MESSAGES/mklm.po",
                 include_str!("../translations/ja/LC_MESSAGES/mklm.po"),

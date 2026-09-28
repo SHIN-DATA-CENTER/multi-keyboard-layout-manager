@@ -1,0 +1,467 @@
+== page: unavailable: no keys in this build ==
+title: MKLM updates
+status: This MKLM has no keys to verify updates with, so automatic updates are not available.
+tone: Info
+
+== page: unavailable: could not be read ==
+title: MKLM updates
+status: MKLM could not tell whether updates can be used. Open MKLM again.
+tone: Info
+button: [Copy details] primary
+details: updates: the installation folder: SHGetKnownFolderPath failed | MKLM 0.2.0 (x64)
+
+== page: a development copy, not checked yet ==
+title: MKLM updates
+status: MKLM has not checked for updates yet.
+info: This MKLM runs from D:\src\mklm\target\debug, so automatic updates are not available (only an installed MKLM updates itself).
+tone: Neutral
+button: [Check now] primary
+
+== page: not checked yet ==
+title: MKLM updates
+status: MKLM has not checked for updates yet.
+tone: Neutral
+button: [Check now] primary
+
+== page: checking ==
+title: MKLM updates
+status: Checking…
+tone: Neutral
+button: [Cancel] primary
+
+== page: up to date ==
+title: MKLM updates
+status: MKLM is up to date (0.2.0; update information of 2026-10-15).
+tone: Success
+button: [Check now] primary
+
+== page: a new version, skipped, not downloaded ==
+title: MKLM updates
+status: You skipped 0.2.1.
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+tone: Neutral
+link: [Open the release notes]
+button: [Download] (read as Download 0.2.1)
+button: [Check now] primary
+
+== page: a new version, not downloaded (automatic checks off) ==
+title: MKLM updates
+status: Not downloaded yet.
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+tone: Neutral
+link: [Open the release notes]
+button: [Download] (read as Download 0.2.1)
+button: [Check now] primary
+
+== page: downloading ==
+title: MKLM updates
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+progress text: Downloading: 2.7 MB of 6.0 MB (44 %)
+progress: 44 (Download: 44 %)
+tone: Neutral
+link: [Open the release notes]
+button: [Cancel] primary
+
+== page: ready, before the first prompt ==
+title: MKLM updates
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+progress text: Download: done (6.0 MB; the content was checked)
+explanation: When you choose "Update now", Windows asks for administrator permission. The publisher shows as "Unknown". Before you allow it, choose "Show more details" and check that the program's location is C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe. If it is anywhere else, choose No. MKLM asks for permission only right after you choose "Update now". Once you allow it, MKLM closes, and opens again by itself when the update is done. The keyboard settings do not change.
+tone: Neutral
+link: [Open the release notes]
+button: [Skip this version] (read as Skip 0.2.1)
+button: [Later]
+button: [Update now (Windows asks next)] (read as Update to 0.2.1 now) primary
+
+== page: ready, an elevated MKLM ==
+title: MKLM updates
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+progress text: Download: done (6.0 MB; the content was checked)
+explanation: When you choose "Update now", MKLM closes, and opens again by itself when the update is done. The keyboard settings do not change.
+tone: Neutral
+link: [Open the release notes]
+button: [Skip this version] (read as Skip 0.2.1)
+button: [Later]
+button: [Update now] (read as Update to 0.2.1 now) primary
+
+== page: ready, a change waits for the user ==
+title: MKLM updates
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+progress text: Download: done (6.0 MB; the content was checked)
+explanation: When you choose "Update now", Windows asks for administrator permission. The publisher shows as "Unknown". Before you allow it, choose "Show more details" and check that the program's location is C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe. If it is anywhere else, choose No. MKLM asks for permission only right after you choose "Update now". Once you allow it, MKLM closes, and opens again by itself when the update is done. The keyboard settings do not change.
+info: A change is waiting for you, so MKLM cannot update now. Decide about it with "Review…", then update.
+tone: Neutral
+link: [Open the release notes]
+button: [Skip this version] (read as Skip 0.2.1)
+button: [Later]
+button: [Update now (Windows asks next)] (read as Update to 0.2.1 now) primary off
+button: [Review…]
+
+== page: ready, an ARM64 PC running the x64 build ==
+title: MKLM updates
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+progress text: Download: done (6.0 MB; the content was checked)
+explanation: When you choose "Update now", Windows asks for administrator permission. The publisher shows as "Unknown". Before you allow it, choose "Show more details" and check that the program's location is C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe. If it is anywhere else, choose No. MKLM asks for permission only right after you choose "Update now". Once you allow it, MKLM closes, and opens again by itself when the update is done. The keyboard settings do not change.
+info: This PC can also run the ARM64 version (this MKLM is the x64 one; to switch, install the ARM64 version from the release page).
+tone: Neutral
+link: [Open the release notes]
+button: [Skip this version] (read as Skip 0.2.1)
+button: [Later]
+button: [Update now (Windows asks next)] (read as Update to 0.2.1 now) primary
+
+== page: a manual update ==
+title: MKLM updates
+status: This version cannot be updated automatically. Download the installer from the release page and run it.
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+tone: Info
+button: [Open the release page] primary
+
+== page: updating: the Windows prompt ==
+title: MKLM updates
+status: Waiting for administrator permission…
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+tone: Neutral
+link: [Open the release notes]
+button: [Cancel] primary
+
+== page: updating: handing the installer over ==
+title: MKLM updates
+status: Preparing the update… (44 % handed over)
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+progress: 44 (Preparing the update… (44 % handed over))
+tone: Neutral
+link: [Open the release notes]
+button: [Cancel] primary
+
+== page: updating: Windows checks the files ==
+title: MKLM updates
+status: Windows is checking the files… (up to about 2 minutes)
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+progress: 100 (Windows is checking the files… (up to about 2 minutes))
+tone: Neutral
+link: [Open the release notes]
+button: [Cancel] off
+
+== page: the update was refused: disk full ==
+title: MKLM updates
+status: There is not enough free disk space, so MKLM was not updated (about 13 MB more is needed). MKLM stays at 0.2.0, and the keyboard settings did not change.
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+tone: Warning
+link: [Open the release notes]
+button: [Update now] (read as Update to 0.2.1 now)
+button: [Copy details] primary
+details: update session: refused: not enough disk space: 30000000 bytes needed, 17000000 available | MKLM 0.2.0 (x64)
+
+== page: the Windows prompt was declined ==
+title: MKLM updates
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+progress text: Download: done (6.0 MB; the content was checked)
+explanation: When you choose "Update now", Windows asks for administrator permission. The publisher shows as "Unknown". Before you allow it, choose "Show more details" and check that the program's location is C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe. If it is anywhere else, choose No. MKLM asks for permission only right after you choose "Update now". Once you allow it, MKLM closes, and opens again by itself when the update is done. The keyboard settings do not change.
+info: Cancelled (nothing was changed).
+tone: Neutral
+link: [Open the release notes]
+button: [Skip this version] (read as Skip 0.2.1)
+button: [Later]
+button: [Update now (Windows asks next)] (read as Update to 0.2.1 now) primary
+
+== page: the download did not match ==
+title: MKLM updates
+status: The downloaded file does not match the update information. Download it again.
+version: A new version is available: 0.2.1 (you have 0.2.0)
+published: Published: 2026-10-15
+tone: Warning
+link: [Open the release notes]
+button: [Download] (read as Download 0.2.1)
+button: [Copy details] primary
+details: download: downloading the installer failed: SHA-256 mismatch | MKLM 0.2.0 (x64)
+
+== page: the check failed: a proxy that asks for credentials ==
+title: MKLM updates
+status: The proxy of this network asks for authentication, so MKLM cannot check for updates by itself (for safety it never sends your Windows credentials automatically). Look for a new version on the GitHub release page.
+tone: Warning
+button: [Open the release page]
+button: [Copy details] primary
+details: check: fetching the update information failed: the proxy requires authentication | class: Structural, upd-proxy-auth | MKLM 0.2.0 (x64)
+
+== page: the check failed for 31 days (transient) ==
+title: MKLM updates
+status: MKLM could not check for updates. Check that this PC is connected to the internet. On a company or school network, a proxy may have to be set up.
+info: MKLM has not been able to check for updates for 30 days or more. Check the internet and proxy settings.
+tone: Warning
+button: [Check now]
+button: [Copy details] primary
+details: check: fetching the update information failed: timed out | class: Transient, upd-net | MKLM 0.2.0 (x64)
+
+== page: up to date by old information: expired, and an older one ignored ==
+title: MKLM updates
+status: MKLM is up to date (0.2.0; update information of 2026-10-15).
+info: The update information expired on 2027-04-13. Either no new version has been published for a long time, or older information is arriving. Check the GitHub release page.
+info: Last check: older update information was ignored (received 2026-10-05, recorded 2026-10-15)
+info: The last check failed: Update information older than the one checked before arrived, so it was not used. A new version may have been withdrawn, or older information swapped in on the way. Check the newest version on the GitHub release page.
+tone: Success
+button: [Check now] primary
+button: [Open the release page]
+button: [Copy details]
+details: check: the update information was refused: the manifest was issued at 1791158400, before 1792022400 | class: Structural, upd-rollback | MKLM 0.2.0 (x64)
+
+== page: the installed programs are out of step ==
+title: MKLM updates
+status: An update stopped half way, so MKLM's files are of different versions. The keyboard settings are as they were. Choose "Run the installer", or download MKLM-Setup-0.2.1-x64.exe from the GitHub release page and run it.
+tone: Warning
+button: [Run the installer (needs administrator permission)]
+button: [Open the release page] primary
+details: the installed programs are of different versions | MKLM 0.2.0 (x64)
+
+== banner: a new version is ready ==
+banner: A new version of MKLM (0.2.1) is ready.
+tone: Info
+button: [Details…] (read as Open the details of the MKLM update)
+
+== banner: 30 days without a check (transient) ==
+banner: MKLM has not been able to check for updates for 30 days or more. Check the internet and proxy settings.
+tone: Info
+button: [Details…] (read as Open the details of the MKLM update)
+
+== banner: 30 days without a check (structural) ==
+banner: MKLM's automatic updates may no longer work. Look for a new version on the GitHub release page.
+tone: Info
+button: [Open the release page]
+button: [Details…] (read as Open the details of the MKLM update)
+
+== banner: the information expired ==
+banner: MKLM's automatic updates may no longer work. Look for a new version on the GitHub release page.
+tone: Info
+button: [Open the release page]
+button: [Details…] (read as Open the details of the MKLM update)
+
+== banner: an older manifest was ignored ==
+banner: Update information older than the one checked before arrived, so it was not used.
+tone: Warning
+button: [Details…] (read as Open the details of the MKLM update)
+
+== settings: never checked ==
+auto check: ☑
+last check: Last check: not yet
+last success: Last successful check: none yet
+can check: true
+
+== settings: up to date ==
+auto check: ☑
+last check: Last check: 2026-10-15 10:00 (up to date)
+last success: Last successful check: 2026-10-15 10:00
+can check: true
+
+== settings: a new version ==
+auto check: ☑
+last check: Last check: 2026-10-15 10:00 (0.2.1 is available)
+last success: Last successful check: 2026-10-15 10:00
+can check: true
+
+== settings: failing for 40 days (structural) ==
+auto check: ☑
+last check: Last check: 2026-10-15 10:00 (the check failed)
+last success: Last successful check: 2026-09-05 10:00
+stale: MKLM has not been able to check for updates for 30 days or more (last failure: a problem this version of MKLM is unlikely to get past).
+can check: true
+
+== settings: automatic checks off ==
+auto check: ☐
+last check: Last check: 2026-10-15 10:00 (up to date)
+last success: Last successful check: 2026-10-15 10:00
+can check: true
+
+== settings: expired ==
+auto check: ☑
+last check: Last check: 2026-10-15 10:00 (up to date)
+last success: Last successful check: 2026-10-15 10:00
+expired: The update information expired on 2027-04-13. Either no new version has been published for a long time, or older information is arriving. Check the GitHub release page.
+can check: true
+
+== hand-off ==
+title: Updating MKLM
+message: MKLM is being updated. MKLM closes in a moment and opens again by itself about a minute after the update is done. Until then, do not sign out or restart. If it has not opened after 2 minutes, open MKLM from the Start menu.
+
+== result: installed (this user's) ==
+title: MKLM update
+message: MKLM was updated to 0.2.1.
+tone: Success
+button: [Open the release notes]
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, installed | installer exit code 0 | MKLM 0.2.1 (x64)
+
+== result: installed by another user, this MKLM had quit for it ==
+title: MKLM update
+message: MKLM was updated to 0.2.1 (another user updated it). MKLM had been closed for a while because another user updated it.
+tone: Success
+button: [Open the release notes]
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, installed | installer exit code 0 | MKLM 0.2.1 (x64)
+
+== result: another user's MKLM was busy ==
+title: MKLM update
+message: Another user's MKLM was in the middle of a keyboard change or waiting for an answer, so MKLM was not updated (it stays at 0.2.0). When that change is done, choose "Update now" again. The keyboard settings did not change.
+tone: Warning
+button: [Update now] (read as Update to 0.2.1 now)
+button: [Copy details]
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: MKLM was busy in session(s) [2] | MKLM 0.2.0 (x64)
+
+== result: MKLM programs still ran ==
+title: MKLM update
+message: Another MKLM (MKLM, mklm-cli) was running, so MKLM was not updated (it stays at 0.2.0). Close it, then choose "Update now" again. The keyboard settings did not change.
+tone: Warning
+button: [Update now] (read as Update to 0.2.1 now)
+button: [Copy details]
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: MKLM programs were still running ([Gui, Cli]; powershell.exe (PID 7120, session 2)) | MKLM 0.2.0 (x64)
+
+== result: the files were in use ==
+title: MKLM update
+message: Another program had MKLM's files open, so MKLM was not updated (it stays at 0.2.0). It may be another user's program or an antivirus. Wait a moment, then choose "Update now" again. If it happens every time, give your administrator what "Copy details" copies (the programs holding the files and their session numbers). The keyboard settings did not change.
+tone: Warning
+button: [Update now] (read as Update to 0.2.1 now)
+button: [Copy details]
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: MKLM's files were in use ([Gui]; powershell.exe (PID 7120, session 2)) | MKLM 0.2.0 (x64)
+
+== result: the installer refused: files in use ==
+title: MKLM update
+message: Another program had MKLM's files open, so MKLM was not updated (it stays at 0.2.0). It may be another user's program or an antivirus. Wait a moment, then choose "Update now" again. If it happens every time, give your administrator what "Copy details" copies (the programs holding the files and their session numbers). The keyboard settings did not change.
+tone: Warning
+button: [Update now] (read as Update to 0.2.1 now)
+button: [Copy details]
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: the installer refused (FilesInUse) | installer exit code 26 | MKLM 0.2.0 (x64)
+
+== result: the installer refused: Windows too old ==
+title: MKLM update
+message: The installer found that it cannot run on this PC (this version of Windows is too old). MKLM stays at 0.2.0. The keyboard settings did not change.
+tone: Warning
+button: [Open the release page]
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: the installer refused (OsTooOld) | MKLM 0.2.0 (x64)
+
+== result: refused again by the runner: a restart is pending ==
+title: MKLM update
+message: A change is waiting for a PC restart, so MKLM cannot update now. Restart the PC (Restart, not Shut down), finish the check, then update.
+tone: Warning
+button: [Restart…]
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: an operation is waiting for the user | MKLM 0.2.0 (x64)
+
+== result: an antivirus stopped the installer ==
+title: MKLM update
+message: An antivirus stopped the installer. Look under Windows Security → Virus & threat protection → Protection history. MKLM stays at 0.2.0. The keyboard settings did not change.
+tone: Danger
+button: [Copy details]
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: the installer did not start (Windows error 225) | MKLM 0.2.0 (x64)
+
+== result: the installer timed out ==
+title: MKLM update
+message: The installer had not finished after 60 minutes. MKLM is at 0.2.0 now. The keyboard settings did not change.
+tone: Danger
+button: [Run the installer (needs administrator permission)]
+button: [Open the release page]
+button: [Copy details]
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, failed: the installer did not end in time | MKLM 0.2.0 (x64)
+
+== result: interrupted before anything was replaced ==
+title: MKLM update
+message: The update was interrupted. Nothing was changed (MKLM stays at 0.2.0). The keyboard settings did not change.
+tone: Warning
+button: [Update now] (read as Update to 0.2.1 now)
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, interrupted while waiting for MKLM's programs to end | phase: waiting for other MKLMs to end | MKLM 0.2.0 (x64)
+
+== result: interrupted, the new version in place ==
+title: MKLM update
+message: MKLM was updated to 0.2.1 (the PC restarted, or you signed out, just before the update finished).
+tone: Success
+button: [Open the release notes]
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, interrupted while checking the result | phase: checking | MKLM 0.2.1 (x64)
+
+== result: interrupted while installing, the old version kept ==
+title: MKLM update
+message: The update was interrupted. MKLM stays at 0.2.0. The keyboard settings did not change.
+tone: Warning
+button: [Update now] (read as Update to 0.2.1 now)
+button: [Close] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, interrupted while installing | phase: installing | MKLM 0.2.0 (x64)
+
+== result: the installed programs are out of step ==
+title: MKLM update
+message: An update stopped half way, so MKLM's files are of different versions. The keyboard settings are as they were. Choose "Run the installer", or download MKLM-Setup-0.2.1-x64.exe from the GitHub release page and run it.
+tone: Warning
+button: [Run the installer (needs administrator permission)]
+button: [Open the release page]
+button: [Copy details]
+button: [Close] primary
+details: the installed programs are of different versions | MKLM 0.2.0 (x64)
+
+== the UAC explanation before an update ==
+line: Before you allow it, choose "Show more details" and check that the program's location is C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe. If it is anywhere else, choose No. MKLM asks for permission only right after you choose "Update now".
+
+== the messages of design m5b E.6 ==
+upd-net: MKLM could not check for updates. Check that this PC is connected to the internet. On a company or school network, a proxy may have to be set up.
+upd-net-dl: MKLM could not download the update. Check that this PC is connected to the internet. On a company or school network, a proxy may have to be set up.
+upd-proxy-auth: The proxy of this network asks for authentication, so MKLM cannot check for updates by itself (for safety it never sends your Windows credentials automatically). Look for a new version on the GitHub release page.
+upd-tls: MKLM could not connect to GitHub securely. Check that the PC's date and time are right.
+upd-cancelled: Cancelled (nothing was changed).
+upd-not-found: The update information was not found. Check again later.
+upd-not-found-long: The update information has not been found for 7 days or more. Automatic updates may no longer work. Look for a new version on the GitHub release page.
+upd-gh-temp: GitHub did not answer for the moment. Check again later.
+upd-gh-changed: GitHub changed how it hands out files, so this version of MKLM may not be able to update itself. Install a new version from the GitHub release page.
+upd-format: The update information is in a form this version of MKLM does not understand. Install a new version from the GitHub release page.
+upd-download-mismatch: The downloaded file does not match the update information. Download it again.
+upd-cache: The downloaded file could not be saved. Check the free disk space.
+upd-sig: The signature of the update information could not be verified. For safety, this update is not used. Check the GitHub release page for the latest news.
+upd-race: A new version seems to have been published while the update information was fetched. Check again later.
+upd-rollback: Update information older than the one checked before arrived, so it was not used. A new version may have been withdrawn, or older information swapped in on the way. Check the newest version on the GitHub release page.
+upd-not-newer: This update is not newer than the MKLM you have (it seems to be installed already).
+upd-manual: This version cannot be updated automatically. Download the installer from the release page and run it.
+upd-not-configured: This MKLM has no keys to verify updates with, so automatic updates are not available.
+upd-not-installed-copy: This MKLM runs from D:\src\mklm\target\debug, so automatic updates are not available (only an installed MKLM updates itself).
+upd-env-unknown: MKLM could not tell whether updates can be used. Open MKLM again.
+upd-op-open: A change is waiting for you, so MKLM cannot update now. Decide about it with "Review…", then update.
+upd-op-reboot: A change is waiting for a PC restart, so MKLM cannot update now. Restart the PC (Restart, not Shut down), finish the check, then update.
+upd-busy: Another MKLM is busy. Try again in a moment.
+upd-disk-full: There is not enough free disk space, so MKLM was not updated (about 13 MB more is needed). MKLM stays at 0.2.0, and the keyboard settings did not change.
+upd-stage-mismatch: While the update was prepared, the file handed over did not match. Nothing was changed. Download it again, then try again.
+upd-prepare-failed: Preparing the update failed. Nothing was changed. Restart the PC and try again. If it keeps failing, choose "Copy details" and include them in a report.
+upd-handoff: MKLM is being updated. MKLM closes in a moment and opens again by itself about a minute after the update is done. Until then, do not sign out or restart. If it has not opened after 2 minutes, open MKLM from the Start menu.
+upd-installed: MKLM was updated to 0.2.1.
+upd-installed-other: MKLM was updated to 0.2.1 (another user updated it).
+upd-instance-busy: Another user's MKLM was in the middle of a keyboard change or waiting for an answer, so MKLM was not updated (it stays at 0.2.0). When that change is done, choose "Update now" again. The keyboard settings did not change.
+upd-programs-running: Another MKLM (MKLM, mklm-cli) was running, so MKLM was not updated (it stays at 0.2.0). Close it, then choose "Update now" again. The keyboard settings did not change.
+upd-files-in-use: Another program had MKLM's files open, so MKLM was not updated (it stays at 0.2.0). It may be another user's program or an antivirus. Wait a moment, then choose "Update now" again. If it happens every time, give your administrator what "Copy details" copies (the programs holding the files and their session numbers). The keyboard settings did not change.
+upd-session-ending: Signing out or shutting down had begun, so MKLM was not updated (it stays at 0.2.0). The keyboard settings did not change.
+upd-av-blocked: An antivirus stopped the installer. Look under Windows Security → Virus & threat protection → Protection history. MKLM stays at 0.2.0. The keyboard settings did not change.
+upd-installer-not-started: The installer could not be started. MKLM stays at 0.2.0, and the keyboard settings did not change.
+upd-version-changed: MKLM was installed another way while the update was prepared. If the version you have now is fine, there is nothing to do. The keyboard settings did not change.
+upd-installer-env: The installer found that it cannot run on this PC (this version of Windows is too old). MKLM stays at 0.2.0. The keyboard settings did not change.
+upd-file-write: The installer could not write its files. Check the free disk space and your antivirus. MKLM stays at 0.2.0. The keyboard settings did not change.
+upd-not-installed: MKLM could not be updated. It stays at 0.2.0, and the keyboard settings did not change.
+upd-inconsistent: An update stopped half way, so MKLM's files are of different versions. The keyboard settings are as they were. Choose "Run the installer", or download MKLM-Setup-0.2.1-x64.exe from the GitHub release page and run it.
+upd-timeout: The installer had not finished after 60 minutes. MKLM is at 0.2.0 now. The keyboard settings did not change.
+upd-interrupted-nothing: The update was interrupted. Nothing was changed (MKLM stays at 0.2.0). The keyboard settings did not change.
+upd-interrupted-installed: MKLM was updated to 0.2.1 (the PC restarted, or you signed out, just before the update finished).
+upd-interrupted-kept: The update was interrupted. MKLM stays at 0.2.0. The keyboard settings did not change.
+upd-expired: The update information expired on 2027-04-13. Either no new version has been published for a long time, or older information is arriving. Check the GitHub release page.
+upd-stale: MKLM has not been able to check for updates for 30 days or more. Check the internet and proxy settings.
+upd-stale-structural: MKLM's automatic updates may no longer work. Look for a new version on the GitHub release page.

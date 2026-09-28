@@ -1,0 +1,467 @@
+== page: unavailable: no keys in this build ==
+title: MKLM の更新
+status: この MKLM には更新を確かめるための鍵が入っていないため、自動更新は使えません。
+tone: Info
+
+== page: unavailable: could not be read ==
+title: MKLM の更新
+status: 更新を使えるか確かめられませんでした。MKLM を開き直してください。
+tone: Info
+button: [詳細をコピー] primary
+details: updates: the installation folder: SHGetKnownFolderPath failed | MKLM 0.2.0 (x64)
+
+== page: a development copy, not checked yet ==
+title: MKLM の更新
+status: まだ更新を確認していません。
+info: この MKLM は D:\src\mklm\target\debug から動いているため、自動更新は使えません（インストールした MKLM だけが更新できます）。
+tone: Neutral
+button: [今すぐ確認] primary
+
+== page: not checked yet ==
+title: MKLM の更新
+status: まだ更新を確認していません。
+tone: Neutral
+button: [今すぐ確認] primary
+
+== page: checking ==
+title: MKLM の更新
+status: 確認しています…
+tone: Neutral
+button: [キャンセル] primary
+
+== page: up to date ==
+title: MKLM の更新
+status: MKLM は最新です（0.2.0。2026/10/15 の更新情報）。
+tone: Success
+button: [今すぐ確認] primary
+
+== page: a new version, skipped, not downloaded ==
+title: MKLM の更新
+status: 0.2.1 はスキップしました。
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+tone: Neutral
+link: [リリースノートを開く]
+button: [ダウンロード] (read as 0.2.1 をダウンロード)
+button: [今すぐ確認] primary
+
+== page: a new version, not downloaded (automatic checks off) ==
+title: MKLM の更新
+status: まだダウンロードしていません。
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+tone: Neutral
+link: [リリースノートを開く]
+button: [ダウンロード] (read as 0.2.1 をダウンロード)
+button: [今すぐ確認] primary
+
+== page: downloading ==
+title: MKLM の更新
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+progress text: ダウンロード中: 2.7 MB / 6.0 MB（44 %）
+progress: 44 (ダウンロード: 44 %)
+tone: Neutral
+link: [リリースノートを開く]
+button: [キャンセル] primary
+
+== page: ready, before the first prompt ==
+title: MKLM の更新
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+progress text: ダウンロード: 完了（6.0 MB。内容を確かめました）
+explanation: ［今すぐ更新］を押すと、Windows が管理者の許可を求めます。発行元は「不明」と表示されます。許可する前に「詳細を表示」を押し、プログラムの場所が C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe であることを確かめてください。違う場所なら「いいえ」を押してください。MKLM が許可を求めるのは、あなたが［今すぐ更新］を押した直後だけです。許可すると MKLM はいったん終了し、更新が終わると自動で開きます。キーボードの設定は変わりません。
+tone: Neutral
+link: [リリースノートを開く]
+button: [この版をスキップ] (read as 0.2.1 をスキップ)
+button: [後で]
+button: [今すぐ更新（次に Windows の確認が出ます）] (read as 今すぐ 0.2.1 に更新) primary
+
+== page: ready, an elevated MKLM ==
+title: MKLM の更新
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+progress text: ダウンロード: 完了（6.0 MB。内容を確かめました）
+explanation: ［今すぐ更新］を押すと MKLM はいったん終了し、更新が終わると自動で開きます。キーボードの設定は変わりません。
+tone: Neutral
+link: [リリースノートを開く]
+button: [この版をスキップ] (read as 0.2.1 をスキップ)
+button: [後で]
+button: [今すぐ更新] (read as 今すぐ 0.2.1 に更新) primary
+
+== page: ready, a change waits for the user ==
+title: MKLM の更新
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+progress text: ダウンロード: 完了（6.0 MB。内容を確かめました）
+explanation: ［今すぐ更新］を押すと、Windows が管理者の許可を求めます。発行元は「不明」と表示されます。許可する前に「詳細を表示」を押し、プログラムの場所が C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe であることを確かめてください。違う場所なら「いいえ」を押してください。MKLM が許可を求めるのは、あなたが［今すぐ更新］を押した直後だけです。許可すると MKLM はいったん終了し、更新が終わると自動で開きます。キーボードの設定は変わりません。
+info: 確認待ちの変更があるため、今は更新できません。［確認…］で変更を決めてから更新してください。
+tone: Neutral
+link: [リリースノートを開く]
+button: [この版をスキップ] (read as 0.2.1 をスキップ)
+button: [後で]
+button: [今すぐ更新（次に Windows の確認が出ます）] (read as 今すぐ 0.2.1 に更新) primary off
+button: [確認…]
+
+== page: ready, an ARM64 PC running the x64 build ==
+title: MKLM の更新
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+progress text: ダウンロード: 完了（6.0 MB。内容を確かめました）
+explanation: ［今すぐ更新］を押すと、Windows が管理者の許可を求めます。発行元は「不明」と表示されます。許可する前に「詳細を表示」を押し、プログラムの場所が C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe であることを確かめてください。違う場所なら「いいえ」を押してください。MKLM が許可を求めるのは、あなたが［今すぐ更新］を押した直後だけです。許可すると MKLM はいったん終了し、更新が終わると自動で開きます。キーボードの設定は変わりません。
+info: この PC では ARM64 版も使えます（今の MKLM は x64 版です。切り替えるには、リリース ページから ARM64 版を入れてください）。
+tone: Neutral
+link: [リリースノートを開く]
+button: [この版をスキップ] (read as 0.2.1 をスキップ)
+button: [後で]
+button: [今すぐ更新（次に Windows の確認が出ます）] (read as 今すぐ 0.2.1 に更新) primary
+
+== page: a manual update ==
+title: MKLM の更新
+status: この版からは自動で更新できません。リリース ページからインストーラーをダウンロードして実行してください。
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+tone: Info
+button: [リリース ページを開く] primary
+
+== page: updating: the Windows prompt ==
+title: MKLM の更新
+status: 管理者の確認を待っています…
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+tone: Neutral
+link: [リリースノートを開く]
+button: [キャンセル] primary
+
+== page: updating: handing the installer over ==
+title: MKLM の更新
+status: 更新を準備しています…（送信 44 %）
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+progress: 44 (更新を準備しています…（送信 44 %）)
+tone: Neutral
+link: [リリースノートを開く]
+button: [キャンセル] primary
+
+== page: updating: Windows checks the files ==
+title: MKLM の更新
+status: Windows がファイルを確認しています…（最大 2 分ほど）
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+progress: 100 (Windows がファイルを確認しています…（最大 2 分ほど）)
+tone: Neutral
+link: [リリースノートを開く]
+button: [キャンセル] off
+
+== page: the update was refused: disk full ==
+title: MKLM の更新
+status: ディスクの空きが足りないため、更新できませんでした（あと約 13 MB 必要です）。MKLM は 0.2.0 のままで、キーボードの設定も変わっていません。
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+tone: Warning
+link: [リリースノートを開く]
+button: [今すぐ更新] (read as 今すぐ 0.2.1 に更新)
+button: [詳細をコピー] primary
+details: update session: refused: not enough disk space: 30000000 bytes needed, 17000000 available | MKLM 0.2.0 (x64)
+
+== page: the Windows prompt was declined ==
+title: MKLM の更新
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+progress text: ダウンロード: 完了（6.0 MB。内容を確かめました）
+explanation: ［今すぐ更新］を押すと、Windows が管理者の許可を求めます。発行元は「不明」と表示されます。許可する前に「詳細を表示」を押し、プログラムの場所が C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe であることを確かめてください。違う場所なら「いいえ」を押してください。MKLM が許可を求めるのは、あなたが［今すぐ更新］を押した直後だけです。許可すると MKLM はいったん終了し、更新が終わると自動で開きます。キーボードの設定は変わりません。
+info: 取り消しました（何も変更していません）。
+tone: Neutral
+link: [リリースノートを開く]
+button: [この版をスキップ] (read as 0.2.1 をスキップ)
+button: [後で]
+button: [今すぐ更新（次に Windows の確認が出ます）] (read as 今すぐ 0.2.1 に更新) primary
+
+== page: the download did not match ==
+title: MKLM の更新
+status: ダウンロードしたファイルが更新情報と一致しませんでした。もう一度ダウンロードしてください。
+version: 新しい版があります: 0.2.1（今の版: 0.2.0）
+published: 公開: 2026/10/15
+tone: Warning
+link: [リリースノートを開く]
+button: [ダウンロード] (read as 0.2.1 をダウンロード)
+button: [詳細をコピー] primary
+details: download: downloading the installer failed: SHA-256 mismatch | MKLM 0.2.0 (x64)
+
+== page: the check failed: a proxy that asks for credentials ==
+title: MKLM の更新
+status: このネットワークのプロキシは認証を求めるため、MKLM は自動で更新を確認できません（安全のため、Windows の資格情報を自動では送りません）。GitHub のリリース ページで新しい版を確かめてください。
+tone: Warning
+button: [リリース ページを開く]
+button: [詳細をコピー] primary
+details: check: fetching the update information failed: the proxy requires authentication | class: Structural, upd-proxy-auth | MKLM 0.2.0 (x64)
+
+== page: the check failed for 31 days (transient) ==
+title: MKLM の更新
+status: 更新を確認できませんでした。インターネットにつながっているか確かめてください。会社や学校のネットワークでは、プロキシの設定が必要なことがあります。
+info: 30 日以上、MKLM の更新を確認できていません。インターネットやプロキシの設定を確かめてください。
+tone: Warning
+button: [今すぐ確認]
+button: [詳細をコピー] primary
+details: check: fetching the update information failed: timed out | class: Transient, upd-net | MKLM 0.2.0 (x64)
+
+== page: up to date by old information: expired, and an older one ignored ==
+title: MKLM の更新
+status: MKLM は最新です（0.2.0。2026/10/15 の更新情報）。
+info: 更新情報の有効期限（2027/04/13）を過ぎています。新しい版が長く公開されていないか、古い情報が届いています。GitHub のリリース ページで確かめてください。
+info: 最後の確認: 古い更新情報を無視しました（受け取ったもの 2026/10/05、記録 2026/10/15）
+info: 最後の確認に失敗しました: 以前に確かめたものより古い更新情報が届いたため、使いませんでした。新しい版が取り下げられたか、途中で古い情報に差し替えられた可能性があります。GitHub のリリース ページで最新の版を確かめてください。
+tone: Success
+button: [今すぐ確認] primary
+button: [リリース ページを開く]
+button: [詳細をコピー]
+details: check: the update information was refused: the manifest was issued at 1791158400, before 1792022400 | class: Structural, upd-rollback | MKLM 0.2.0 (x64)
+
+== page: the installed programs are out of step ==
+title: MKLM の更新
+status: 更新が途中で止まったため、MKLM のファイルの版がそろっていません。キーボードの設定はそのままです。［インストーラーを実行］を押すか、GitHub のリリース ページから MKLM-Setup-0.2.1-x64.exe をダウンロードして実行してください。
+tone: Warning
+button: [インストーラーを実行（管理者の許可が要ります）]
+button: [リリース ページを開く] primary
+details: the installed programs are of different versions | MKLM 0.2.0 (x64)
+
+== banner: a new version is ready ==
+banner: MKLM の新しい版（0.2.1）を使えます。
+tone: Info
+button: [詳細…] (read as MKLM の更新の詳細を開く)
+
+== banner: 30 days without a check (transient) ==
+banner: 30 日以上、MKLM の更新を確認できていません。インターネットやプロキシの設定を確かめてください。
+tone: Info
+button: [詳細…] (read as MKLM の更新の詳細を開く)
+
+== banner: 30 days without a check (structural) ==
+banner: MKLM の自動更新が使えなくなっている可能性があります。GitHub のリリース ページで新しい版を確かめてください。
+tone: Info
+button: [リリース ページを開く]
+button: [詳細…] (read as MKLM の更新の詳細を開く)
+
+== banner: the information expired ==
+banner: MKLM の自動更新が使えなくなっている可能性があります。GitHub のリリース ページで新しい版を確かめてください。
+tone: Info
+button: [リリース ページを開く]
+button: [詳細…] (read as MKLM の更新の詳細を開く)
+
+== banner: an older manifest was ignored ==
+banner: 以前に確かめたものより古い更新情報が届いたため、使いませんでした。
+tone: Warning
+button: [詳細…] (read as MKLM の更新の詳細を開く)
+
+== settings: never checked ==
+auto check: ☑
+last check: 最後の確認: まだ確認していません
+last success: 最後に成功した確認: まだありません
+can check: true
+
+== settings: up to date ==
+auto check: ☑
+last check: 最後の確認: 2026/10/15 10:00（最新です）
+last success: 最後に成功した確認: 2026/10/15 10:00
+can check: true
+
+== settings: a new version ==
+auto check: ☑
+last check: 最後の確認: 2026/10/15 10:00（新しい版 0.2.1 があります）
+last success: 最後に成功した確認: 2026/10/15 10:00
+can check: true
+
+== settings: failing for 40 days (structural) ==
+auto check: ☑
+last check: 最後の確認: 2026/10/15 10:00（確認できませんでした）
+last success: 最後に成功した確認: 2026/09/05 10:00
+stale: 30 日以上、更新を確認できていません（最後の失敗: この版の MKLM では直らない見込みの問題）。
+can check: true
+
+== settings: automatic checks off ==
+auto check: ☐
+last check: 最後の確認: 2026/10/15 10:00（最新です）
+last success: 最後に成功した確認: 2026/10/15 10:00
+can check: true
+
+== settings: expired ==
+auto check: ☑
+last check: 最後の確認: 2026/10/15 10:00（最新です）
+last success: 最後に成功した確認: 2026/10/15 10:00
+expired: 更新情報の有効期限（2027/04/13）を過ぎています。新しい版が長く公開されていないか、古い情報が届いています。GitHub のリリース ページで確かめてください。
+can check: true
+
+== hand-off ==
+title: MKLM を更新しています
+message: MKLM を更新しています。MKLM はまもなく終了し、更新が終わると 1 分ほどで自動で開きます。開き直すまで、サインアウトや再起動はしないでください。2 分たっても開かない場合は、スタート メニューから MKLM を開いてください。
+
+== result: installed (this user's) ==
+title: MKLM の更新
+message: MKLM を 0.2.1 に更新しました。
+tone: Success
+button: [リリースノートを開く]
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, installed | installer exit code 0 | MKLM 0.2.1 (x64)
+
+== result: installed by another user, this MKLM had quit for it ==
+title: MKLM の更新
+message: MKLM は 0.2.1 に更新されました（別のユーザーが更新しました）。別のユーザーの更新のために、MKLM はいったん終了していました。
+tone: Success
+button: [リリースノートを開く]
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, installed | installer exit code 0 | MKLM 0.2.1 (x64)
+
+== result: another user's MKLM was busy ==
+title: MKLM の更新
+message: ほかのユーザーの MKLM が、キーボードの変更の途中か確認を待っていたため、更新しませんでした（MKLM は 0.2.0 のままです）。その変更が終わってから、もう一度［今すぐ更新］を押してください。キーボードの設定は変わっていません。
+tone: Warning
+button: [今すぐ更新] (read as 今すぐ 0.2.1 に更新)
+button: [詳細をコピー]
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: MKLM was busy in session(s) [2] | MKLM 0.2.0 (x64)
+
+== result: MKLM programs still ran ==
+title: MKLM の更新
+message: ほかの MKLM（MKLM、mklm-cli）が動いていたため、更新しませんでした（MKLM は 0.2.0 のままです）。それを終了してから、もう一度［今すぐ更新］を押してください。キーボードの設定は変わっていません。
+tone: Warning
+button: [今すぐ更新] (read as 今すぐ 0.2.1 に更新)
+button: [詳細をコピー]
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: MKLM programs were still running ([Gui, Cli]; powershell.exe (PID 7120, session 2)) | MKLM 0.2.0 (x64)
+
+== result: the files were in use ==
+title: MKLM の更新
+message: 別のプログラムが MKLM のファイルを開いていたため、更新しませんでした（MKLM は 0.2.0 のままです）。ほかのユーザーのプログラムや、ウイルス対策ソフトのことがあります。しばらくしてから、もう一度［今すぐ更新］を押してください。何度試しても同じなら、［詳細をコピー］の内容（ファイルを開いているプログラムとセッションの番号）を管理者に伝えてください。キーボードの設定は変わっていません。
+tone: Warning
+button: [今すぐ更新] (read as 今すぐ 0.2.1 に更新)
+button: [詳細をコピー]
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: MKLM's files were in use ([Gui]; powershell.exe (PID 7120, session 2)) | MKLM 0.2.0 (x64)
+
+== result: the installer refused: files in use ==
+title: MKLM の更新
+message: 別のプログラムが MKLM のファイルを開いていたため、更新しませんでした（MKLM は 0.2.0 のままです）。ほかのユーザーのプログラムや、ウイルス対策ソフトのことがあります。しばらくしてから、もう一度［今すぐ更新］を押してください。何度試しても同じなら、［詳細をコピー］の内容（ファイルを開いているプログラムとセッションの番号）を管理者に伝えてください。キーボードの設定は変わっていません。
+tone: Warning
+button: [今すぐ更新] (read as 今すぐ 0.2.1 に更新)
+button: [詳細をコピー]
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: the installer refused (FilesInUse) | installer exit code 26 | MKLM 0.2.0 (x64)
+
+== result: the installer refused: Windows too old ==
+title: MKLM の更新
+message: インストーラーが、この PC では動かないと判断しました（Windows の版が古い）。MKLM は 0.2.0 のままです。キーボードの設定は変わっていません。
+tone: Warning
+button: [リリース ページを開く]
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: the installer refused (OsTooOld) | MKLM 0.2.0 (x64)
+
+== result: refused again by the runner: a restart is pending ==
+title: MKLM の更新
+message: PC の再起動を待っている変更があるため、今は更新できません。PC を再起動し（シャットダウンではなく再起動）、確認を終えてから更新してください。
+tone: Warning
+button: [再起動…]
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: an operation is waiting for the user | MKLM 0.2.0 (x64)
+
+== result: an antivirus stopped the installer ==
+title: MKLM の更新
+message: インストーラーがウイルス対策ソフトに止められました。Windows セキュリティ → ウイルスと脅威の防止 → 保護の履歴 で確かめてください。MKLM は 0.2.0 のままです。キーボードの設定は変わっていません。
+tone: Danger
+button: [詳細をコピー]
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: the installer did not start (Windows error 225) | MKLM 0.2.0 (x64)
+
+== result: the installer timed out ==
+title: MKLM の更新
+message: インストーラーが 60 分たっても終わりませんでした。今の MKLM は 0.2.0 です。キーボードの設定は変わっていません。
+tone: Danger
+button: [インストーラーを実行（管理者の許可が要ります）]
+button: [リリース ページを開く]
+button: [詳細をコピー]
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, failed: the installer did not end in time | MKLM 0.2.0 (x64)
+
+== result: interrupted before anything was replaced ==
+title: MKLM の更新
+message: 更新は中断されました。何も変更されていません（MKLM は 0.2.0 のままです）。キーボードの設定は変わっていません。
+tone: Warning
+button: [今すぐ更新] (read as 今すぐ 0.2.1 に更新)
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, interrupted while waiting for MKLM's programs to end | phase: waiting for other MKLMs to end | MKLM 0.2.0 (x64)
+
+== result: interrupted, the new version in place ==
+title: MKLM の更新
+message: MKLM は 0.2.1 に更新されました（終わる直前に PC が再起動したか、サインアウトしました）。
+tone: Success
+button: [リリースノートを開く]
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, interrupted while checking the result | phase: checking | MKLM 0.2.1 (x64)
+
+== result: interrupted while installing, the old version kept ==
+title: MKLM の更新
+message: 更新は中断されました。MKLM は 0.2.0 のままです。キーボードの設定は変わっていません。
+tone: Warning
+button: [今すぐ更新] (read as 今すぐ 0.2.1 に更新)
+button: [閉じる] primary
+details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, interrupted while installing | phase: installing | MKLM 0.2.0 (x64)
+
+== result: the installed programs are out of step ==
+title: MKLM の更新
+message: 更新が途中で止まったため、MKLM のファイルの版がそろっていません。キーボードの設定はそのままです。［インストーラーを実行］を押すか、GitHub のリリース ページから MKLM-Setup-0.2.1-x64.exe をダウンロードして実行してください。
+tone: Warning
+button: [インストーラーを実行（管理者の許可が要ります）]
+button: [リリース ページを開く]
+button: [詳細をコピー]
+button: [閉じる] primary
+details: the installed programs are of different versions | MKLM 0.2.0 (x64)
+
+== the UAC explanation before an update ==
+line: 許可する前に「詳細を表示」を押し、プログラムの場所が C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe であることを確かめてください。違う場所なら「いいえ」を押してください。MKLM が許可を求めるのは、あなたが［今すぐ更新］を押した直後だけです。
+
+== the messages of design m5b E.6 ==
+upd-net: 更新を確認できませんでした。インターネットにつながっているか確かめてください。会社や学校のネットワークでは、プロキシの設定が必要なことがあります。
+upd-net-dl: 更新をダウンロードできませんでした。インターネットにつながっているか確かめてください。会社や学校のネットワークでは、プロキシの設定が必要なことがあります。
+upd-proxy-auth: このネットワークのプロキシは認証を求めるため、MKLM は自動で更新を確認できません（安全のため、Windows の資格情報を自動では送りません）。GitHub のリリース ページで新しい版を確かめてください。
+upd-tls: GitHub と安全に接続できませんでした。PC の日付と時刻が正しいか確かめてください。
+upd-cancelled: 取り消しました（何も変更していません）。
+upd-not-found: 更新情報が見つかりませんでした。しばらくしてからもう一度確かめてください。
+upd-not-found-long: 更新情報が 7 日以上見つかりません。自動更新が使えなくなっている可能性があります。GitHub のリリース ページで新しい版を確かめてください。
+upd-gh-temp: GitHub が一時的に応答しませんでした。しばらくしてからもう一度確かめてください。
+upd-gh-changed: GitHub の配布の仕組みが変わったため、この版の MKLM は自動で更新できない可能性があります。GitHub のリリース ページから新しい版を入れてください。
+upd-format: 更新情報の形式が、この版の MKLM と合いません。GitHub のリリース ページから新しい版を入れてください。
+upd-download-mismatch: ダウンロードしたファイルが更新情報と一致しませんでした。もう一度ダウンロードしてください。
+upd-cache: ダウンロードしたファイルを保存できませんでした。ディスクの空きを確かめてください。
+upd-sig: 更新情報の署名を確かめられませんでした。安全のため、この更新は使いません。GitHub のリリース ページで最新の案内を確かめてください。
+upd-race: 更新情報を取得している間に、新しい版が公開されたようです。しばらくしてからもう一度確かめてください。
+upd-rollback: 以前に確かめたものより古い更新情報が届いたため、使いませんでした。新しい版が取り下げられたか、途中で古い情報に差し替えられた可能性があります。GitHub のリリース ページで最新の版を確かめてください。
+upd-not-newer: この更新は、今の MKLM より新しくありません（すでに入っているようです）。
+upd-manual: この版からは自動で更新できません。リリース ページからインストーラーをダウンロードして実行してください。
+upd-not-configured: この MKLM には更新を確かめるための鍵が入っていないため、自動更新は使えません。
+upd-not-installed-copy: この MKLM は D:\src\mklm\target\debug から動いているため、自動更新は使えません（インストールした MKLM だけが更新できます）。
+upd-env-unknown: 更新を使えるか確かめられませんでした。MKLM を開き直してください。
+upd-op-open: 確認待ちの変更があるため、今は更新できません。［確認…］で変更を決めてから更新してください。
+upd-op-reboot: PC の再起動を待っている変更があるため、今は更新できません。PC を再起動し（シャットダウンではなく再起動）、確認を終えてから更新してください。
+upd-busy: 別の MKLM が処理中です。しばらくしてからもう一度試してください。
+upd-disk-full: ディスクの空きが足りないため、更新できませんでした（あと約 13 MB 必要です）。MKLM は 0.2.0 のままで、キーボードの設定も変わっていません。
+upd-stage-mismatch: 更新の準備の途中で、受け渡したファイルが一致しませんでした。何も変更していません。もう一度ダウンロードしてから試してください。
+upd-prepare-failed: 更新の準備に失敗しました。何も変更していません。PC を再起動してからもう一度試してください。直らない場合は［詳細をコピー］を押して、その内容を添えて報告してください。
+upd-handoff: MKLM を更新しています。MKLM はまもなく終了し、更新が終わると 1 分ほどで自動で開きます。開き直すまで、サインアウトや再起動はしないでください。2 分たっても開かない場合は、スタート メニューから MKLM を開いてください。
+upd-installed: MKLM を 0.2.1 に更新しました。
+upd-installed-other: MKLM は 0.2.1 に更新されました（別のユーザーが更新しました）。
+upd-instance-busy: ほかのユーザーの MKLM が、キーボードの変更の途中か確認を待っていたため、更新しませんでした（MKLM は 0.2.0 のままです）。その変更が終わってから、もう一度［今すぐ更新］を押してください。キーボードの設定は変わっていません。
+upd-programs-running: ほかの MKLM（MKLM、mklm-cli）が動いていたため、更新しませんでした（MKLM は 0.2.0 のままです）。それを終了してから、もう一度［今すぐ更新］を押してください。キーボードの設定は変わっていません。
+upd-files-in-use: 別のプログラムが MKLM のファイルを開いていたため、更新しませんでした（MKLM は 0.2.0 のままです）。ほかのユーザーのプログラムや、ウイルス対策ソフトのことがあります。しばらくしてから、もう一度［今すぐ更新］を押してください。何度試しても同じなら、［詳細をコピー］の内容（ファイルを開いているプログラムとセッションの番号）を管理者に伝えてください。キーボードの設定は変わっていません。
+upd-session-ending: サインアウトかシャットダウンが始まったため、更新しませんでした（MKLM は 0.2.0 のままです）。キーボードの設定は変わっていません。
+upd-av-blocked: インストーラーがウイルス対策ソフトに止められました。Windows セキュリティ → ウイルスと脅威の防止 → 保護の履歴 で確かめてください。MKLM は 0.2.0 のままです。キーボードの設定は変わっていません。
+upd-installer-not-started: インストーラーを起動できませんでした。MKLM は 0.2.0 のままで、キーボードの設定も変わっていません。
+upd-version-changed: 更新の準備の間に、別の方法で MKLM がインストールされました。今の版で問題なければ、何もする必要はありません。キーボードの設定は変わっていません。
+upd-installer-env: インストーラーが、この PC では動かないと判断しました（Windows の版が古い）。MKLM は 0.2.0 のままです。キーボードの設定は変わっていません。
+upd-file-write: インストーラーがファイルを書けませんでした。ディスクの空きとウイルス対策ソフトを確かめてください。MKLM は 0.2.0 のままです。キーボードの設定は変わっていません。
+upd-not-installed: 更新できませんでした。MKLM は 0.2.0 のままで、キーボードの設定も変わっていません。
+upd-inconsistent: 更新が途中で止まったため、MKLM のファイルの版がそろっていません。キーボードの設定はそのままです。［インストーラーを実行］を押すか、GitHub のリリース ページから MKLM-Setup-0.2.1-x64.exe をダウンロードして実行してください。
+upd-timeout: インストーラーが 60 分たっても終わりませんでした。今の MKLM は 0.2.0 です。キーボードの設定は変わっていません。
+upd-interrupted-nothing: 更新は中断されました。何も変更されていません（MKLM は 0.2.0 のままです）。キーボードの設定は変わっていません。
+upd-interrupted-installed: MKLM は 0.2.1 に更新されました（終わる直前に PC が再起動したか、サインアウトしました）。
+upd-interrupted-kept: 更新は中断されました。MKLM は 0.2.0 のままです。キーボードの設定は変わっていません。
+upd-expired: 更新情報の有効期限（2027/04/13）を過ぎています。新しい版が長く公開されていないか、古い情報が届いています。GitHub のリリース ページで確かめてください。
+upd-stale: 30 日以上、MKLM の更新を確認できていません。インターネットやプロキシの設定を確かめてください。
+upd-stale-structural: MKLM の自動更新が使えなくなっている可能性があります。GitHub のリリース ページで新しい版を確かめてください。

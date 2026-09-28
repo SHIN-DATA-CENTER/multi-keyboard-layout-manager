@@ -9,7 +9,7 @@
 
 import { Button, CheckBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
-import { KeyboardRowVm, StatusVm, Tone } from "../structs.slint";
+import { KeyboardRowVm, StatusVm, Tone, UpdateBannerVm } from "../structs.slint";
 import { Badge, Banner, Body, CaptureArea, Caption, Modal, PageHeader } from "../widgets.slint";
 
 // One item of the status line: its name above its value. The value wraps (a warning such as
@@ -234,6 +234,8 @@ export component MainScreen inherits FocusScope {
     // "Keychron Receiver のキーが押されました" (polite, design m3 B.3).
     in property <string> identify-announcement;
     in-out property <bool> show-hidden;
+    // MKLM's update banner (design m5b E.3); none when its text is empty.
+    in property <UpdateBannerVm> update-banner;
     callback assign(string);
     callback apply-now(string);
     callback toggle-hidden(string);
@@ -241,6 +243,7 @@ export component MainScreen inherits FocusScope {
     callback toggle-identify();
     callback banner-action();
     callback refresh();
+    callback update-action(int);
     focus-on-click: false;
     focus-on-tab-navigation: false;
     min-width: page.min-width;
@@ -313,6 +316,25 @@ export component MainScreen inherits FocusScope {
                 enabled: !Modal.open;
                 clicked => {
                     root.banner-action();
+                }
+            }
+        }
+        // Updates (design m5b E.3): a new version, a long time without a check, an older
+        // manifest ignored. Never in the way of the keyboards.
+        if root.update-banner.text != "": HorizontalLayout {
+            spacing: 8px;
+            Banner {
+                text: root.update-banner.text;
+                tone: root.update-banner.tone;
+                horizontal-stretch: 1;
+            }
+
+            for item in root.update-banner.actions: Button {
+                text: item.text;
+                accessible-label: item.accessible-label;
+                enabled: !Modal.open;
+                clicked => {
+                    root.update-action(item.action);
                 }
             }
         }

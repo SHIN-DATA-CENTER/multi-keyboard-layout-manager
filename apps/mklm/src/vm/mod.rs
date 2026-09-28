@@ -17,6 +17,7 @@ pub mod settings;
 pub mod status;
 #[cfg(test)]
 pub(crate) mod test_journal;
+pub mod update;
 pub mod wizard;
 
 /// Colour role of a badge, banner or state (matches `Tone` in ui/structs.slint).
@@ -158,6 +159,11 @@ pub(crate) const LATIN_ALLOWED: &[&str] = &[
     "PC",
     "Microsoft",
     "Windows",
+    // Updates (design m5b E.7).
+    "GitHub",
+    "x64",
+    "ARM64",
+    "MB",
 ];
 
 /// The values of a [`SnapshotText`] (`label: value` lines) that are words for people: the
@@ -175,15 +181,17 @@ pub(crate) fn snapshot_values(snapshot: &str) -> String {
 }
 
 /// File names a Japanese screen may show as they are (design m3 D.5: "MKLM の管理用プログラム
-/// （mklm-helper.exe）"). Only the whole name is allowed: "helper" alone is a word D.5 forbids.
+/// （mklm-helper.exe）"; design m5b E.7: the programs an update names). Only the whole name is
+/// allowed: "helper" alone is a word D.5 forbids.
 #[cfg(test)]
-const FILE_NAMES_ALLOWED: &[&str] = &["mklm-helper.exe"];
+const FILE_NAMES_ALLOWED: &[&str] = &["mklm-helper.exe", "mklm-cli", "mklm-helper"];
 
 /// The Latin-letter words of `text` that are neither allowed nor part of `names`.
 #[cfg(test)]
 pub(crate) fn unexpected_latin(text: &str, names: &[&str]) -> Vec<String> {
     let mut stripped = text.to_string();
-    for name in FILE_NAMES_ALLOWED.iter().chain(names) {
+    // The caller's names first: one may contain a shorter allowed name (a path to mklm-helper.exe).
+    for name in names.iter().chain(FILE_NAMES_ALLOWED) {
         stripped = stripped.replace(name, " ");
     }
     stripped

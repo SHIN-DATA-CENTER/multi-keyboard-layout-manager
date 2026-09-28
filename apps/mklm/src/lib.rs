@@ -7,8 +7,9 @@
 //! `settings.toml`, the HKCU autostart value and the post-reboot RunOnce value.
 //!
 //! Threads (design m3 A.4): the Slint UI thread; one session worker per helper session
-//! ([`worker`]); one I/O worker for every other blocking call ([`reader`]); watchers that marshal
-//! onto the UI thread with `slint::invoke_from_event_loop` ([`watchers`]).
+//! ([`worker`]; an update session too); one I/O worker for every other blocking call
+//! ([`reader`]); the update worker for checks and downloads (`update_worker`, design m5b E.1);
+//! watchers that marshal onto the UI thread with `slint::invoke_from_event_loop` ([`watchers`]).
 //!
 //! Pure modules (tested without a window): [`args`], [`theme`], [`i18n`], [`settings`],
 //! [`state`], [`detect`], [`autostart`] (its decisions; the registry is touched on Windows
@@ -42,6 +43,8 @@ pub mod reader;
 pub mod single_instance;
 #[cfg(windows)]
 pub mod tray;
+#[cfg(windows)]
+pub mod update_worker;
 #[cfg(windows)]
 pub mod watchers;
 #[cfg(windows)]

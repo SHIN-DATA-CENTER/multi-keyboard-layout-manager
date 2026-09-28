@@ -43,6 +43,8 @@ pub struct Settings {
     pub keyboards: KeyboardSettings,
     pub recovery: RecoverySettings,
     pub change: ChangeSettings,
+    /// Updates (design m5b E.1).
+    pub update: UpdateSettings,
 }
 
 impl Default for Settings {
@@ -56,6 +58,52 @@ impl Default for Settings {
             keyboards: KeyboardSettings::default(),
             recovery: RecoverySettings::default(),
             change: ChangeSettings::default(),
+            update: UpdateSettings::default(),
+        }
+    }
+}
+
+/// `[update]` (design m5b E.1, H.5). Unix seconds for times; `run_id`s as the machine records
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// "更新を自動で確認する": off, MKLM never goes to the network by itself ("今すぐ確認" still
+    /// works).
+    pub auto_check: bool,
+    /// "この版をスキップ": no banner and no automatic download for this version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_version: Option<String>,
+    /// The `run_id` of the last result shown, or decided not to show (`LastResult` and
+    /// interruptions, design m5b D.13).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_seen: Option<String>,
+    /// The update this user's MKLM handed off (written on `HandedOff`), to word its result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_run: Option<String>,
+    /// When this MKLM quit for another user's update (`quit-if-idle`) or did not start during
+    /// one (design m5b D.13 step 1): the next result says so (E.5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_by_update: Option<u64>,
+    /// When the "no successful check for 30 days" / "expired" banner was last shown (once every
+    /// 30 days, design m5b E.3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_notice_at: Option<u64>,
+    /// The `issued_at` of the older manifest the last rollback warning was shown for (once each).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollback_notice_for: Option<u64>,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            skipped_version: None,
+            result_seen: None,
+            started_run: None,
+            closed_by_update: None,
+            stale_notice_at: None,
+            rollback_notice_for: None,
         }
     }
 }
@@ -317,6 +365,32 @@ mod tests {
         assert_eq!(partial.theme, ThemeMode::Light);
         assert_eq!(partial.language, LangChoice::System);
         assert!(Settings::from_toml("theme = 3").is_err());
+    }
+
+    /// `[update]` (design m5b E.1): automatic checks on by default; the rest absent until set.
+    #[test]
+    fn update_settings() {
+        let defaults = Settings::default();
+        assert!(defaults.update.auto_check);
+        let text = defaults.to_toml().unwrap();
+        assert!(text.contains("[update]\nauto_check = true\n"), "{text}");
+        assert!(!text.contains("skipped_version"));
+        let set = Settings::from_toml(
+            "[update]\nauto_check = false\nskipped_version = \"0.2.1\"\nresult_seen = \"0.2.1-3f9a0c2b7d1e4a65\"\nstarted_run = \"0.2.1-3f9a0c2b7d1e4a65\"\nclosed_by_update = 1792022400\nstale_notice_at = 1792022400\nrollback_notice_for = 1791158400\n",
+        )
+        .unwrap();
+        assert!(!set.update.auto_check);
+        assert_eq!(set.update.skipped_version.as_deref(), Some("0.2.1"));
+        assert_eq!(set.update.closed_by_update, Some(1_792_022_400));
+        assert_eq!(set.update.rollback_notice_for, Some(1_791_158_400));
+        assert_eq!(Settings::from_toml(&set.to_toml().unwrap()).unwrap(), set);
+        // An older file without the table: the defaults.
+        assert!(
+            Settings::from_toml("theme = \"dark\"\n")
+                .unwrap()
+                .update
+                .auto_check
+        );
     }
 
     #[test]

@@ -10,13 +10,55 @@
 //! The relay works over any [`Link`], so tests play the helper's part.
 
 use std::io;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use mklm_core::{
     Decision, ErrorInfo, Event, ExpectedKeyboard, KeyboardType, OpId, OpState, OperationResult,
     PendingAction,
 };
-use mklm_ipc::{CallerMessage, HelperMessage, MESSAGE_TIMEOUT, Request};
+use mklm_ipc::{
+    CallerMessage, HelperMessage, MESSAGE_TIMEOUT, Request, TrustReport, UpdateMessage,
+};
+
+/// Where a helper session gets the `RecordTrust` it sends right after `Welcome` (design m5b C.4,
+/// E.1): the user's newest verified manifest, when the user's record is ahead of the machine's.
+/// The front ends install one at start-up ([`set_trust_reporter`]; on Windows
+/// `update::trust_report::CurrentUser`); without one — tests, a process that never set it —
+/// nothing is sent.
+pub trait TrustReporter: Send + Sync {
+    /// The report to send now, if any.
+    fn report(&self) -> Option<TrustReport>;
+    /// The helper's answer (`TrustRecorded` / `TrustNotRecorded`). The session goes on either
+    /// way; the GUI logs it.
+    fn answered(&self, reply: &UpdateMessage) {
+        let _ = reply;
+    }
+}
+
+static TRUST_REPORTER: OnceLock<Box<dyn TrustReporter>> = OnceLock::new();
+
+/// Installs the reporter of this process (once; false when one was installed already).
+pub fn set_trust_reporter(reporter: Box<dyn TrustReporter>) -> bool {
+    TRUST_REPORTER.set(reporter).is_ok()
+}
+
+/// Sends `RecordTrust` when the reporter has one (the first message after `Welcome`: the relay
+/// and `update::stage` call it before anything else). `Ok(true)`: sent, an answer will follow.
+pub fn send_trust_report(link: &mut dyn Link) -> Result<bool, String> {
+    let Some(report) = TRUST_REPORTER.get().and_then(|reporter| reporter.report()) else {
+        return Ok(false);
+    };
+    link.send(&CallerMessage::RecordTrust(report))
+        .map(|()| true)
+}
+
+/// Hands the helper's answer to `RecordTrust` to the reporter.
+pub(crate) fn trust_answered(reply: &UpdateMessage) {
+    if let Some(reporter) = TRUST_REPORTER.get() {
+        reporter.answered(reply);
+    }
+}
 
 /// One side of the pipe as the relay sees it.
 pub trait Link {
@@ -404,6 +446,12 @@ pub fn relay(
     config: RelayConfig,
 ) -> io::Result<SessionEnd> {
     let mut view = SessionView::default();
+    // The user's newest verified manifest first, when the machine's record is behind (design m5b
+    // C.4): its answer is skipped below.
+    let mut trust_pending = match send_trust_report(link) {
+        Ok(sent) => sent,
+        Err(detail) => return Ok(lost(link, &view, detail)),
+    };
     if let Err(detail) = link.send(&CallerMessage::Request(request.clone())) {
         return Ok(lost(link, &view, detail));
     }
@@ -458,9 +506,17 @@ pub fn relay(
                         frontend.finish()?;
                         return Ok(lost(link, &view, "unexpected hello frame".to_string()));
                     }
-                    // Update answers belong to an update session (`update::stage`) or to the
-                    // `RecordTrust` sent before the request (M5b, WP-C); in a request they are
-                    // unexpected, like `Hello`.
+                    // The answer to the `RecordTrust` sent before the request: the session goes
+                    // on whatever it says (design m5b C.4).
+                    HelperMessage::Update(
+                        reply @ (UpdateMessage::TrustRecorded { .. }
+                        | UpdateMessage::TrustNotRecorded(_)),
+                    ) if trust_pending => {
+                        trust_pending = false;
+                        trust_answered(&reply);
+                    }
+                    // Other update answers belong to an update session (`update::stage`); in a
+                    // request they are unexpected, like `Hello`.
                     HelperMessage::Update(_) => {
                         frontend.finish()?;
                         return Ok(lost(link, &view, "unexpected update frame".to_string()));
@@ -945,6 +1001,75 @@ pub(crate) mod tests {
         let end = relay(&mut helper, request(), &mut frontend, fast()).unwrap();
         assert_eq!(end, SessionEnd::Abandoned { planned: true });
         assert!(helper.decisions().is_empty());
+    }
+
+    thread_local! {
+        static REPORT: std::cell::RefCell<Option<TrustReport>> =
+            const { std::cell::RefCell::new(None) };
+        static ANSWERS: std::cell::RefCell<Vec<UpdateMessage>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// The reporter of the tests: per thread (each test runs on its own), so that the tests that
+    /// do not set a report send none.
+    struct ThreadReporter;
+
+    impl TrustReporter for ThreadReporter {
+        fn report(&self) -> Option<TrustReport> {
+            REPORT.with(|report| report.borrow().clone())
+        }
+
+        fn answered(&self, reply: &UpdateMessage) {
+            ANSWERS.with(|answers| answers.borrow_mut().push(reply.clone()));
+        }
+    }
+
+    /// Makes this thread's sessions send `report` first.
+    pub fn send_this_trust_report(report: TrustReport) {
+        let _ = set_trust_reporter(Box::new(ThreadReporter));
+        REPORT.with(|slot| *slot.borrow_mut() = Some(report));
+    }
+
+    /// `RecordTrust` goes first when the user's record is ahead, and its answer does not disturb
+    /// the request (design m5b C.4).
+    #[test]
+    fn the_trust_report_goes_first_and_its_answer_is_skipped() {
+        let report = TrustReport {
+            manifest: "{}".into(),
+            signature: "sig".into(),
+        };
+        send_this_trust_report(report.clone());
+        let mut frames = vec![HelperMessage::Update(UpdateMessage::TrustRecorded {
+            changed: true,
+        })];
+        frames.extend(live_reset_events());
+        let mut helper = FakeHelper::new(frames);
+        let mut frontend = ScriptedFrontend {
+            answer_after_polls: Some((0, true)),
+            ..Default::default()
+        };
+        let end = relay(&mut helper, request(), &mut frontend, fast()).unwrap();
+        assert_eq!(end, SessionEnd::Finished(result(Outcome::Confirmed, None)));
+        assert_eq!(helper.sent[0], CallerMessage::RecordTrust(report.clone()));
+        assert_eq!(helper.sent[1], CallerMessage::Request(request()));
+        assert_eq!(
+            ANSWERS.with(|answers| answers.borrow().clone()),
+            vec![UpdateMessage::TrustRecorded { changed: true }]
+        );
+        // A second answer is not an answer to anything.
+        let mut helper = FakeHelper::new(vec![
+            HelperMessage::Update(UpdateMessage::TrustNotRecorded(
+                mklm_ipc::UpdateRefusal::Busy,
+            )),
+            HelperMessage::Update(UpdateMessage::TrustRecorded { changed: false }),
+        ]);
+        let end = relay(&mut helper, request(), &mut frontend, fast()).unwrap();
+        assert!(matches!(end, SessionEnd::Lost { detail, .. } if detail.contains("update")));
+        REPORT.with(|slot| *slot.borrow_mut() = None);
+        // Without a report nothing is sent first.
+        let mut helper = FakeHelper::new(live_reset_events());
+        let _ = relay(&mut helper, request(), &mut frontend, fast()).unwrap();
+        assert_eq!(helper.sent[0], CallerMessage::Request(request()));
     }
 
     #[test]
