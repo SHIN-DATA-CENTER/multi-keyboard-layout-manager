@@ -3974,7 +3974,7 @@ JSON の例（形を固定するテストの期待値に使う）:
 13. **再現可能なビルド**（B.5 の 5）: 同じコミットを手元でビルドして CI と同じハッシュになるかは確かめていない（PDB のパス、時刻、NSIS の圧縮など）。比べるのは任意で、違っても直ちに異常とはしない。
 14. **ウイルス対策ソフトの遅れ**（D.4、RELIABILITY-5）: H2 の起動から `ready` までの時間。F.6 と T-UPD-15 で測り、120 秒で足りなければ見直す。
 15. **最小の環境ブロック**（D.9.4）: NSIS、プラグイン、`mklm.exe --quit` が、ほかの環境変数を必要としないか。F.6 と煙の試験で確かめる。
-16. **Restart Manager でファイルを開いているプロセスが分かるか**（D.8 の 4。RED-TEAM-3）: `RmGetList` は、読み込まれたモジュールだけでなく、ふつうに開いたファイルのハンドルの持ち主も返すと理解しているが、確かめていない。煙の試験の 4（PowerShell でファイルを開いたまま）と同じ状態で `file_holders` が `powershell.exe` を返すかを、F.6 で確かめる。返さなければ `holders` は空のままで、理由の文は変わらない。
+16. **Restart Manager でファイルを開いているプロセスが分かるか**（D.8 の 4。RED-TEAM-3）: `RmGetList` は、読み込まれたモジュールだけでなく、ふつうに開いたファイルのハンドルの持ち主も返すと理解しているが、確かめていない。煙の試験の 4（PowerShell でファイルを開いたまま）と同じ状態で `file_holders` が `powershell.exe` を返すかを、F.6 で確かめる。返さなければ `holders` は空のままで、理由の文は変わらない。**統合で一部確認**（2026-09-29、L 章）: ふつうのハンドルの持ち主は返る。名前は `strAppName` で、実行ファイルの名前とは限らない（残る確認は L 章）。
 17. **凍結への備え**（B.4 の 4。RED-TEAM-1）: 自動の信号は `expires` だけ。期限は 180 日に短くした（J-3 の決定 (b)）。将来、オンラインの鍵で新しさだけを保証する仕組み（TUF の timestamp）を足すかは、ユーザーの判断に残る。
 
 ---
@@ -4024,6 +4024,45 @@ JSON の例（形を固定するテストの期待値に使う）:
 | 18 | 計画 4.2: 「N 日間、更新情報がない」ときも「更新を確認できません」 | 30 日以上確認に成功していなければ、30 日に 1 回のバナーと設定の行で知らせる（E.3） | レビュー前はこの規則を黙って落としていた（OPS-UX-TEST-5） |
 | 19 | 計画 4.2 の 8: 起動し直しは Explorer 経由 | 同じ。加えて、H2 は COM のセキュリティを最初に固定し、起動し直しを最後の手順にする（D.10） | 昇格した H2 が中程度の整合性レベルの Explorer からオブジェクトを受け取るため（SECURITY-8） |
 
+**実装での変更点**（M5b の統合、2026-09-29。WP-U 816b5b3、WP-H 8b5ea29、WP-C 4ad6712 の報告と統合の確認から。H 章の前書きが許す、H 章にない公開の項目も書く）
+
+| # | WP | 設計 | 実装 | 理由 |
+|---|---|---|---|---|
+| 20 | WP-U | A.7、H.3: 要求ごとに `WINHTTP_OPTION_AUTOLOGON_POLICY` を HIGH にする | HIGH に加えて、すべての要求の無効にする機能に `WINHTTP_DISABLE_AUTHENTICATION` を入れる。開発用の対照 `open_named_proxy(AutologonLevel::Low)` だけは WinHTTP の自動の認証を残す（ほかの設定は `open` と同じ）。H.3 に当たるコードのドキュメント コメントも合わせた | HIGH だけでは、`127.0.0.1` という名前のサーバーに WinHTTP が NTLM の negotiate のメッセージを送った（WP-U の測定）。J-8 の決定 (a) を守るため（L 章） |
+| 21 | WP-U | H.1 の公開の項目 | 追加: `KeyRole::as_str`、`TrustAnchors::with_dev_key`（開発用の cfg だけ）、`verify::check_key_rules`（ID だけで鍵の規則を確かめる。`xtask` の鍵の検査が使う）、`verify::verify_file_signature`（`xtask key-drill` と `verify-signer` が使う。`allow_legacy` は引数）。開発用の鍵（役割なし）で検証した `VerifiedManifest.signer_role` は `Primary` | `xtask` と規則を共有するため |
+| 22 | WP-U | C.3 の 2: 署名を `minisign-verify` で解析する | その前に署名ファイルを厳密に読む: ちょうど 4 行（LF か CRLF。最後の改行はなくてよい）、正規の base64、prehashed の `ED` だけ。legacy の `Ed` は手順 2 で `SignatureMalformed`。untrusted comment の行は読まない | 解析の前に形を狭め、legacy の署名を早く確実に拒むため |
+| 23 | WP-U | C.4、H.1: `TrustState::parse` は知らないフィールドを無視する | 鍵 ID か指紋の文字列が 1 つでも壊れていれば記録全体を `Malformed`、`schema` が 1 でなければ `Schema(n)`。知らないフィールドは無視のまま | 壊れた記録の一部だけを使わないため |
+| 24 | WP-U | A.3: 正規の形 | 文字列の配列は 1 行、アセットのオブジェクトはそれぞれ複数行に書く | A.2 の例に合わせた（A.3 は細部を決めていなかった） |
+| 25 | WP-U | A.6〜A.8 が決めていない取得の細部 | `Retry-After` か `X-RateLimit-Remaining: 0` のある 403 は `RateLimited { 403 }`。`Content-Encoding: identity` は受け付ける。要求ごとのタイムアウトは期限までの残りに切り詰め、期限の後のタイムアウトは `DeadlineExceeded`。`TransportError::Cancelled` は `FetchError::Cancelled` | 設計が決めていなかった |
+| 26 | WP-U | B.3: `ReleaseHost`（`gh` の呼び出し） | ほかに `Repo`（git）と `Clock` のトレイト。アセットの digest は `gh api <apiUrl>` で読む。`verify-signer` は Windows の `tar.exe` で `minisign.exe` を展開する。`key-drill` の nonce は std の `RandomState`。`key-drill` は `--role primary` も受け付ける | `gh release view --json` が digest を含まないことがあるため。zip と乱数のクレートを足さないため（G.2 で `Cargo.toml` は固定） |
+| 27 | WP-U | B.3: `check-keys`、`SIGN-OFFLINE.txt` | `check-keys` は版の形でない `v*` のタグを注記して飛ばす。信頼の起点ファイルがコメントだけの過去のタグは「アップデーターのないリリース」。窓の中のリリースのタグがローカルのリポジトリにないのは誤り（飛ばさない。816b5b3）。`SIGN-OFFLINE.txt` は鍵の役割から E: か F: の媒体を選ぶ | 設計が決めていなかった。窓の中を黙って飛ばすと鍵の規則の確認が抜けるため |
+| 28 | WP-U | F.1 の `xtask` の場合「公開済みの失効を引き継がない（`--revoke` がない）ものは拒む」 | 起こりえない（B.3 の 9 は常に和を取る）。内部の確認として残し、テストは「自動で引き継ぐ」ことを確かめる | B.3 の 9 と矛盾しないため |
+| 29 | WP-U | G.2: WP-0 のテスト `the_committed_file_has_no_key_yet` | `the_committed_file` に改め、コメントだけのファイルか、`check_release_roles` を通る鍵のあるファイルのどちらかを受け付ける | メンテナーが鍵をコミットした（B.5）後も `cargo test` が通るように |
+| 30 | WP-H | H.1〜H.3 の公開の項目 | 追加: `run::RECORD_SCHEMA`、`InstallState::is_consistent`、`run_flow::{SessionEndGate, EXIT_INSTALLED, EXIT_NOT_INSTALLED}`、`staging::{PROGRESS_EVERY（1 MiB）, READY_POLL（250 ms）, protocol_error}`、`protected_dir::open_protected_dir`（H2 の手順 2 の、検証だけの `ProtectedDir`。`RunDir::open` は `verify_protected_dir` の（パス、ハンドル）ではなく `ProtectedDir` を取るため）、`RunDir::remove_private_subdir`（H2 が tmp を消す）、`update_dir::{is_run_dir_name, INSTALLED_EXECUTABLES, holder_name, HOLDER_NAME_MAX}`、`elevation::RUNNER_ENVIRONMENT_NAMES`、`session_end::user_ui_language`。クレートの中だけに公開: `journal_store::{open_existing, check_key}` と `protected_dir` の補助（`open`、`verify_level`、`create_private_directory`、`PIN_ACCESS` / `PIN_SHARE` / `NO_FOLLOW`、`is_plain_file_name`、`which`） | H 章の前書きが許す範囲 |
+| 31 | WP-H | D.7 の 16: サインアウトを止める理由の文。利用者向けの文言は `i18n.rs` と `.po` だけ（G.6） | helper の `run_update.rs` に日本語と英語の 2 つの文字列で置き、利用者の UI の言語（`session_end::user_ui_language`）の主言語が日本語なら日本語。**統合でこのままにすると決めた** | helper には文言の目録がなく、GUI の目録（apps/mklm）は helper にリンクできない。Windows が見せる 1 つの文だけのために目録を作らない。文言の検査のテストは apps/mklm だけを見る |
+| 32 | WP-H | D.13 の判定の表 | 終了コードが分からず（`None`、期限切れでない）、ファイルが古い版のままなら `NotInstalled(InstallerExit { code: u32::MAX })` | D.13 にこの行がない |
+| 33 | WP-H | H.1: `classify_run` | `Liveness::Alive` だけを「生きている」と数え、`Unknown` は `Interrupted` | H.1 のドキュメント コメント（「所有者が死んだか不明」）に従った |
+| 34 | WP-H | D.4: H1 | 手順 3 と 9 の間に機械の `Trust` が変わった（ほかのセッションの `RecordTrust`）ら、ロックの下で検証し直す。H1 と通常のセッションは、JSON として解析できない `Run` の値を（ログに残して）ないものとして扱い、H1 は上書きする。`wait_until_ready`（手順 19）: runner の起動の後に `Run` が消えたら引き渡し済みとみなす（H2 は `ready` の後にしか消さない） | D.4 が決めていなかった。壊れた `Run` で更新が止まり続けないように |
+| 35 | WP-H | D.3: `receive_installer` | `CHUNK_WAIT` か `STAGE_TOTAL` を過ぎても黙っている呼び出し元には `Refused(CallerLeft)`。順序の違うメッセージには `HelperMessage::Error`（プロトコル）を送ってから `CallerLeft` で終える | `UpdateRefusal` にタイムアウトの列挙子がない |
+| 36 | WP-H | D.7、D.8: H2 | `SessionEnding` では GUI を起動し直さない（`gui_relaunch_attempted = false`）。`LastResult` を書けなければ `Run` を残す（次の起動が中断として報告する）。`STAGER_EXIT_WAIT` の後も H1 が生きていれば進み、60 秒のロックの待ちに任せる。D.8 の 3 では、1 つが終わらなければほかを待つのをやめる。`RunnerEnv` は、動いているプログラムの一覧やファイルの使用の確認の誤りを「なし」として扱い（ログに残す）、NSIS の検査（22〜24、戻しを伴う 26）を最後の守りにする | サインアウトの後に GUI は残らない。結果を失わないため。待ちを重ねないため |
+| 37 | WP-H | G.4: `pipe.rs` の変更は `check_pipe_path` だけ | `quit_idle_instances` は既存の `pipe::PipeConnection::connect_any`（非公開の `open_client`、SQOS の識別のレベル）を使い、公開の `open_client` を足さない。`connect_any` は、まだないパイプもパイプごとの 5 秒の中で試し直す。`check_pipe_path` は空白を含む印字できる ASCII を許し、`\`、`/`、`.`、`..`、ASCII 以外、制御文字、NUL を拒む（SECURITY-7） | G.4 のファイルの範囲を守るため |
+| 38 | WP-H | D.11 の 3: 通常のセッションの後片付け | エンジンのホストを包む（`TidyingHost`）。セッションごとに 1 回、エンジンが最初にロックを取った直後に走る。`mklm-engine` は変えない | エンジンを変えずにロックの中で片付けるため |
+| 39 | WP-H | D.9: `mklm.nsi` | `MKLM_EXIT_BAD_INSTALL_DIR 25` に `; uninstaller-only` のコメント（`nsis_exit_codes.rs` が確かめる）。アンインストールも `.new` / `.old` の残りを消す。対話のアンインストールでだけ出る `ASK_RESTORE` の 2 つの MessageBox にも `/SD IDYES` と `/SD IDNO` | D.9.3 の規則 1 を例外なしに守るため |
+| 40 | WP-H | D.9.3、A.10: `check-nsi.ps1`、`check-build-env.ps1` | `check-nsi.ps1` は `.onInit` に加えて `un.onInit` の `Abort` も拒む。`check-build-env.ps1` は、リポジトリの `.cargo/config.toml` のどこかにある `rustc` と `rustflags`、隣の古い形の `.cargo/config` も拒む | 守りを広げた |
+| 41 | WP-H | F.6、A.10: `build-installer.ps1 -Profile dev` | `MKLM_UPDATE_DEV_PUBKEY` がなければ実行しない。CI の F.3 と同じ `target\dev-update` にビルドする。リリースのビルドでも目印がないことを確かめる。`.gitignore` に `/dist-dev` | リハーサルの鍵のないビルドを作らないため |
+| 42 | WP-H | D.9.3: `smoke-test.ps1` | `-OnThrowawayMachine` と管理者が必要。`MKLMBuildId` は `version.dll` の小さな P/Invoke（`Add-Type`）で読む。手順 2 の runner の環境は PowerShell で作り、`ProgramW6432` は 64 ビットの PowerShell の `ProgramFiles` から取る | 開発機で誤って実行しないため |
+| 43 | WP-H、WP-C | F.1、F.2: 鍵はテストの中で `minisign` で作る | `crates/mklm-ipc/tests/staging.rs` と `crates/mklm-client/tests/update_common/mod.rs` は、一度だけ作った使い捨ての鍵の公開鍵と署名を固定で持つ（秘密鍵は捨てた。鍵 ID は ipc が `E374F131D9F4605B`、client が `DE84F116B8548221` / `091AA2ADAF923FA0` / `5EE134AEFB6D6E15`）。新しい署名が要れば新しい使い捨ての鍵で作り直す | 2 つのクレートに `minisign` の dev-dependency がない（G.2 で `Cargo.toml` を固定）。秘密鍵はリポジトリに置かない規則は守る |
+| 44 | WP-C | H.4 の公開の項目 | 追加（WP-C のファイルだけ）: `UpdateCache::{dir, remove_partials, matching_installer}`、`cache::is_installer_name`、`ClientState::{parse, to_json}`、`classify::{fetch_class, refusal_class, is_unexpected_in_check}`、`status::{current_run, outcome_diagnostic, phase_diagnostic}`、`session::{TrustReporter, set_trust_reporter, send_trust_report}`、`open_url` の `RELEASE_TAG_URL_PREFIX`、`is_release_version`、`is_installer_name`、`release_page`、`user_dirs::UPDATE_CACHE_SUBDIR`。`CheckError` と `DownloadError` は `Display` を実装する | H 章の前書きが許す範囲 |
+| 45 | WP-C | C.4: `RecordTrust` | helper のセッションの最初に、`mklm-client` の `session.rs` のグローバルな `TrustReporter`（`OnceLock`）から送る（更新のセッションも）。その返事（`TrustRecorded` / `TrustNotRecorded`）は、待っている間は読み飛ばす | GUI と CLI のすべてのセッションで 1 か所から送るため |
+| 46 | WP-C | H.4: `state::update` | `InstanceReply` を `mklm_win` の返事を写した自前の列挙にし、`app.rs` で変換する | `state` を `mklm_win` から独立に保つため |
+| 47 | WP-C | H.4 のページとオーバーレイの名前 | `Page::Update` と `OverlayKind::UpdateResult`（と `UpdateHandOff`）を足した | 更新のページと E.5 の結果に、それぞれの移動とオーバーレイを持たせるため |
+| 48 | WP-C | D.13 の 1: 起動の門 | 今のセッション ID を `proc_identity::process_users()` から読む（新しい `mklm-win` の API を足さない）。進行中の `Run` があるときだけ呼ぶ | G.5 のファイルの範囲を守るため |
+| 49 | WP-C | H.4: `check`、`download` | 確認の取得と検証を非公開の `Checker` / `Verify` トレイトの後ろに置き、`download` は取得をクロージャで受ける（`download_with`）。公開のシグネチャは H.4 のまま | WP-U を待たずに判断のテストを書くため |
+| 50 | WP-C | D.14: `update --check` / `--status` | 最新の更新情報が巻き戻し（`Rollback`）なら、キャッシュの検証済みの更新情報に戻り、JSON に `rollback_ignored` を出す | 巻き戻しを見せられても、知っている最新を示すため |
+| 51 | WP-C | E.6: 最新のページ | 後の確認の失敗（無視した古い更新情報など）では、主の［今すぐ確認］の横に E.6 のボタン（リリース ページ）と［詳細をコピー］を残す | 失敗の手がかりを消さないため |
+| 52 | WP-C | m3 H.1: `vm::unexpected_latin` | 呼び出し元の名前を `FILE_NAMES_ALLOWED` より先に取り除く。`mklm-helper.exe` へのフル パスは許された 1 つの名前として数える | パスの中の `mklm-helper.exe` を誤って検出しないため |
+| 53 | 統合 | G.2: 骨組みの補助 | 統合で消した: `UpdateRefusal::skeleton()`、`state::skeleton()`、テストの骨組みの検出（`run_flow` のテストの `signer()`、`mklm-ipc` の `anchors()` / `stager_works()`、`mklm-client` の `wp_u_ready()` / `skeleton()`、`trust_report` の `is_ahead_of` の検出）。これらのテストは常に最後まで走る。`a_changed_file_is_never_completed` は偽の digest をやめ、本物の SHA-256 で同じ大きさの変更を検出する | 骨組みの間の早い戻りが、後で黙ってテストを飛ばさないため |
+
 ---
 
 ## L. 確認できていない事実
@@ -4052,20 +4091,34 @@ JSON の例（形を固定するテストの期待値に使う）:
 - **鍵 ID の表記**（B.2）: `minisign` 0.10.0 の公開鍵ファイルの 1 行目は `untrusted comment: minisign public key: <ID>` で、`<ID>` は鍵 ID の 8 バイトを little-endian の u64 とした 16 桁の大文字の 16 進（`{:016X}`）。`KeyId::to_text` と一致する（同じテスト）。公開鍵の base64 を解いた 42 バイトの先頭 2 バイトは `Ed`、続く 8 バイトが鍵 ID。
 - **`windows` 0.62.2 の feature 名**: `Win32_Networking_WinHttp`、`Win32_System_Ole`、`Win32_System_Variant`、`Win32_System_RemoteDesktop`、`Win32_System_RestartManager` はクレートの `Cargo.toml` にある（`Win32_System_Com` は既存）。WP-0 は `net`（`Win32_Networking_WinHttp`）、`Win32_System_Ole`、`Win32_System_Variant` を足した。
 
+**WP-U、WP-H、統合で確かめたこと**（2026-09-29、この開発機。統合したコミットで測り直したものは「統合」と書く）
+
+- **名前付きのプロキシと Windows の資格情報**（A.7、SECURITY-13。F.3 の `net_proxy`）: 127.0.0.1 のプロキシがすべての要求に 407（`NTLM`、`Negotiate`）を返すとき、製品の設定（autologon HIGH と `WINHTTP_DISABLE_AUTHENTICATION`）では https の CONNECT にも平文の http の GET にも `Proxy-Authorization` が付かない。LOW で自動の認証を残した対照では付く（Type 1 / Negotiate のトークン。プロキシが challenge を返さないので、資格情報から計算した応答は出ない）。WP-U の測定: HIGH だけでも、このプロキシには付かない。`WINHTTP_DISABLE_AUTHENTICATION` だけで、LOW でも付かない。ただし HIGH だけでは、`127.0.0.1` という名前の**サーバー**に NTLM の negotiate のメッセージを送った（K の #20 の理由）。統合で `net_proxy` の 5 つのテストが通った。「HIGH はプロキシへの既定の資格情報も止める」は `NAMED_PROXY` について確かめた（`AUTOMATIC_PROXY` は下の「確かめていないこと」）。
+- **Restart Manager とふつうのハンドル**（I.16。統合）: `FILE_SHARE_READ` で開いたままのファイル（読み込んだモジュールではない）について、`update_dir::file_holders`（`RmGetList`）は開いているプロセス（テストのプロセス自身、セッション 1）を返した（`update_dir::tests::holders_of_a_file`）。ただし名前は Restart Manager の `strAppName` で、VERSIONINFO のないテストの exe では拡張子のない名前（`mklm_win-67053c4071ff85fa`）だった。H.1 の `FileHolder::name` の説明と E.6 の例（`powershell.exe`）の「実行ファイルの名前」とは違う（下の「確かめていないこと」）。
+- **NSIS の zip**（SECURITY-1。WP-H）: `nsis-3.12.zip`（SourceForge の NSIS 3/3.12、2,362,938 バイト）の SHA-256 は `56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f`。SourceForge が示す SHA-256、SHA-1、MD5 と一致した。release.yml に固定した。
+- **目印の陽性の対照**（A.10。統合）: `RUSTFLAGS=--cfg mklm_update_dev`、`CARGO_TARGET_DIR=target\dev-update` の `cargo build -p mklm -p mklm-cli -p mklm-helper` で、3 つの exe すべてに `MKLM-UPDATE-DEV-OVERRIDES!` がある（`installer/find-marker.ps1 -Expect Present`。GUI と CLI は `env::environment` から `for_this_build` を呼ぶようになった）。`cargo build --release --workspace` と `build-installer.ps1 -Arch x64`（`--target x86_64-pc-windows-msvc`）の 3 つの exe には目印がなく、`VersionInfo.IsDebug` は false。
+- **helper とネットワーク**（A.9。統合）: `cargo tree -p mklm-helper -e features` に `net`、`winhttp`、`Win32_Networking_WinHttp` がない。リリースの `mklm-helper.exe` は `WINHTTP.dll` をインポートしない（対照: `mklm-cli.exe` はインポートする）。
+- **ビルドの前の検査**（A.10。統合）: この開発機では `installer/check-build-env.ps1` が通る（`CARGO_HOME` とリポジトリの上のフォルダーに Cargo の設定ファイルがない）。`installer/check-nsi.ps1` は新しい `mklm.nsi` で通り、Pester 3.4.0 で `installer/tests` の 15 のテストが通る。
+- **鍵のないビルドの起動**（E.1、D.14。統合）: リリースの `mklm.exe --exit-after=5 --lang=ja` と `--lang=en` は終了コード 0 で、プロセスの TCP の接続も UDP の端点もなかった。ログは `updates: NotConfigured, installed 0.1.0 (x64)` と「after-update の RunOnce の値に触れない」。同じセッションでインストール済みの MKLM 0.1.0（`%ProgramFiles%`）が動いていたが、新しい exe は相手のパイプを「別のプログラムが持つ」として `Activate` を送らず、自分で起動した（m3 K の #14 のとおり）。`mklm-cli update --check`（`--json` も）は「this build of MKLM has no update keys…」で終了コード 22、`update --status` は `not-configured` で 0、使い方の誤りは 2。どれもネットワークを使わなかった。
+
 **確かめていないこと**
 
 - `minisign-verify` 0.3.0 と `minisign` 0.10.0（どちらも 2026-09-25 公開）の、前の版からの変更点（`minisign-verify` のソース全体の読み合わせは G.6 のレビュー）。`minisign` クレートの署名と鍵が、公式の `minisign` 0.12 の鍵ファイルと互換か（prehashed であることは WP-0 で確かめた）。
 - 公式の `minisign` のコマンドの鍵 ID の表示が、`minisign` クレートと同じ形か（B.5 の準備で目で確かめる。クレートの形は WP-0 で確かめた）。
 - 公式の `minisign` の Windows 版の配布物が、作者の鍵で署名された `.minisig` を伴うか、legacy の署名か（`verify-signer` は legacy も受け付ける）。ライセンスが ISC であること。
 - `IShellWindows` / `IShellDispatch2` などの `windows` 0.62.2 での置き場所（feature 名は WP-0 で確かめた）。
-- `WINHTTP_OPTION_AUTOLOGON_POLICY` の HIGH が、プロキシへの既定の資格情報の送信も止めること。レビュー第 1 回の後の版は「F.3 の 407 のテストで確かめる」と書いたが、そのテストはプロキシなしのセッションで、プロキシの認証の経路を通らなかった（FIX-VERIFICATION-4）。F.3 の「プロキシの認証の試験」（名前付きのプロキシ、LOW の対照つき）が通るまで未確認。その試験が通っても、`AUTOMATIC_PROXY`（WPAD と PAC）で見つけたプロキシに同じ方針が効くことは前提のまま（未確認）。`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` がループバックの要求をプロキシに送らないか（ループバックのテストはプロキシなしのセッションを使うので影響しない）。
+- `AUTOMATIC_PROXY`（WPAD と PAC）で見つけたプロキシにも、既定の資格情報を送らない方針（autologon HIGH と `WINHTTP_DISABLE_AUTHENTICATION`）が効くこと。名前付きのプロキシでは F.3 の「プロキシの認証の試験」で確かめた（上。FIX-VERIFICATION-4）。`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` がループバックの要求をプロキシに送らないか（ループバックのテストはプロキシなしのセッションを使うので影響しない）。
 - `WTSEnumerateProcessesW` の `pUserSid` が、SYSTEM でない昇格したプロセスから、ほかの利用者のプロセスについても得られること（I.12。FIX-VERIFICATION-5）。
-- Restart Manager の `RmGetList` が、ふつうに開いたファイルのハンドルの持ち主を返すこと（I.16。RED-TEAM-3）。
+- Restart Manager の `strAppName`（`FileHolder::name`）が、VERSIONINFO のある実行ファイルで何になるか（`FileDescription` なら、PowerShell は `powershell.exe` ではなく「Windows PowerShell」と出うる）。持ち主が返ること自体は確かめた（上。I.16。RED-TEAM-3）。E.6 と `docs/recovery.md` の「実行ファイルの名前」と食い違えば、`holders` の名前を PID からイメージのファイル名にするか、文を直す。煙の試験の 4 と同じ状態で F.6 で確かめる。
 - `std::hint::black_box` で参照した `#[used]` の静的な値が、`/OPT:REF` のリンクの後も 3 つの exe に残ること（A.10。dev のビルドで残ることは WP-0 で確かめた。リリースには開発用のモジュールがない。ci.yml と `-Profile dev` の陽性の対照が、残らなければ失敗して知らせる）。
 - GitHub の下書きのページがアセットの SHA-256 を表示するか（B.5 の手順 8 の任意の照合の手段にならないか。今の手順は手順 6 の表示と比べるだけ）。
 - （確かめる必要がなくなったもの）署名専用のアカウントにかかわる 2 つ（`C:\Users\Public` の受け渡しのフォルダーの権限、サインアウトした開発用のアカウントのプロセスが残らないこと）は、J-6 の決定 (a)（普段のアカウントで署名する）で不要になった。
 - 引き継ぎの案内の文（約 110 文字）を、ナレーターが 15 秒で読み終えること（E.4。T-UPD-14 で確かめる）。
-- NSIS: `AllowSkipFiles on` の `File` の失敗のサイレントの既定の答え、`Rename` の失敗が `${Errors}` を立てること、`windows-2025` のランナーが build 26100 であること。NSIS の zip（`nsis-3.12.zip`）の SHA-256（WP-H が SourceForge の表示と照らして記録する）。
+- NSIS: `AllowSkipFiles on` の `File` の失敗のサイレントの既定の答え、`Rename` の失敗が `${Errors}` を立てること、`windows-2025` のランナーが build 26100 であること（NSIS の zip の SHA-256 は上に記録した）。
+- `xtask` の本物の `gh` と `git` の呼び出し（`GhCli`、`GitCli`）は偽物でしかテストしていない。`gh release view --json …,apiUrl`、`gh api <apiUrl>` でのアセットの digest の読み取り、`gh attestation verify` のフラグは設計から書き、実行していない（メンテナーが B.5 の準備で空打ちする）。`fetch-smoke` と `verify --remote` は本番に対して実行していない（F.8。v0.2.0 のタグの前に開発機で）。
+- GitHub の `windows-latest` のイメージに `%CARGO_HOME%\config.toml` があるか。あれば `check-build-env.ps1` が最初のリリースの実行を止める（設計どおりだが、そのときワークフローの判断が要る）。
+- CI のランナーの Pester（5 の可能性）で `installer/tests` が通ること。テストは `Describe` / `It` / `throw` だけを使い、この開発機の Pester 3.4.0 でだけ実行した。
+- 更新の Slint の画面（更新のページ、オーバーレイ、トレイの項目、設定の欄）は、ビュー モデルのスナップショット（`update.{ja,en}.txt`）で確かめ、コンパイルしただけで、目では見ていない（統合の起動の確認は、鍵のないビルドを 5 秒起動して終わらせただけ）。
 - 昇格したプロセスから `IShellWindows` / `IShellDispatch2` で起動し直す方法が、Windows 11 25H2 で同じ利用者のときに動くこと（M5a では NSIS の `explorer.exe <path>` の方法を確かめた）と、別の管理者のときの COM のアクセスの検査。`EOAC_NO_CUSTOM_MARSHAL | EOAC_DISABLE_AAA` の下で ShellWindows の呼び出しが通ること。
 - `FILE_SHARE_READ` だけのハンドルを開いたまま、そのファイルを `CreateProcessW`（一時停止）で起動できること（I.1）。
 - `ShutdownBlockReasonCreate` を窓のスレッドから呼ぶ必要があること（Microsoft Learn の記述と理解しているが、読み直していない）。0x3FF の H2 に `WM_QUERYENDSESSION` が先に届くこと。
