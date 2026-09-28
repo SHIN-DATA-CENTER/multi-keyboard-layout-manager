@@ -7,6 +7,13 @@
     per-device override values from "Device Parameters", and the type/subtype reported via Raw Input.
   - Global i8042prt\Parameters values (fixed mode vs per-keyboard mode).
   - Input-method lists for the current user and for the sign-in screen (HKU\.DEFAULT).
+  - Remote Desktop: whether this is a remote session, GetKeyboardType (type/subtype/function keys:
+    in a remote session, what the client reported, NOT the table the session types with), and the
+    "API view" of the session's key table (MapVirtualKeyEx of scan code 0x3A with this thread's
+    layout: 0x14 = 101-style Caps Lock, 0xF0 = 106-style Eisu; the per-keyboard table of a device
+    may differ, see docs/research/rdp-keyboard.md).
+  - Raw Input keyboards without a name (Remote Desktop sessions list some) are counted, with their
+    type, under RawUnnamed; they cannot be matched to a devnode.
   Nothing is written. Use -Json to get machine-readable output for before/after diffs.
 #>
 [CmdletBinding()]
@@ -49,6 +56,20 @@ public static class MklmRawInput {
 '@
 if (-not ('MklmRawInput' -as [type])) { Add-Type -TypeDefinition $src }
 
+# A separate type, so that a PowerShell session that already loaded MklmRawInput (Add-Type cannot
+# replace a type) still gets these.
+$tableSrc = @'
+using System; using System.Runtime.InteropServices;
+public static class MklmSessionTable {
+  [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint thread);
+  [DllImport("user32.dll")] static extern uint MapVirtualKeyExW(uint code, uint mapType, IntPtr hkl);
+  // MAPVK_VSC_TO_VK (1) of scan code 0x3A with this thread's layout.
+  public static uint Vk3A() { return MapVirtualKeyExW(0x3A, 1, GetKeyboardLayout(0)); }
+}
+'@
+if (-not ('MklmSessionTable' -as [type])) { Add-Type -TypeDefinition $tableSrc }
+Add-Type -AssemblyName System.Windows.Forms
+
 $internalContainer = '{00000000-0000-0000-FFFF-FFFFFFFFFFFF}'
 $overrideNames = 'KeyboardTypeOverride', 'KeyboardSubtypeOverride', 'OverrideKeyboardType', 'OverrideKeyboardSubtype',
                  'KeyboardNumberTotalKeysOverride', 'KeyboardNumberFunctionKeysOverride', 'KeyboardNumberIndicatorsOverride'
@@ -59,8 +80,14 @@ function Get-Prop([string]$id, [string]$key) {
 
 # Raw Input: interface path -> instance id (\\?\HID#A#B#{guid} -> HID\A\B)
 $raw = @{}
+$rawUnnamed = @()
 foreach ($line in [MklmRawInput]::Keyboards()) {
     $path, $type, $sub = $line -split '\|'
+    # Remote Desktop sessions list keyboards without a name (the name call fails): count them.
+    if ([string]::IsNullOrEmpty($path) -or $path.Length -le 4) {
+        $rawUnnamed += ('0x{0:X}/0x{1:X}' -f [int]$type, [int]$sub)
+        continue
+    }
     $parts = $path.Substring(4) -split '#'
     if ($parts.Count -ge 3) { $raw[("{0}\{1}\{2}" -f $parts[0], $parts[1], $parts[2]).ToUpperInvariant()] = @{ Type = [int]$type; Subtype = [int]$sub } }
 }
@@ -121,13 +148,19 @@ function Get-Preload([string]$root) {
     $p.PSObject.Properties | Where-Object { $_.Name -match '^\d+$' } | Sort-Object { [int]$_.Name } | ForEach-Object { $_.Value }
 }
 
+$vk3A = [MklmSessionTable]::Vk3A()
 $state = [ordered]@{
-    Keyboards       = @($rows)
-    Global          = $global
-    PreloadUser     = @(Get-Preload 'HKEY_CURRENT_USER')
-    PreloadSignIn   = @(Get-Preload 'HKEY_USERS\.DEFAULT')
-    LoadedLayouts   = @([MklmRawInput]::Layouts())
-    GetKeyboardType = '{0}/{1}' -f [MklmRawInput]::GetKeyboardType(0), [MklmRawInput]::GetKeyboardType(1)
+    Keyboards         = @($rows)
+    Global            = $global
+    PreloadUser       = @(Get-Preload 'HKEY_CURRENT_USER')
+    PreloadSignIn     = @(Get-Preload 'HKEY_USERS\.DEFAULT')
+    LoadedLayouts     = @([MklmRawInput]::Layouts())
+    RemoteSession     = [System.Windows.Forms.SystemInformation]::TerminalServerSession
+    # Type/subtype/function keys. In a remote session: what the client reported.
+    GetKeyboardType   = '{0}/{1}/{2}' -f [MklmRawInput]::GetKeyboardType(0), [MklmRawInput]::GetKeyboardType(1), [MklmRawInput]::GetKeyboardType(2)
+    # API view of this session's table for scan code 0x3A (not necessarily a device's table).
+    SessionTable0x3A  = '0x{0:X2} ({1})' -f $vk3A, $(switch ($vk3A) { 0x14 { '101-style: Caps Lock' } 0xF0 { '106-style: Eisu' } default { 'other' } })
+    RawUnnamed        = @($rawUnnamed)
 }
 
 if ($Json) {
@@ -148,5 +181,8 @@ if ($Json) {
     "Preload (user):    " + ($state.PreloadUser -join ', ')
     "Preload (sign-in): " + ($state.PreloadSignIn -join ', ')
     "Loaded HKLs:       " + ($state.LoadedLayouts -join ', ')
-    "GetKeyboardType:   " + $state.GetKeyboardType
+    "Remote session:    " + $state.RemoteSession
+    "GetKeyboardType:   " + $state.GetKeyboardType + $(if ($state.GetKeyboardType -like '0/*') { ' (none: the call failed)' } elseif ($state.RemoteSession) { ' (reported by the Remote Desktop client)' } else { '' })
+    "Table for 0x3A:    " + $state.SessionTable0x3A + ' (API view)'
+    "Raw Input unnamed: " + $(if ($state.RawUnnamed.Count) { "$($state.RawUnnamed.Count) ($($state.RawUnnamed -join ', '))" } else { 'none' })
 }
