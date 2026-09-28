@@ -1,0 +1,83 @@
+name: Release
+
+# Pushing a tag vX.Y.Z (matching [workspace.package] version in Cargo.toml) builds the x64 and
+# ARM64 installers and attaches them, with SHA256SUMS, to a DRAFT release. A person checks the
+# draft and publishes it. The asset names are stable: the auto-updater (M5b) relies on them.
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: installer (${{ matrix.arch }})
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check that the tag matches the version in Cargo.toml
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $toml = Get-Content -Raw Cargo.toml
+          if ($toml -notmatch '(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"') { throw 'No version in Cargo.toml.' }
+          if ("v$($Matches[1])" -ne $env:TAG) { throw "Tag $env:TAG does not match Cargo.toml version $($Matches[1])." }
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Install NSIS 3.12
+        shell: pwsh
+        run: |
+          choco install nsis --version=3.12.0 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco failed ($LASTEXITCODE)." }
+
+      # SIGNING: a signing step would go inside build-installer.ps1 (see its SIGNING note).
+      - name: Build the installer
+        shell: pwsh
+        run: ./installer/build-installer.ps1 -Arch ${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installer-${{ matrix.arch }}
+          path: dist/MKLM-Setup-*.exe
+          if-no-files-found: error
+
+  draft-release:
+    name: draft release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: SHA256SUMS
+        working-directory: dist
+        run: sha256sum MKLM-Setup-*.exe > SHA256SUMS && cat SHA256SUMS
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release create "$TAG" dist/MKLM-Setup-*.exe dist/SHA256SUMS \
+            --repo "$REPO" --draft --verify-tag \
+            --title "MKLM $TAG" \
+            --notes "Installers for Windows 11 24H2 or later (x64 / ARM64). Not code-signed yet: see docs/install-guide.ja.md."

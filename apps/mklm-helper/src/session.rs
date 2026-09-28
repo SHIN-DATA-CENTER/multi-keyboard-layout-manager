@@ -170,7 +170,12 @@ mod windows_session {
         if std::env::set_current_dir(&system32).is_err() {
             return exit::FAILURE;
         }
-        let Some(args) = parse_args(&elevation::process_command_line()) else {
+        let command_line = elevation::process_command_line();
+        if mklm_ipc::is_uninstall_restore(&command_line) {
+            // 3010 does not fit the u8 of `ExitCode`.
+            std::process::exit(i32::try_from(uninstall_restore()).unwrap_or(1));
+        }
+        let Some(args) = parse_args(&command_line) else {
             return exit::BAD_ARGUMENTS;
         };
         match elevation::is_elevated() {
@@ -321,6 +326,30 @@ mod windows_session {
             let _ = devices.join_pending(JOIN_PENDING_TIMEOUT);
         }
         code
+    }
+
+    /// `--uninstall-restore` (M5, design m2 C.12 / C14): no pipe, no caller. Elevated and OS
+    /// checks as for a session, then one silent restore of every value to its baseline:
+    /// conflicts are skipped, no keyboard is reset (values reach keyboards on reconnect or at the
+    /// next restart), and nothing waits for a keep/revert answer.
+    fn uninstall_restore() -> u32 {
+        use mklm_engine::{NullSink, uninstall};
+
+        match elevation::is_elevated() {
+            Ok(true) => {}
+            Ok(false) => return u32::from(exit::NOT_ELEVATED),
+            Err(_) => return u32::from(exit::FAILURE),
+        }
+        match mklm_win::read_os_info(&mut Vec::new()) {
+            Ok(os) if os.build >= MIN_BUILD => {}
+            Ok(_) => return u32::from(exit::UNSUPPORTED_OS),
+            Err(_) => return u32::from(exit::FAILURE),
+        }
+        let mut engine = None;
+        let Ok(engine) = engine_for(&mut engine) else {
+            return u32::from(exit::FAILURE);
+        };
+        uninstall::exit_code(&engine.restore_baseline(&uninstall::params(), &mut NullSink))
     }
 
     /// The engine, created on the first request. A host that cannot be set up (e.g. the

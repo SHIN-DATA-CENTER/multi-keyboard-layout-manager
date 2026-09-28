@@ -28,6 +28,7 @@ pub mod memory;
 pub mod params;
 pub mod session_end;
 pub mod sink;
+pub mod uninstall;
 #[cfg(windows)]
 pub mod win;
 

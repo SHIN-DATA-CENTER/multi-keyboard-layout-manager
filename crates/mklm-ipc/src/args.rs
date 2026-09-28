@@ -191,6 +191,17 @@ pub fn command_line_tail(command_line: &str) -> Option<&str> {
     (!rest.is_empty()).then_some(rest)
 }
 
+/// The helper's second fixed command line (design m2 C.12, C14; M5): the uninstaller, already
+/// elevated, runs `mklm-helper.exe --uninstall-restore` for a silent restore of every value to its
+/// baseline, without a pipe. Only this exact text after the program name selects it.
+pub const UNINSTALL_RESTORE_ARG: &str = "--uninstall-restore";
+
+/// Whether a raw `GetCommandLineW` string is the program name followed by exactly
+/// [`UNINSTALL_RESTORE_ARG`] (one space, no other arguments, same case).
+pub fn is_uninstall_restore(command_line: &str) -> bool {
+    command_line_tail(command_line) == Some(UNINSTALL_RESTORE_ARG)
+}
+
 /// The helper's command line is not in the fixed format. Deliberately says nothing about which
 /// part failed: the helper logs it and exits.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -241,6 +252,26 @@ fn parse_pid(text: &str) -> Result<u32, ArgsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_exact_argument_selects_the_uninstall_restore() {
+        assert!(is_uninstall_restore(
+            r#""C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe" --uninstall-restore"#
+        ));
+        assert!(is_uninstall_restore("mklm-helper.exe --uninstall-restore"));
+        for other in [
+            "mklm-helper.exe",
+            "mklm-helper.exe --uninstall-restore ",
+            "mklm-helper.exe  --uninstall-restore",
+            "mklm-helper.exe --UNINSTALL-RESTORE",
+            "mklm-helper.exe --uninstall-restore --pipe x",
+            "mklm-helper.exe \"--uninstall-restore\"",
+        ] {
+            assert!(!is_uninstall_restore(other), "{other}");
+        }
+        // The pipe-session format never matches it.
+        assert!(HelperArgs::parse(UNINSTALL_RESTORE_ARG).is_err());
+    }
 
     const UUID: &str = "0f8c2d4e-5b6a-4c3d-9e8f-a0b1c2d3e4f5";
     const NONCE_HEX: &str = "00112233445566778899aabbccddeeff0123456789abcdeffedcba9876543210";

@@ -8,10 +8,10 @@ JIS 配列（日本語 106/109）と US 配列（英語 101/104）の物理キ�
 
 ## 警告（使う前に必ず読むこと）
 
-> **MKLM は開発中で、まだ一般の利用に向けて公開していない。**
+> **MKLM は開発中（最初の版 0.1.0）。** 不具合は今後の版で直していく。
 
-- **PC 全体の設定を書き換える。** MKLM の書き込みのコマンドは、`HKLM\SYSTEM` のキーボードの設定を変える。設定は PC のすべてのユーザーとサインイン画面に効く。誤った設定になると、**サインイン画面でパスワードの記号が打てなくなる**ことがある。
-- **書き込みのコマンド（M2）は、実機での検証がまだ済んでいない。** 検証用の PC 以外では使わないこと。
+- **PC 全体の設定を書き換える。** MKLM は、`HKLM\SYSTEM` のキーボードの設定を変える。設定は PC のすべてのユーザーとサインイン画面に効く。誤った設定になると、**サインイン画面でパスワードの記号が打てなくなる**ことがある。
+- **実機で確かめた範囲**: 外付けの USB キーボードの切り替え、取り消し、衝突の検出、途中で止まったときの回復（[docs/research/m2-real-tests.md](docs/research/m2-real-tests.md)、[docs/research/m3-manual-tests.md](docs/research/m3-manual-tests.md)）。PC の再起動を伴う変更（内蔵キーボード、移行）の一部は、まだ実機で確かめていない。
 - **使う前に準備すること**（詳しくは [docs/recovery.md](docs/recovery.md) の 7 章）
   - [docs/recovery.md](docs/recovery.md) を読み、印刷するか別の端末で読めるようにしておく。
   - 数字だけの PIN でサインインできること、サインイン画面でスクリーンキーボードを出せることを確かめる。
@@ -39,12 +39,14 @@ JIS 配列（日本語 106/109）と US 配列（英語 101/104）の物理キ�
 |---|---|---|
 | M0 | 実機での検証（[docs/research/m0-results.md](docs/research/m0-results.md)） | 完了 |
 | M1 | 読み取りの土台（`mklm-cli list`、`status`、`global status`） | 完了 |
-| M2 | 書き込みと安全網（ジャーナル、回復、helper、書き込みのコマンド） | 実装中。実機での検証の前（設計: [docs/design/m2-engine.md](docs/design/m2-engine.md)） |
-| M3 | GUI（Slint） | 予定 |
+| M2 | 書き込みと安全網（ジャーナル、回復、helper、書き込みのコマンド） | 完了。再起動を伴う実機テスト（R8〜R10）は後日（設計: [docs/design/m2-engine.md](docs/design/m2-engine.md)） |
+| M3 | GUI（Slint）（設計: [docs/design/m3-gui.md](docs/design/m3-gui.md)） | 完了 |
 | M4 | 常駐機能（ずれの検知と通知） | 予定 |
-| M5 | 配布（MSI インストーラー、自動更新） | 予定 |
+| M5 | 配布（NSIS インストーラー、GitHub Releases、自動更新） | インストーラーとリリースのビルドまで。自動更新は予定 |
 
-GUI とインストーラーはまだない。今使えるのはコマンドラインの `mklm-cli` だけ。
+## インストール
+
+[GitHub の Releases](https://github.com/SHIN-DATA-CENTER/multi-keyboard-layout-manager/releases) から `MKLM-Setup-<版>-x64.exe`（ARM の PC は `-arm64.exe`）をダウンロードして実行する。署名がないために出る警告への対処、アンインストールのしかたは [docs/install-guide.ja.md](docs/install-guide.ja.md) を参照。
 
 ## ビルド
 
@@ -54,7 +56,9 @@ Rust のツールチェーン（`rust-toolchain.toml` で版を固定してい�
 cargo build --release
 ```
 
-`target\release\` に `mklm-cli.exe` と `mklm-helper.exe` ができる。**2 つは同じフォルダーに置いて使う**（`mklm-cli` は、同じフォルダーの `mklm-helper.exe` を UAC で昇格して起動し、書き込みはすべて helper が行う）。
+`target\release\` に `mklm.exe`（GUI）、`mklm-cli.exe`、`mklm-helper.exe` ができる。**3 つは同じフォルダーに置いて使う**（GUI と CLI は、同じフォルダーの `mklm-helper.exe` を UAC で昇格して起動し、書き込みはすべて helper が行う）。
+
+インストーラーは NSIS 3.12 以降で作る: `powershell -ExecutionPolicy Bypass -File installer\build-installer.ps1 -Arch x64`（`dist\` に `MKLM-Setup-<版>-x64.exe` と `SHA256SUMS` ができる）。`v0.1.0` のようなタグをプッシュすると、GitHub Actions が x64 版と ARM64 版を作って Release の下書きに添付する（`.github/workflows/release.yml`）。
 
 ## 使い方
 
@@ -133,10 +137,10 @@ Today this means hand-editing the registry (each device's `Device Parameters` an
 
 ### Warning (read before use)
 
-> **MKLM is under development and not yet released for general use.**
+> **MKLM is under development (first version 0.1.0).** Bugs will be fixed in later versions.
 
-- **It changes PC-wide settings.** MKLM's write commands change keyboard settings under `HKLM\SYSTEM`. They apply to every user on the PC and to the sign-in screen. A wrong setting can leave you **unable to type the symbols in your password on the sign-in screen**.
-- **The write commands (M2) have not been verified on real hardware yet.** Use them only on a test PC.
+- **It changes PC-wide settings.** MKLM changes keyboard settings under `HKLM\SYSTEM`. They apply to every user on the PC and to the sign-in screen. A wrong setting can leave you **unable to type the symbols in your password on the sign-in screen**.
+- **Verified on real hardware**: switching an external USB keyboard, reverting, conflict detection, and recovery after an interruption ([docs/research/m2-real-tests.md](docs/research/m2-real-tests.md), [docs/research/m3-manual-tests.md](docs/research/m3-manual-tests.md), Japanese). Some changes that need a PC restart (built-in keyboard, migration) are not verified on hardware yet.
 - **Before you use it** (details in chapter 7 of [docs/recovery.md](docs/recovery.md), in Japanese)
   - Read [docs/recovery.md](docs/recovery.md), and print it or keep it readable on another device.
   - Make sure you can sign in with a digits-only PIN, and that you can open the on-screen keyboard on the sign-in screen.
@@ -164,12 +168,14 @@ Today this means hand-editing the registry (each device's `Device Parameters` an
 |---|---|---|
 | M0 | Experiments on real hardware ([docs/research/m0-results.md](docs/research/m0-results.md), Japanese) | Done |
 | M1 | Read-only foundation (`mklm-cli list`, `status`, `global status`) | Done |
-| M2 | Writes and safety net (journal, recovery, helper, write commands) | In progress; not yet verified on hardware (design: [docs/design/m2-engine.md](docs/design/m2-engine.md), Japanese) |
-| M3 | GUI (Slint) | Planned |
+| M2 | Writes and safety net (journal, recovery, helper, write commands) | Done; the reboot tests (R8-R10) come later (design: [docs/design/m2-engine.md](docs/design/m2-engine.md), Japanese) |
+| M3 | GUI (Slint) (design: [docs/design/m3-gui.md](docs/design/m3-gui.md), Japanese) | Done |
 | M4 | Background features (drift detection and notification) | Planned |
-| M5 | Distribution (MSI installer, auto-update) | Planned |
+| M5 | Distribution (NSIS installer, GitHub Releases, auto-update) | Installer and release builds done; auto-update planned |
 
-There is no GUI and no installer yet; only the command-line tool `mklm-cli`.
+### Install
+
+Download `MKLM-Setup-<version>-x64.exe` (or `-arm64.exe` for ARM PCs) from [GitHub Releases](https://github.com/SHIN-DATA-CENTER/multi-keyboard-layout-manager/releases) and run it. See [docs/install-guide.ja.md](docs/install-guide.ja.md) (English summary at the end) for the unsigned-download warnings and uninstalling.
 
 ### Build
 
@@ -179,7 +185,9 @@ Needs the Rust toolchain (the version is pinned in `rust-toolchain.toml`) and Vi
 cargo build --release
 ```
 
-This produces `mklm-cli.exe` and `mklm-helper.exe` in `target\release\`. **Keep the two in the same folder**: `mklm-cli` starts the `mklm-helper.exe` next to it, elevated through UAC, and the helper performs every write.
+This produces `mklm.exe` (GUI), `mklm-cli.exe` and `mklm-helper.exe` in `target\release\`. **Keep the three in the same folder**: the GUI and the CLI start the `mklm-helper.exe` next to them, elevated through UAC, and the helper performs every write.
+
+The installer needs NSIS 3.12 or later: `powershell -ExecutionPolicy Bypass -File installer\build-installer.ps1 -Arch x64` writes `dist\MKLM-Setup-<version>-x64.exe` and `SHA256SUMS`. Pushing a tag such as `v0.1.0` makes GitHub Actions build the x64 and ARM64 installers and attach them to a draft release (`.github/workflows/release.yml`).
 
 ### Usage
 

@@ -6,8 +6,9 @@
 //! closed pipe or an idle timeout. No UI toolkit, no network, never reads HKCU or `%APPDATA%`
 //! (plan 2.2). Design: docs/design/m2-engine.md, sections A.6 and E.
 //!
-//! The M5 uninstall custom action will add a second, equally fixed command line
-//! (`--uninstall-restore`) that runs a silent restore-to-baseline without a pipe.
+//! A second, equally fixed command line, `--uninstall-restore` (M5), is run by the elevated
+//! uninstaller: a silent restore-to-baseline without a pipe, exit 0 / 3010 (restart needed) /
+//! 6 (busy) / 1.
 
 #![windows_subsystem = "windows"]
 #![cfg_attr(not(windows), allow(dead_code))]
