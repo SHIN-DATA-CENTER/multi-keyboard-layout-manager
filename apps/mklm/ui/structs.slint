@@ -85,6 +85,8 @@ export struct KeyboardRowVm {
     badges: [BadgeVm],
     // Highlighted by "キーを押して特定" (plan 3.3); also a badge, never colour alone.
     highlighted: bool,
+    // Hidden by the user: the row menu offers "表示する" instead of "非表示にする".
+    hidden: bool,
     can-assign: bool,
     // Why "変更…" is disabled (design m3 E.2).
     blocked-note: string,

@@ -1,0 +1,153 @@
+== the development machine with its journal from the M2 tests (schema 1) ==
+input: Japanese IME ✓ (Success)
+mode: Per keyboard
+standard: JIS
+sign-in: Japanese ✓ (Success)
+banner:  (Neutral) []
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=JIS pending= current=types JIS ✓ as set (Success) badges=Built-in assign=true
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数), PS/2, assigned JIS, types JIS ✓ as set, Built-in keyboard
+  button: Change the layout of 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)
+Keychron Receiver [USB 3434:D027] assigned=US pending= current=types US ✓ as set (Success) badges=No key press yet|Receiver assign=true
+  reader: Keychron Receiver, USB, assigned US, types US ✓ as set, No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells, Receiver: every keyboard connected to it gets the same layout
+  button: Change the layout of Keychron Receiver
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=follows the standard (JIS) pending= current=types JIS (the PC's standard) (Neutral) badges=No key press yet assign=true
+  reader: VXE R1SE+, Bluetooth LE, assigned follows the standard (JIS), types JIS (the PC's standard), No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells
+  button: Change the layout of VXE R1SE+
+
+== identifying ==
+input: Japanese IME ✓ (Success)
+mode: Per keyboard
+standard: JIS
+sign-in: Japanese ✓ (Success)
+banner:  (Neutral) []
+announce: A key was pressed on Keychron Receiver
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=JIS pending= current=types JIS ✓ as set (Success) badges=Built-in assign=true
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数), PS/2, assigned JIS, types JIS ✓ as set, Built-in keyboard
+  button: Change the layout of 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)
+Keychron Receiver [USB 3434:D027] assigned=US pending= current=types US ✓ as set (Success) badges=◀ Just pressed|Receiver assign=true *
+  reader: Keychron Receiver, USB, assigned US, types US ✓ as set, The keyboard you just pressed, Receiver: every keyboard connected to it gets the same layout
+  button: Change the layout of Keychron Receiver
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=follows the standard (JIS) pending= current=types JIS (the PC's standard) (Neutral) badges=No key press yet assign=true
+  reader: VXE R1SE+, Bluetooth LE, assigned follows the standard (JIS), types JIS (the PC's standard), No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells
+  button: Change the layout of VXE R1SE+
+
+== a saved reset, offered as "apply now" ==
+input: Japanese IME ✓ (Success)
+mode: Per keyboard
+standard: JIS
+sign-in: Japanese ✓ (Success)
+banner: A change is not in effect yet (Info) [Apply now…]
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=JIS pending= current=types JIS ✓ as set (Success) badges=Built-in assign=true
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数), PS/2, assigned JIS, types JIS ✓ as set, Built-in keyboard
+  button: Change the layout of 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)
+Keychron Receiver [USB 3434:D027] assigned=JIS pending=Saved (not in effect yet: the keyboard must be reset) current=types US ⚠ (Warning) badges=No key press yet|Receiver assign=true apply-now
+  hint: Unplug and replug it, or choose "Apply now…"
+  reader: Keychron Receiver, USB, assigned JIS, Saved (not in effect yet: the keyboard must be reset), Unplug and replug it, or choose "Apply now…", types US ⚠, No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells, Receiver: every keyboard connected to it gets the same layout
+  button: Change the layout of Keychron Receiver
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=follows the standard (JIS) pending= current=types JIS (the PC's standard) (Neutral) badges=No key press yet assign=true
+  reader: VXE R1SE+, Bluetooth LE, assigned follows the standard (JIS), types JIS (the PC's standard), No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells
+  button: Change the layout of VXE R1SE+
+
+== a change waits for the PC restart ==
+input: Japanese IME ✓ (Success)
+mode: Per keyboard
+standard: JIS
+sign-in: Japanese ✓ (Success)
+banner: A change waits for a PC restart (Warning) [Restart…]
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=JIS pending= current=types JIS ✓ as set (Success) badges=Built-in assign=false
+  blocked: Cannot change now: a change waits for a PC restart
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数), PS/2, assigned JIS, types JIS ✓ as set, Built-in keyboard, Cannot change now: a change waits for a PC restart
+  button: Change the layout of 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)
+Keychron Receiver [USB 3434:D027] assigned=JIS pending=Saved (not in effect yet: restart the PC) current=types US ⚠ (Warning) badges=No key press yet|Receiver assign=false
+  hint: Restart the PC (Restart, not Shut down)
+  blocked: Cannot change now: a change waits for a PC restart
+  reader: Keychron Receiver, USB, assigned JIS, Saved (not in effect yet: restart the PC), Restart the PC (Restart, not Shut down), types US ⚠, No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells, Receiver: every keyboard connected to it gets the same layout, Cannot change now: a change waits for a PC restart
+  button: Change the layout of Keychron Receiver
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=follows the standard (JIS) pending= current=types JIS (the PC's standard) (Neutral) badges=No key press yet assign=false
+  blocked: Cannot change now: a change waits for a PC restart
+  reader: VXE R1SE+, Bluetooth LE, assigned follows the standard (JIS), types JIS (the PC's standard), No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells, Cannot change now: a change waits for a PC restart
+  button: Change the layout of VXE R1SE+
+
+== after the restart ==
+input: Japanese IME ✓ (Success)
+mode: Per keyboard
+standard: JIS
+sign-in: Japanese ✓ (Success)
+banner: Check the keyboards after the restart (Danger) [Check…]
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=JIS pending= current=types JIS ✓ as set (Success) badges=Built-in assign=false
+  blocked: Cannot change now: the check after the PC restart is not done
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数), PS/2, assigned JIS, types JIS ✓ as set, Built-in keyboard, Cannot change now: the check after the PC restart is not done
+  button: Change the layout of 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)
+Keychron Receiver [USB 3434:D027] assigned=US pending= current=types US ✓ as set (Success) badges=No key press yet|Receiver assign=false
+  blocked: Cannot change now: the check after the PC restart is not done
+  reader: Keychron Receiver, USB, assigned US, types US ✓ as set, No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells, Receiver: every keyboard connected to it gets the same layout, Cannot change now: the check after the PC restart is not done
+  button: Change the layout of Keychron Receiver
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=follows the standard (JIS) pending= current=types JIS (the PC's standard) (Neutral) badges=No key press yet assign=false
+  blocked: Cannot change now: the check after the PC restart is not done
+  reader: VXE R1SE+, Bluetooth LE, assigned follows the standard (JIS), types JIS (the PC's standard), No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells, Cannot change now: the check after the PC restart is not done
+  button: Change the layout of VXE R1SE+
+
+== an unreadable journal ==
+input: Japanese IME ✓ (Success)
+mode: Per keyboard
+standard: JIS
+sign-in: Japanese ✓ (Success)
+banner: The journal cannot be read; nothing can be changed until MKLM is updated (Danger) []
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=JIS pending= current=types JIS ✓ as set (Success) badges=Built-in assign=false
+  blocked: Cannot change now: the journal cannot be read; update MKLM
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数), PS/2, assigned JIS, types JIS ✓ as set, Built-in keyboard, Cannot change now: the journal cannot be read; update MKLM
+  button: Change the layout of 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)
+Keychron Receiver [USB 3434:D027] assigned=US pending= current=types US ✓ as set (Success) badges=No key press yet|Receiver assign=false
+  blocked: Cannot change now: the journal cannot be read; update MKLM
+  reader: Keychron Receiver, USB, assigned US, types US ✓ as set, No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells, Receiver: every keyboard connected to it gets the same layout, Cannot change now: the journal cannot be read; update MKLM
+  button: Change the layout of Keychron Receiver
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=follows the standard (JIS) pending= current=types JIS (the PC's standard) (Neutral) badges=No key press yet assign=false
+  blocked: Cannot change now: the journal cannot be read; update MKLM
+  reader: VXE R1SE+, Bluetooth LE, assigned follows the standard (JIS), types JIS (the PC's standard), No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells, Cannot change now: the journal cannot be read; update MKLM
+  button: Change the layout of VXE R1SE+
+
+== fixed mode, English input, hidden and disconnected shown ==
+input: English (US) ⚠ per-keyboard layouts do not apply (Warning)
+mode: Fixed
+standard: JIS
+sign-in: English (US) ⚠ at the sign-in screen every keyboard types US (Warning)
+banner:  (Neutral) []
+mode note: Every keyboard types JIS. Change another keyboard with "Change…" on its row
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=fixed mode (JIS) pending= current=types JIS (fixed mode) (Neutral) badges=Built-in assign=true
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数), PS/2, assigned fixed mode (JIS), types JIS (fixed mode), Built-in keyboard
+  button: Change the layout of 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)
+Keychron Receiver [USB 3434:D027] assigned=fixed mode (JIS) pending= current=types JIS (fixed mode) (Neutral) badges=No key press yet|Receiver|Setting problem assign=true
+  reader: Keychron Receiver, USB, assigned fixed mode (JIS), types JIS (fixed mode), No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells, Receiver: every keyboard connected to it gets the same layout, Setting problem: the stored values look wrong; the setup shows them
+  button: Change the layout of Keychron Receiver
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=fixed mode (JIS) pending= current=types JIS (fixed mode) (Neutral) badges=No key press yet|Hidden assign=true hidden
+  reader: VXE R1SE+, Bluetooth LE, assigned fixed mode (JIS), types JIS (fixed mode), No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells, A keyboard you hid
+  button: Change the layout of VXE R1SE+
+X3-5.4 Mouse [Bluetooth LE 045E:0040] assigned=fixed mode (JIS) pending= current=Not connected (Neutral) badges=No key press yet|Not connected assign=true
+  reader: X3-5.4 Mouse, Bluetooth LE, assigned fixed mode (JIS), Not connected, No key press yet: no key press from this device has been seen. It may be part of a mouse or another device; "Identify by key press" tells, Not connected right now
+  button: Change the layout of X3-5.4 Mouse
+
+== apply now, the first time ==
+title: Put the saved layout of Keychron Receiver into effect
+method: ◉ Reset the keyboard now — This keyboard stops working for a few seconds; use another keyboard or the mouse meanwhile.
+method: ○ Not now — MKLM does nothing now. Unplugging and replugging the keyboard, or restarting the PC (Restart, not Shut down), puts the layout into effect.
+summary: The layout of Keychron Receiver is saved but not in effect yet. Resetting the keyboard puts it into effect (Windows reconnects it; the keyboard's own settings do not change).
+all users: 
+button: Apply now (Windows asks next)
+can apply: true
+
+== apply now, only that keyboard typed ==
+title: Put the saved layout of Keychron Receiver into effect
+method: ○ Reset the keyboard now — This keyboard stops working for a few seconds; use another keyboard or the mouse meanwhile.
+method: ◉ Not now — MKLM does nothing now. Unplugging and replugging the keyboard, or restarting the PC (Restart, not Shut down), puts the layout into effect.
+summary: The layout of Keychron Receiver is saved but not in effect yet. Resetting the keyboard puts it into effect (Windows reconnects it; the keyboard's own settings do not change).
+warning: This keyboard is the only one that typed recently. Unplugging and replugging it, or restarting the PC, is recommended instead.
+all users: 
+button: Apply now (Windows asks next)
+can apply: false
+
+== apply now, put into effect meanwhile ==
+title: Put the saved layout of Keychron Receiver into effect
+note: No saved layout is waiting to be put into effect.
+all users: 
+button: Apply now (Windows asks next)
+can apply: false

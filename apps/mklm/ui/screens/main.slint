@@ -1,6 +1,11 @@
 // The main screen (plan 3.2, design m3 B.2): the status line and the keyboard list grouped by
 // physical device, with "identify by key press" (plan 3.3) marking the row that typed — with a
-// badge and a border, never by colour alone (review U12).
+// badge and a border, never by colour alone (review U12) — scrolling it into view and saying
+// which keyboard it is (polite, design m3 E.3).
+//
+// Each row has a menu (right click, Shift+F10 or the menu key): change, apply now, hide / show.
+// "今すぐ反映…" and the banner's button open their pages (design m3 B.12). F5 reads everything
+// again (design m3 E.1).
 
 import { Button, CheckBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
@@ -41,103 +46,149 @@ component KeyboardRow inherits Rectangle {
     in property <KeyboardRowVm> vm;
     callback assign();
     callback apply-now();
+    callback toggle-hidden();
+    // The row became the one "キーを押して特定" marks: the list scrolls it into view.
+    callback reveal();
+    private property <bool> marked: root.vm.highlighted;
+    changed marked => {
+        if (root.marked) {
+            root.reveal();
+        }
+    }
+    // A hidden row that just typed is inserted marked already.
+    init => {
+        if (root.marked) {
+            root.reveal();
+        }
+    }
     background: vm.highlighted ? Theme.highlight-row : Theme.surface;
     border-radius: 6px;
     border-width: focus.has-focus || vm.highlighted ? (Theme.high-contrast && vm.highlighted ? 3px : Theme.focus-width) : 1px;
     border-color: vm.highlighted ? Theme.highlight-row-border : (focus.has-focus ? Theme.focus-ring : Theme.border);
     min-height: layout.preferred-height;
 
-    focus := FocusScope {
-        accessible-role: AccessibleRole.list-item;
-        accessible-label: root.vm.accessible-summary;
-        accessible-action-default => {
-            if (root.vm.can-assign) {
-                root.assign();
+    // Right click, or Shift+F10 / the menu key on the focused row: the key reaches the area
+    // because the row's FocusScope rejects it (design m3 B.2).
+    ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: @tr("Change…");
+                enabled: root.vm.can-assign;
+                activated => {
+                    root.assign();
+                }
+            }
+
+            if root.vm.apply-now: MenuItem {
+                title: @tr("Apply now…");
+                activated => {
+                    root.apply-now();
+                }
+            }
+
+            MenuSeparator { }
+
+            MenuItem {
+                title: root.vm.hidden ? @tr("Show this keyboard") : @tr("Hide this keyboard");
+                activated => {
+                    root.toggle-hidden();
+                }
             }
         }
-        key-pressed(event) => {
-            if ((event.text == Key.Return || event.text == " ") && root.vm.can-assign) {
-                root.assign();
-                return accept;
+
+        focus := FocusScope {
+            accessible-role: AccessibleRole.list-item;
+            accessible-label: root.vm.accessible-summary;
+            accessible-description: @tr("Shift+F10 opens the menu (hide or show the keyboard).");
+            accessible-action-default => {
+                if (root.vm.can-assign) {
+                    root.assign();
+                }
             }
-            reject
-        }
+            key-pressed(event) => {
+                if ((event.text == Key.Return || event.text == " ") && root.vm.can-assign) {
+                    root.assign();
+                    return accept;
+                }
+                reject
+            }
 
-        layout := HorizontalLayout {
-            padding: 10px;
-            spacing: 12px;
-            VerticalLayout {
-                spacing: 2px;
-                horizontal-stretch: 1;
-                Text {
-                    text: root.vm.name;
-                    font-size: Theme.font-body;
-                    font-weight: 600;
-                    color: root.vm.highlighted ? Theme.highlight-row-text : Theme.text;
-                    wrap: word-wrap;
+            layout := HorizontalLayout {
+                padding: 10px;
+                spacing: 12px;
+                VerticalLayout {
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: root.vm.name;
+                        font-size: Theme.font-body;
+                        font-weight: 600;
+                        color: root.vm.highlighted ? Theme.highlight-row-text : Theme.text;
+                        wrap: word-wrap;
+                    }
+
+                    Caption {
+                        text: root.vm.transport + "  " + root.vm.vid-pid;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: start;
+                        for badge in root.vm.badges: Badge {
+                            vm: badge;
+                        }
+                    }
                 }
 
-                Caption {
-                    text: root.vm.transport + "  " + root.vm.vid-pid;
+                VerticalLayout {
+                    spacing: 2px;
+                    width: 260px * Theme.font-scale;
+                    Body {
+                        text: @tr("Assigned: {}", root.vm.assigned);
+                        color: root.vm.highlighted ? Theme.highlight-row-text : Theme.text;
+                    }
+
+                    if root.vm.pending != "": Caption {
+                        text: root.vm.pending;
+                    }
+                    if root.vm.pending-hint != "": Caption {
+                        text: root.vm.pending-hint;
+                    }
+                    Text {
+                        text: root.vm.current;
+                        font-size: Theme.font-body;
+                        color: root.vm.highlighted ? Theme.highlight-row-text : Theme.tone-text(root.vm.current-tone);
+                        wrap: word-wrap;
+                    }
+
+                    if root.vm.physical-note != "": Text {
+                        text: root.vm.physical-note;
+                        font-size: Theme.font-body;
+                        color: Theme.tone-text(Tone.warning);
+                        wrap: word-wrap;
+                    }
+                    if root.vm.blocked-note != "": Caption {
+                        text: root.vm.blocked-note;
+                    }
                 }
 
-                HorizontalLayout {
+                VerticalLayout {
                     spacing: 4px;
                     alignment: start;
-                    for badge in root.vm.badges: Badge {
-                        vm: badge;
+                    Button {
+                        text: @tr("Change…");
+                        enabled: root.vm.can-assign;
+                        accessible-label: root.vm.assign-label;
+                        clicked => {
+                            root.assign();
+                        }
                     }
-                }
-            }
 
-            VerticalLayout {
-                spacing: 2px;
-                width: 260px * Theme.font-scale;
-                Body {
-                    text: @tr("Assigned: {}", root.vm.assigned);
-                    color: root.vm.highlighted ? Theme.highlight-row-text : Theme.text;
-                }
-
-                if root.vm.pending != "": Caption {
-                    text: root.vm.pending;
-                }
-                if root.vm.pending-hint != "": Caption {
-                    text: root.vm.pending-hint;
-                }
-                Text {
-                    text: root.vm.current;
-                    font-size: Theme.font-body;
-                    color: root.vm.highlighted ? Theme.highlight-row-text : Theme.tone-text(root.vm.current-tone);
-                    wrap: word-wrap;
-                }
-
-                if root.vm.physical-note != "": Text {
-                    text: root.vm.physical-note;
-                    font-size: Theme.font-body;
-                    color: Theme.tone-text(Tone.warning);
-                    wrap: word-wrap;
-                }
-                if root.vm.blocked-note != "": Caption {
-                    text: root.vm.blocked-note;
-                }
-            }
-
-            VerticalLayout {
-                spacing: 4px;
-                alignment: start;
-                Button {
-                    text: @tr("Change…");
-                    enabled: root.vm.can-assign;
-                    accessible-label: root.vm.assign-label;
-                    clicked => {
-                        root.assign();
-                    }
-                }
-
-                if root.vm.apply-now: Button {
-                    text: @tr("Apply now…");
-                    clicked => {
-                        root.apply-now();
+                    if root.vm.apply-now: Button {
+                        text: @tr("Apply now…");
+                        clicked => {
+                            root.apply-now();
+                        }
                     }
                 }
             }
@@ -145,7 +196,9 @@ component KeyboardRow inherits Rectangle {
     }
 }
 
-export component MainScreen inherits VerticalLayout {
+// The page. The root only collects keys its parts do not use: F5 reads everything again (design
+// m3 E.1). It never takes the focus itself.
+export component MainScreen inherits FocusScope {
     in property <StatusVm> status;
     in property <[KeyboardRowVm]> keyboards;
     in property <bool> identify-active;
@@ -154,115 +207,149 @@ export component MainScreen inherits VerticalLayout {
     in-out property <bool> show-hidden;
     callback assign(string);
     callback apply-now(string);
+    callback toggle-hidden(string);
+    callback show-hidden-toggled(bool);
     callback toggle-identify();
     callback banner-action();
     callback refresh();
-    padding: 16px;
-    spacing: 12px;
-
-    PageHeader {
-        title: @tr("Keyboards");
+    focus-on-click: false;
+    focus-on-tab-navigation: false;
+    min-width: page.min-width;
+    min-height: page.min-height;
+    key-pressed(event) => {
+        if (event.text == Key.F5) {
+            root.refresh();
+            return accept;
+        }
+        reject
     }
 
-    // The status line (plan 3.2): input method, mode, standard layout, sign-in screen.
-    HorizontalLayout {
-        spacing: 16px;
-        alignment: start;
-        StatusItem {
-            label: @tr("Input method");
-            value: root.status.input-method;
-            tone: root.status.input-method-tone;
-        }
-
-        StatusItem {
-            label: @tr("Mode");
-            value: root.status.mode;
-        }
-
-        StatusItem {
-            label: @tr("Standard layout");
-            value: root.status.standard;
-        }
-
-        StatusItem {
-            label: @tr("Sign-in screen");
-            value: root.status.sign-in;
-            tone: root.status.sign-in-tone;
+    // Scrolls the list so that the row at `top` (list coordinates) is fully visible.
+    function reveal-row(top: length, height: length) {
+        if (top < -list.content-y) {
+            list.content-y = -top;
+        } else if (top + height > list.visible-height - list.content-y) {
+            list.content-y = min(0px, list.visible-height - top - height);
         }
     }
 
-    if root.status.mode-note != "": Caption {
-        text: root.status.mode-note;
-    }
-    if root.status.banner != "": HorizontalLayout {
-        spacing: 8px;
-        Banner {
-            text: root.status.banner;
-            tone: root.status.banner-tone;
-            horizontal-stretch: 1;
+    page := VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        PageHeader {
+            title: @tr("Keyboards");
         }
 
-        if root.status.banner-action != "": Button {
-            text: root.status.banner-action;
-            clicked => {
-                root.banner-action();
+        // The status line (plan 3.2): input method, mode, standard layout, sign-in screen.
+        HorizontalLayout {
+            spacing: 16px;
+            alignment: start;
+            StatusItem {
+                label: @tr("Input method");
+                value: root.status.input-method;
+                tone: root.status.input-method-tone;
+            }
+
+            StatusItem {
+                label: @tr("Mode");
+                value: root.status.mode;
+            }
+
+            StatusItem {
+                label: @tr("Standard layout");
+                value: root.status.standard;
+            }
+
+            StatusItem {
+                label: @tr("Sign-in screen");
+                value: root.status.sign-in;
+                tone: root.status.sign-in-tone;
             }
         }
-    }
-    HorizontalLayout {
-        spacing: 8px;
-        alignment: start;
-        Button {
-            text: root.identify-active ? @tr("Stop identifying") : @tr("Identify by key press");
-            clicked => {
+
+        if root.status.mode-note != "": Caption {
+            text: root.status.mode-note;
+        }
+        if root.status.banner != "": HorizontalLayout {
+            spacing: 8px;
+            Banner {
+                text: root.status.banner;
+                tone: root.status.banner-tone;
+                horizontal-stretch: 1;
+            }
+
+            if root.status.banner-action != "": Button {
+                text: root.status.banner-action;
+                clicked => {
+                    root.banner-action();
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Button {
+                text: root.identify-active ? @tr("Stop identifying") : @tr("Identify by key press");
+                clicked => {
+                    root.toggle-identify();
+                }
+            }
+
+            Button {
+                text: @tr("Refresh");
+                clicked => {
+                    root.refresh();
+                }
+            }
+
+            CheckBox {
+                text: @tr("Show hidden and disconnected keyboards");
+                checked <=> root.show-hidden;
+                toggled => {
+                    root.show-hidden-toggled(self.checked);
+                }
+            }
+        }
+
+        // While identifying, the keys go here, so that Space or Enter on the keyboard being
+        // looked for presses no button; Esc stops (review U12).
+        if root.identify-active: CaptureArea {
+            text: @tr("Press a key on the keyboard you want to find. Its row is marked \"◀ Just pressed\". Esc stops.");
+            init => {
+                self.focus-capture();
+            }
+            escape => {
                 root.toggle-identify();
             }
         }
-
-        Button {
-            text: @tr("Refresh");
-            clicked => {
-                root.refresh();
-            }
+        // Which keyboard typed, in words too; read out politely when another row is marked.
+        if root.identify-active: Body {
+            text: root.identify-announcement;
+            accessible-live-region: polite;
         }
 
-        CheckBox {
-            text: @tr("Show hidden and disconnected keyboards");
-            checked <=> root.show-hidden;
-        }
-    }
-
-    // While identifying, the keys go here, so that Space or Enter on the keyboard being looked
-    // for presses no button; Esc stops (review U12).
-    if root.identify-active: CaptureArea {
-        text: @tr("Press a key on the keyboard you want to find. Its row is marked \"◀ Just pressed\". Esc stops.");
-        init => {
-            self.focus-capture();
-        }
-        escape => {
-            root.toggle-identify();
-        }
-    }
-    Text {
-        text: root.identify-announcement;
-        height: 0px;
-        accessible-live-region: polite;
-    }
-
-    ScrollView {
-        vertical-stretch: 1;
-        VerticalLayout {
-            spacing: 8px;
-            alignment: start;
-            accessible-role: AccessibleRole.list;
-            accessible-label: @tr("Keyboards");
-            for row in root.keyboards: KeyboardRow {
-                vm: row;
-                assign => {
-                    root.assign(row.id);
-                }
-                apply-now => {
-                    root.apply-now(row.id);
+        list := ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 8px;
+                alignment: start;
+                accessible-role: AccessibleRole.list;
+                accessible-label: @tr("Keyboards");
+                for row in root.keyboards: KeyboardRow {
+                    vm: row;
+                    assign => {
+                        root.assign(row.id);
+                    }
+                    apply-now => {
+                        root.apply-now(row.id);
+                    }
+                    toggle-hidden => {
+                        root.toggle-hidden(row.id);
+                    }
+                    reveal => {
+                        root.reveal-row(self.y, self.height);
+                    }
                 }
             }
         }

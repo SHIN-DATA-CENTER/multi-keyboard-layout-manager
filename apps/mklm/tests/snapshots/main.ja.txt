@@ -1,0 +1,153 @@
+== the development machine with its journal from the M2 tests (schema 1) ==
+input: 日本語 IME ✓ (Success)
+mode: キーボードごと
+standard: JIS
+sign-in: 日本語 ✓ (Success)
+banner:  (Neutral) []
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=JIS pending= current=JIS として動作中 ✓ 設定どおり (Success) badges=内蔵 assign=true
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)、PS/2、設定した配列 JIS、JIS として動作中 ✓ 設定どおり、内蔵キーボード
+  button: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) の配列を変更
+Keychron Receiver [USB 3434:D027] assigned=US pending= current=US として動作中 ✓ 設定どおり (Success) badges=キー入力なし|レシーバー assign=true
+  reader: Keychron Receiver、USB、設定した配列 US、US として動作中 ✓ 設定どおり、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます、レシーバー: このレシーバーにつないだすべてのキーボードに同じ配列が適用されます
+  button: Keychron Receiver の配列を変更
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=標準に従う（JIS） pending= current=JIS として動作中（PC の標準配列） (Neutral) badges=キー入力なし assign=true
+  reader: VXE R1SE+、Bluetooth LE、設定した配列 標準に従う（JIS）、JIS として動作中（PC の標準配列）、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます
+  button: VXE R1SE+ の配列を変更
+
+== identifying ==
+input: 日本語 IME ✓ (Success)
+mode: キーボードごと
+standard: JIS
+sign-in: 日本語 ✓ (Success)
+banner:  (Neutral) []
+announce: Keychron Receiver のキーが押されました
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=JIS pending= current=JIS として動作中 ✓ 設定どおり (Success) badges=内蔵 assign=true
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)、PS/2、設定した配列 JIS、JIS として動作中 ✓ 設定どおり、内蔵キーボード
+  button: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) の配列を変更
+Keychron Receiver [USB 3434:D027] assigned=US pending= current=US として動作中 ✓ 設定どおり (Success) badges=◀ いま押したキーボード|レシーバー assign=true *
+  reader: Keychron Receiver、USB、設定した配列 US、US として動作中 ✓ 設定どおり、いま押したキーボード、レシーバー: このレシーバーにつないだすべてのキーボードに同じ配列が適用されます
+  button: Keychron Receiver の配列を変更
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=標準に従う（JIS） pending= current=JIS として動作中（PC の標準配列） (Neutral) badges=キー入力なし assign=true
+  reader: VXE R1SE+、Bluetooth LE、設定した配列 標準に従う（JIS）、JIS として動作中（PC の標準配列）、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます
+  button: VXE R1SE+ の配列を変更
+
+== a saved reset, offered as "apply now" ==
+input: 日本語 IME ✓ (Success)
+mode: キーボードごと
+standard: JIS
+sign-in: 日本語 ✓ (Success)
+banner: まだ反映されていない変更があります (Info) [今すぐ反映…]
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=JIS pending= current=JIS として動作中 ✓ 設定どおり (Success) badges=内蔵 assign=true
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)、PS/2、設定した配列 JIS、JIS として動作中 ✓ 設定どおり、内蔵キーボード
+  button: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) の配列を変更
+Keychron Receiver [USB 3434:D027] assigned=JIS pending=保存済み（反映待ち: キーボードのリセットが必要） current=US として動作中 ⚠ (Warning) badges=キー入力なし|レシーバー assign=true apply-now
+  hint: 抜き差しするか、［今すぐ反映…］を押してください
+  reader: Keychron Receiver、USB、設定した配列 JIS、保存済み（反映待ち: キーボードのリセットが必要）、抜き差しするか、［今すぐ反映…］を押してください、US として動作中 ⚠、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます、レシーバー: このレシーバーにつないだすべてのキーボードに同じ配列が適用されます
+  button: Keychron Receiver の配列を変更
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=標準に従う（JIS） pending= current=JIS として動作中（PC の標準配列） (Neutral) badges=キー入力なし assign=true
+  reader: VXE R1SE+、Bluetooth LE、設定した配列 標準に従う（JIS）、JIS として動作中（PC の標準配列）、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます
+  button: VXE R1SE+ の配列を変更
+
+== a change waits for the PC restart ==
+input: 日本語 IME ✓ (Success)
+mode: キーボードごと
+standard: JIS
+sign-in: 日本語 ✓ (Success)
+banner: PC の再起動を待っている変更があります (Warning) [再起動…]
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=JIS pending= current=JIS として動作中 ✓ 設定どおり (Success) badges=内蔵 assign=false
+  blocked: 今は変更できません: PC の再起動を待っている変更があります
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)、PS/2、設定した配列 JIS、JIS として動作中 ✓ 設定どおり、内蔵キーボード、今は変更できません: PC の再起動を待っている変更があります
+  button: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) の配列を変更
+Keychron Receiver [USB 3434:D027] assigned=JIS pending=保存済み（反映待ち: PC の再起動が必要） current=US として動作中 ⚠ (Warning) badges=キー入力なし|レシーバー assign=false
+  hint: PC を再起動してください（シャットダウンではなく再起動）
+  blocked: 今は変更できません: PC の再起動を待っている変更があります
+  reader: Keychron Receiver、USB、設定した配列 JIS、保存済み（反映待ち: PC の再起動が必要）、PC を再起動してください（シャットダウンではなく再起動）、US として動作中 ⚠、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます、レシーバー: このレシーバーにつないだすべてのキーボードに同じ配列が適用されます、今は変更できません: PC の再起動を待っている変更があります
+  button: Keychron Receiver の配列を変更
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=標準に従う（JIS） pending= current=JIS として動作中（PC の標準配列） (Neutral) badges=キー入力なし assign=false
+  blocked: 今は変更できません: PC の再起動を待っている変更があります
+  reader: VXE R1SE+、Bluetooth LE、設定した配列 標準に従う（JIS）、JIS として動作中（PC の標準配列）、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます、今は変更できません: PC の再起動を待っている変更があります
+  button: VXE R1SE+ の配列を変更
+
+== after the restart ==
+input: 日本語 IME ✓ (Success)
+mode: キーボードごと
+standard: JIS
+sign-in: 日本語 ✓ (Success)
+banner: PC の再起動後の確認が必要です (Danger) [確認…]
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=JIS pending= current=JIS として動作中 ✓ 設定どおり (Success) badges=内蔵 assign=false
+  blocked: 今は変更できません: PC の再起動後の確認が終わっていません
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)、PS/2、設定した配列 JIS、JIS として動作中 ✓ 設定どおり、内蔵キーボード、今は変更できません: PC の再起動後の確認が終わっていません
+  button: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) の配列を変更
+Keychron Receiver [USB 3434:D027] assigned=US pending= current=US として動作中 ✓ 設定どおり (Success) badges=キー入力なし|レシーバー assign=false
+  blocked: 今は変更できません: PC の再起動後の確認が終わっていません
+  reader: Keychron Receiver、USB、設定した配列 US、US として動作中 ✓ 設定どおり、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます、レシーバー: このレシーバーにつないだすべてのキーボードに同じ配列が適用されます、今は変更できません: PC の再起動後の確認が終わっていません
+  button: Keychron Receiver の配列を変更
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=標準に従う（JIS） pending= current=JIS として動作中（PC の標準配列） (Neutral) badges=キー入力なし assign=false
+  blocked: 今は変更できません: PC の再起動後の確認が終わっていません
+  reader: VXE R1SE+、Bluetooth LE、設定した配列 標準に従う（JIS）、JIS として動作中（PC の標準配列）、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます、今は変更できません: PC の再起動後の確認が終わっていません
+  button: VXE R1SE+ の配列を変更
+
+== an unreadable journal ==
+input: 日本語 IME ✓ (Success)
+mode: キーボードごと
+standard: JIS
+sign-in: 日本語 ✓ (Success)
+banner: 記録（ジャーナル）を読めません。MKLM を更新するまで変更できません (Danger) []
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=JIS pending= current=JIS として動作中 ✓ 設定どおり (Success) badges=内蔵 assign=false
+  blocked: 今は変更できません: 記録（ジャーナル）を読めません。MKLM を更新してください
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)、PS/2、設定した配列 JIS、JIS として動作中 ✓ 設定どおり、内蔵キーボード、今は変更できません: 記録（ジャーナル）を読めません。MKLM を更新してください
+  button: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) の配列を変更
+Keychron Receiver [USB 3434:D027] assigned=US pending= current=US として動作中 ✓ 設定どおり (Success) badges=キー入力なし|レシーバー assign=false
+  blocked: 今は変更できません: 記録（ジャーナル）を読めません。MKLM を更新してください
+  reader: Keychron Receiver、USB、設定した配列 US、US として動作中 ✓ 設定どおり、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます、レシーバー: このレシーバーにつないだすべてのキーボードに同じ配列が適用されます、今は変更できません: 記録（ジャーナル）を読めません。MKLM を更新してください
+  button: Keychron Receiver の配列を変更
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=標準に従う（JIS） pending= current=JIS として動作中（PC の標準配列） (Neutral) badges=キー入力なし assign=false
+  blocked: 今は変更できません: 記録（ジャーナル）を読めません。MKLM を更新してください
+  reader: VXE R1SE+、Bluetooth LE、設定した配列 標準に従う（JIS）、JIS として動作中（PC の標準配列）、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます、今は変更できません: 記録（ジャーナル）を読めません。MKLM を更新してください
+  button: VXE R1SE+ の配列を変更
+
+== fixed mode, English input, hidden and disconnected shown ==
+input: 英語 (US) ⚠ キーボードごとの配列は無効 (Warning)
+mode: 固定
+standard: JIS
+sign-in: 英語 (US) ⚠ サインイン画面では、すべてのキーボードが US 配列になります (Warning)
+banner:  (Neutral) []
+mode note: すべてのキーボードが JIS として動きます。ほかの配列のキーボードは、その行の［変更…］で変えられます
+日本語 PS/2 キーボード (106/109 キー Ctrl+英数) [PS/2 ] assigned=固定モード（JIS） pending= current=JIS として動作中（固定モード） (Neutral) badges=内蔵 assign=true
+  reader: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数)、PS/2、設定した配列 固定モード（JIS）、JIS として動作中（固定モード）、内蔵キーボード
+  button: 日本語 PS/2 キーボード (106/109 キー Ctrl+英数) の配列を変更
+Keychron Receiver [USB 3434:D027] assigned=固定モード（JIS） pending= current=JIS として動作中（固定モード） (Neutral) badges=キー入力なし|レシーバー|設定に問題 assign=true
+  reader: Keychron Receiver、USB、設定した配列 固定モード（JIS）、JIS として動作中（固定モード）、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます、レシーバー: このレシーバーにつないだすべてのキーボードに同じ配列が適用されます、設定に問題: 保存されている値に問題があります。初回セットアップで確かめられます
+  button: Keychron Receiver の配列を変更
+VXE R1SE+ [Bluetooth LE 25A7:FA6C] assigned=固定モード（JIS） pending= current=JIS として動作中（固定モード） (Neutral) badges=キー入力なし|非表示 assign=true hidden
+  reader: VXE R1SE+、Bluetooth LE、設定した配列 固定モード（JIS）、JIS として動作中（固定モード）、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます、非表示に設定したキーボード
+  button: VXE R1SE+ の配列を変更
+X3-5.4 Mouse [Bluetooth LE 045E:0040] assigned=固定モード（JIS） pending= current=未接続 (Neutral) badges=キー入力なし|未接続 assign=true
+  reader: X3-5.4 Mouse、Bluetooth LE、設定した配列 固定モード（JIS）、未接続、キー入力なし: このデバイスからのキー入力をまだ見ていません。マウスなどの付属機能のことがあります。『キーを押して特定』で確かめられます、未接続: いまは接続されていません
+  button: X3-5.4 Mouse の配列を変更
+
+== apply now, the first time ==
+title: Keychron Receiver の配列を今すぐ反映
+method: ◉ 今すぐキーボードをリセットして反映する — このキーボードは数秒間使えません。その間は、ほかのキーボードかマウスで操作します。
+method: ○ 今はリセットしない — MKLM は何もしません。キーボードを抜き差しするか、PC を再起動すると反映されます（シャットダウンではなく再起動）。
+summary: Keychron Receiver の配列は保存済みですが、まだ反映されていません。キーボードをリセットすると反映されます（Windows がキーボードを接続し直します。キーボード本体の設定は変わりません）。
+all users: 
+button: 反映する（次に Windows の確認が出ます）
+can apply: true
+
+== apply now, only that keyboard typed ==
+title: Keychron Receiver の配列を今すぐ反映
+method: ○ 今すぐキーボードをリセットして反映する — このキーボードは数秒間使えません。その間は、ほかのキーボードかマウスで操作します。
+method: ◉ 今はリセットしない — MKLM は何もしません。キーボードを抜き差しするか、PC を再起動すると反映されます（シャットダウンではなく再起動）。
+summary: Keychron Receiver の配列は保存済みですが、まだ反映されていません。キーボードをリセットすると反映されます（Windows がキーボードを接続し直します。キーボード本体の設定は変わりません）。
+warning: このキーボードは、最近入力のあった唯一のキーボードです。抜き差しするか、PC を再起動して反映することをおすすめします。
+all users: 
+button: 反映する（次に Windows の確認が出ます）
+can apply: false
+
+== apply now, put into effect meanwhile ==
+title: Keychron Receiver の配列を今すぐ反映
+note: 反映を待っている変更はありません。
+all users: 
+button: 反映する（次に Windows の確認が出ます）
+can apply: false

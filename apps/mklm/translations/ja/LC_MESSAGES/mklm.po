@@ -88,6 +88,9 @@ msgstr "ファイルの入手先: このコンピューター上のハード ド
 msgid "Give me more time to check a new layout (60 seconds)"
 msgstr "確認の時間を長くする（60 秒）"
 
+msgid "Hide this keyboard"
+msgstr "非表示にする"
+
 msgid "History"
 msgstr "履歴"
 
@@ -289,6 +292,9 @@ msgstr "設定"
 msgid "Settings"
 msgstr "設定"
 
+msgid "Shift+F10 opens the menu (hide or show the keyboard)."
+msgstr "Shift+F10 でメニューを開きます（キーボードを非表示にする・表示する）。"
+
 msgid "Show MKLM"
 msgstr "MKLM を表示"
 
@@ -300,6 +306,9 @@ msgstr "詳細を表示する"
 
 msgid "Show the technical details"
 msgstr "技術的な詳細を表示する"
+
+msgid "Show this keyboard"
+msgstr "表示する"
 
 msgid "Sign-in screen"
 msgstr "サインイン画面"

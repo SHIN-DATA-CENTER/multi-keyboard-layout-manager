@@ -17,8 +17,15 @@
 //! an answer the progress dialog says what MKLM waits for, and a late countdown tick does not
 //! bring the question back. The result waits for the read that follows the session
 //! ([`Effect::ReadForResult`]) before it says what the keyboards do now.
+//!
+//! The main screen (design m3 B.2, B.12; WP-U1): keyboard arrivals and removals are gathered for
+//! [`KEYBOARD_SETTLE`] and read once; hiding a row and "非表示と未接続も表示" are saved at once;
+//! the banner's button opens the page of the attention it names. "今すぐ反映…" goes through the
+//! same change page and session as a change ([`ChangeDraft::apply_now`]): the two ways of design
+//! m3 B.5, the UAC explanation, then `Request::Recover` with a live reset — only after the
+//! button, and only while the journal still lists a keyboard a reset puts into effect.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mklm_client::gate::{BlockReason, Gate};
 use mklm_client::orchestrator::RequestReport;
@@ -34,9 +41,18 @@ use mklm_ipc::Request;
 use crate::detect::{Detection, Press, Verdict};
 use crate::i18n::Lang;
 use crate::settings::{PhysicalKind, PhysicalLayout, PhysicalSource, Settings};
-use crate::vm::change::{ApplyMethod, DraftPlan, InputActivity, MethodDefault};
+use crate::vm::change::{
+    ApplyMethod, DraftPlan, InputActivity, MethodDefault, default_apply_method,
+};
+use crate::vm::keyboards::{device_members, devices};
 use crate::vm::keytest::{self, Expected, KeyContext, KeyTest};
 use crate::vm::session::Stage;
+use crate::vm::status::{BannerTarget, NeedsApply, banner_target, needs_apply};
+
+/// How long keyboard arrivals and removals are gathered before the list is read again (design
+/// m3 A.4, B.2): a dongle or a reset brings several interfaces within a few hundred
+/// milliseconds, and one read covers them all.
+pub const KEYBOARD_SETTLE: Duration = Duration::from_millis(750);
 
 /// The page in the main area (matches `Screen` in ui/structs.slint). Twelve pages: the change
 /// page covers assignment, detection and the apply method (review U14).
@@ -132,6 +148,10 @@ pub struct ChangeDraft {
     pub members: Vec<String>,
     /// "MKLM 導入前に戻す…": the page previews the restore of this device.
     pub restore: bool,
+    /// "今すぐ反映…" (design m3 B.12; review U8): no layout to choose, only how — a live reset
+    /// through `Request::Recover`, or not now. `name` lists the devices, `members` holds every
+    /// collection of them (the apply method's default and the result's "今の状態" look at these).
+    pub apply_now: bool,
     pub choice: Option<LayoutChoice>,
     /// The apply method the user picked; `None` uses [`Self::method_default`].
     pub method: Option<ApplyMethod>,
@@ -161,6 +181,7 @@ impl ChangeDraft {
             detection: Detection::for_keyboards(members.clone()),
             members,
             restore: false,
+            apply_now: false,
             choice: None,
             method: None,
             method_default: None,
@@ -302,6 +323,9 @@ pub struct AppState {
     pub visible: bool,
     /// Quitting once the running session ends (design m3 F.5).
     pub quit_pending: bool,
+    /// A keyboard arrived or left and the read that follows is scheduled
+    /// ([`KEYBOARD_SETTLE`]): further notifications join it.
+    pub keyboards_settling: bool,
 }
 
 /// Something that happened (a user action, a worker's answer, a watcher).
@@ -327,7 +351,11 @@ pub enum AppMsg {
         shift: bool,
     },
     ToggleIdentify,
-    /// Read the system again (refresh button, input language changed, resume).
+    /// "キーボードを特定" from the tray menu (design m3 B.3, B.16): shows the window and starts
+    /// identifying on the main screen — unless a flow is under way (a page that is not reached
+    /// from the navigation, a session, an overlay), which is only brought to the front.
+    StartIdentify,
+    /// Read the system again (refresh button, F5, input language changed, resume).
     Refresh,
     /// "変更…" on a keyboard row (its ID): the change page (design m3 B.4).
     OpenChange(String),
@@ -355,6 +383,25 @@ pub enum AppMsg {
     UacGo,
     /// "キャンセル" on the change page (to the main screen) or on the UAC explanation (back).
     CancelChange,
+    /// A keyboard interface arrived or went away (`mklm_win::notify::KeyboardWatcher`): the
+    /// list is read again [`KEYBOARD_SETTLE`] later, once for a burst (design m3 B.2).
+    KeyboardsChanged,
+    /// [`KEYBOARD_SETTLE`] has passed since the first of a burst of `KeyboardsChanged`.
+    KeyboardsSettled,
+    /// "非表示と未接続も表示" (design m3 B.2, B.14), kept in settings.toml.
+    ShowHidden(bool),
+    /// The row menu's "非表示にする / 表示する" for the row with group ID `id` (design m3 B.2).
+    ToggleHidden(String),
+    /// The main screen banner's button (design m3 B.12). `at`: when (the apply method's default
+    /// counts the input of the last minutes, design m3 B.5).
+    BannerAction {
+        at: Instant,
+    },
+    /// "今すぐ反映…" on a row or the banner: the change page with the choice of how (design m3
+    /// B.12, review U8). `at`: when (for the apply method's default, design m3 B.5).
+    ApplyNow {
+        at: Instant,
+    },
     /// Start a helper session for `request` (the change page's button, recovery, undo …).
     StartRequest {
         request: Request,
@@ -419,6 +466,8 @@ pub enum Effect {
         token: u64,
         gate: Gate,
     },
+    /// Send [`AppMsg::KeyboardsSettled`] after this delay (a single-shot timer on the UI thread).
+    ScheduleSettle(Duration),
     SaveSettings(Box<Settings>),
     /// Start a helper session on a new session worker (only while no other one lives).
     StartSession {
@@ -494,11 +543,66 @@ pub fn session_view(state: &AppState) -> Option<&SessionView> {
     }
 }
 
+/// What the last read leaves to put into effect (`vm::status::needs_apply`); empty until the
+/// snapshot, the journal and the boot ID are all known.
+fn read_needs_apply(state: &AppState) -> NeedsApply {
+    let Some(read) = &state.read else {
+        return NeedsApply::default();
+    };
+    match (&read.snapshot, &read.journal, read.boot) {
+        (Some(snapshot), Some(journal), Some(boot)) => {
+            needs_apply(journal, boot, &read.summary, snapshot)
+        }
+        _ => NeedsApply::default(),
+    }
+}
+
+/// The last read says new operations must wait (design m2 C.7), or nothing was read yet.
+fn writes_blocked(state: &AppState) -> bool {
+    state
+        .read
+        .as_ref()
+        .is_none_or(|read| read.summary.blocks_writes())
+}
+
+/// The keyboards "今すぐ反映…" resets now, with every collection of their devices (the apply
+/// method's default looks at these, design m3 B.5); empty when nothing can be offered: nothing is
+/// left to put into effect, or new operations are blocked (a `Recover` would then recover the
+/// blocking entries too, which is the recovery page's decision, design m3 B.12).
+pub fn apply_now_targets(state: &AppState) -> Vec<String> {
+    if writes_blocked(state) {
+        return Vec::new();
+    }
+    let ids = read_needs_apply(state).apply_now;
+    match state.read.as_ref().and_then(|read| read.snapshot.as_ref()) {
+        Some(snapshot) if !ids.is_empty() => device_members(&mklm_core::assess(snapshot), &ids),
+        _ => Vec::new(),
+    }
+}
+
+/// Pages the navigation reaches; the others belong to a flow that "特定" from the tray must not
+/// replace (design m3 B.0).
+fn is_navigation_page(page: Page) -> bool {
+    matches!(
+        page,
+        Page::Main | Page::Journal | Page::ImeHelp | Page::Settings | Page::About
+    )
+}
+
+/// Identifying ends when the main screen goes (the capture field lives there).
+fn stop_identifying(state: &mut AppState) {
+    state.identify = false;
+    state.highlighted = None;
+}
+
 /// Applies `msg` to `state`. Flows not written yet are no-ops that leave the state unchanged
 /// (the skeleton never panics on a click).
 pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
     match msg {
         AppMsg::Navigate(page) => {
+            if page != Page::Main {
+                stop_identifying(state);
+            }
             state.page = page;
             if !matches!(page, Page::Change | Page::UacNotice) {
                 state.draft = None;
@@ -510,6 +614,8 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             effects
         }
         AppMsg::SystemRead(read) => {
+            // An open "今すぐ反映…" page follows the read: once nothing is left to put into
+            // effect, it says so and sends nothing (`vm::keyboards::apply_now_page`).
             state.read = Some(*read);
             vec![Effect::Render]
         }
@@ -527,13 +633,67 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
         AppMsg::ActiveLayout(_) => Vec::new(),
         AppMsg::KeyTestPressed { text, shift } => key_test_pressed(state, &text, shift),
         AppMsg::Refresh => vec![Effect::Read],
+        AppMsg::KeyboardsChanged if state.keyboards_settling => Vec::new(),
+        AppMsg::KeyboardsChanged => {
+            state.keyboards_settling = true;
+            vec![Effect::ScheduleSettle(KEYBOARD_SETTLE)]
+        }
+        AppMsg::KeyboardsSettled => {
+            state.keyboards_settling = false;
+            vec![Effect::Read]
+        }
         AppMsg::ToggleIdentify => {
+            // The capture field lives on the main screen; an overlay keeps the keys (design m3
+            // B.3, E.1).
+            if !state.identify && (state.page != Page::Main || state.overlay != OverlayKind::None) {
+                return Vec::new();
+            }
             state.identify = !state.identify;
             if !state.identify {
                 state.highlighted = None;
             }
             vec![Effect::Render]
         }
+        AppMsg::StartIdentify => {
+            state.visible = true;
+            let mut effects = vec![Effect::ShowWindow];
+            let free = state.session == SessionPhase::Idle
+                && state.overlay == OverlayKind::None
+                && is_navigation_page(state.page);
+            if free && state.page != Page::Main {
+                // Navigating renders (and reads the list again).
+                effects.extend(update(state, AppMsg::Navigate(Page::Main)));
+                state.identify = true;
+            } else {
+                state.identify |= free;
+                effects.push(Effect::Render);
+            }
+            effects
+        }
+        AppMsg::ShowHidden(on) => {
+            if state.settings.keyboards.show_hidden == on {
+                return Vec::new();
+            }
+            state.settings.keyboards.show_hidden = on;
+            vec![
+                Effect::SaveSettings(Box::new(state.settings.clone())),
+                Effect::Render,
+            ]
+        }
+        AppMsg::ToggleHidden(id) => {
+            let hidden = &mut state.settings.keyboards.hidden;
+            if hidden.iter().any(|known| known.eq_ignore_ascii_case(&id)) {
+                hidden.retain(|known| !known.eq_ignore_ascii_case(&id));
+            } else {
+                hidden.push(id);
+            }
+            vec![
+                Effect::SaveSettings(Box::new(state.settings.clone())),
+                Effect::Render,
+            ]
+        }
+        AppMsg::BannerAction { at } => banner_action(state, at),
+        AppMsg::ApplyNow { at } => open_apply_now(state, at),
         AppMsg::DeviceKey {
             instance_id,
             scancode,
@@ -556,7 +716,10 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
                 return Vec::new();
             }
             draft.method = Some(method);
-            replan(draft);
+            // "今すぐ反映…" has no plan: `Recover` decides under the lock what to reset.
+            if !draft.apply_now {
+                replan(draft);
+            }
             vec![Effect::Render]
         }
         AppMsg::ChangeChooseStandard(index) => {
@@ -565,7 +728,7 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
                 1 => Layout::Us,
                 _ => return Vec::new(),
             };
-            let Some(draft) = editable_draft(state) else {
+            let Some(draft) = editable_change(state) else {
                 return Vec::new();
             };
             draft.standard = Some(standard);
@@ -573,7 +736,7 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             vec![Effect::Render]
         }
         AppMsg::ChangeRestartDetection => {
-            let Some(draft) = editable_draft(state) else {
+            let Some(draft) = editable_change(state) else {
                 return Vec::new();
             };
             draft.detection.restart();
@@ -599,7 +762,7 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
         }
         AppMsg::OpenRestore => {
             let token = state.next_prepare;
-            let Some(draft) = editable_draft(state) else {
+            let Some(draft) = editable_change(state) else {
                 return Vec::new();
             };
             draft.restore = true;
@@ -625,11 +788,7 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             if state.session != SessionPhase::Idle || state.page != Page::Change {
                 return Vec::new();
             }
-            let Some((request, apply)) = state
-                .draft
-                .as_ref()
-                .and_then(crate::vm::change::draft_request)
-            else {
+            let Some((request, apply)) = ready_request(state) else {
                 return Vec::new();
             };
             if !state.elevated && !state.settings.change.uac_notice_seen {
@@ -643,11 +802,7 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             if state.page != Page::UacNotice || state.session != SessionPhase::Idle {
                 return Vec::new();
             }
-            let Some((request, apply)) = state
-                .draft
-                .as_ref()
-                .and_then(crate::vm::change::draft_request)
-            else {
+            let Some((request, apply)) = ready_request(state) else {
                 state.page = Page::Change;
                 return vec![Effect::Render];
             };
@@ -837,6 +992,90 @@ fn editable_draft(state: &mut AppState) -> Option<&mut ChangeDraft> {
     state.draft.as_mut()
 }
 
+/// [`editable_draft`] of a layout change or restore: "今すぐ反映…" has no layout, detection or
+/// restore.
+fn editable_change(state: &mut AppState) -> Option<&mut ChangeDraft> {
+    editable_draft(state).filter(|draft| !draft.apply_now)
+}
+
+/// The request the change page's button sends now, with its options; `None` while nothing may be
+/// sent. "今すぐ反映…" sends `Request::Recover` with a live reset, and only while the last read
+/// still lists a keyboard a reset puts into effect and "reset now" is chosen (design m3 B.12).
+fn ready_request(state: &AppState) -> Option<(Request, ApplyOptions)> {
+    let draft = state.draft.as_ref()?;
+    if !draft.apply_now {
+        return crate::vm::change::draft_request(draft);
+    }
+    if draft.resolved_method() != ApplyMethod::Live || apply_now_targets(state).is_empty() {
+        return None;
+    }
+    // Resetting to put a kept layout into effect asks no keep-or-revert question.
+    let apply = ApplyMethod::Live.options();
+    Some((Request::Recover { apply }, apply))
+}
+
+/// "今すぐ反映…" on a row or the banner (design m3 B.12; review U8): the change page with the two
+/// ways of design m3 B.5 for every device the journal lists. Nothing starts here.
+fn open_apply_now(state: &mut AppState, at: Instant) -> Vec<Effect> {
+    if state.session != SessionPhase::Idle
+        || state.overlay != OverlayKind::None
+        || state.page != Page::Main
+    {
+        return Vec::new();
+    }
+    let targets = apply_now_targets(state);
+    let Some(snapshot) = state.read.as_ref().and_then(|read| read.snapshot.as_ref()) else {
+        return Vec::new();
+    };
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let lang = state.lang.unwrap_or(Lang::Ja);
+    let names: Vec<String> = devices(&assess(snapshot), &targets)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    // Resetting takes these keyboards away for a few seconds: the default of a change (another
+    // keyboard or the pointer seen → now; only these → not now, with the warning of plan 1.4).
+    let method_default = default_apply_method(&state.activity, &targets, at);
+    state.draft = Some(ChangeDraft {
+        apply_now: true,
+        method_default: Some(method_default),
+        ..ChangeDraft::new(String::new(), crate::i18n::name_list(&names, lang), targets)
+    });
+    stop_identifying(state);
+    state.key_test = KeyTest::default();
+    state.page = Page::Change;
+    vec![Effect::Render]
+}
+
+/// The banner's button (design m3 B.12): the page of the attention it names, read again first
+/// (what the page decides on comes from the journal), or the "今すぐ反映…" page.
+fn banner_action(state: &mut AppState, at: Instant) -> Vec<Effect> {
+    if state.session != SessionPhase::Idle
+        || state.overlay != OverlayKind::None
+        || state.page != Page::Main
+    {
+        return Vec::new();
+    }
+    let Some(read) = &state.read else {
+        return Vec::new();
+    };
+    let page = match banner_target(&read.summary, &read_needs_apply(state)) {
+        None => return Vec::new(),
+        Some(BannerTarget::ApplyNow) => return open_apply_now(state, at),
+        Some(BannerTarget::Recovery) => Page::Recovery,
+        Some(BannerTarget::Conflict) => Page::Conflict,
+        Some(BannerTarget::Restart) => Page::Restart,
+        Some(BannerTarget::PostReboot) => Page::PostReboot,
+    };
+    let mut effects = update(state, AppMsg::Navigate(page));
+    if !effects.contains(&Effect::Read) {
+        effects.insert(0, Effect::Read);
+    }
+    effects
+}
+
 /// "変更…" on a row: the change page for its device (design m3 B.4).
 fn open_change(state: &mut AppState, row: &str) -> Vec<Effect> {
     if state.session != SessionPhase::Idle {
@@ -866,8 +1105,7 @@ fn open_change(state: &mut AppState, row: &str) -> Vec<Effect> {
         group.display_name.clone(),
         group.keyboards.clone(),
     ));
-    state.identify = false;
-    state.highlighted = None;
+    stop_identifying(state);
     state.key_test = KeyTest::default();
     state.page = Page::Change;
     vec![Effect::Render]
@@ -885,7 +1123,7 @@ fn choose_layout(state: &mut AppState, index: usize) -> Vec<Effect> {
     let Some(choice) = choices.get(index).copied() else {
         return Vec::new();
     };
-    let Some(draft) = editable_draft(state) else {
+    let Some(draft) = editable_change(state) else {
         return Vec::new();
     };
     if draft.restore || (draft.choice == Some(choice) && draft.failure.is_none()) {
@@ -978,31 +1216,48 @@ fn change_prepared(
     vec![Effect::Render]
 }
 
-/// The keyboards of the draft's request, with how they type now.
+/// How the device made of `members` types in `snapshot` (its first connected member, else the
+/// first known one).
+fn typed_before(snapshot: Option<&SystemSnapshot>, members: &[String]) -> Option<LayoutTable> {
+    let assessment = assess(snapshot?);
+    let member = |present: bool| {
+        assessment.keyboards.iter().find(|ka| {
+            (ka.present || !present)
+                && members
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case(&ka.instance_id))
+        })
+    };
+    member(true)
+        .or_else(|| member(false))
+        .and_then(|ka| ka.current.as_ref())
+        .map(|layout| layout.table.clone())
+}
+
+/// The keyboards of the draft's request, with how they type now. "今すぐ反映…" names each
+/// device it resets (design m3 B.17 "今の状態").
 fn draft_targets(state: &AppState) -> Vec<SessionTarget> {
     let Some(draft) = &state.draft else {
         return Vec::new();
     };
-    let before = draft_snapshot(state, draft).and_then(|snapshot| {
-        let assessment = assess(snapshot);
-        let member = |present: bool| {
-            assessment.keyboards.iter().find(|ka| {
-                (ka.present || !present)
-                    && draft
-                        .members
-                        .iter()
-                        .any(|m| m.eq_ignore_ascii_case(&ka.instance_id))
-            })
+    let snapshot = draft_snapshot(state, draft);
+    if draft.apply_now {
+        let Some(snapshot) = snapshot else {
+            return Vec::new();
         };
-        member(true)
-            .or_else(|| member(false))
-            .and_then(|ka| ka.current.as_ref())
-            .map(|layout| layout.table.clone())
-    });
+        return devices(&assess(snapshot), &draft.members)
+            .into_iter()
+            .map(|(name, members)| SessionTarget {
+                before: typed_before(Some(snapshot), &members),
+                name,
+                members,
+            })
+            .collect();
+    }
     vec![SessionTarget {
         name: draft.name.clone(),
         members: draft.members.clone(),
-        before,
+        before: typed_before(snapshot, &draft.members),
     }]
 }
 
@@ -1026,6 +1281,8 @@ fn start_request(
     let session = state.next_session;
     state.next_session += 1;
     state.session = SessionPhase::Launching { id: session };
+    // The overlay takes over: no capture field stays behind it.
+    stop_identifying(state);
     state.overlay = OverlayKind::Progress;
     state.outcome = None;
     state.blocked = None;
@@ -1247,6 +1504,7 @@ fn device_key(
     if detecting
         && let Some(draft) = state.draft.as_mut()
         && !draft.restore
+        && !draft.apply_now
     {
         let before = (draft.detection.clone(), draft.other_keyboard.clone());
         let press = draft.detection.press(&instance_id, scancode);
@@ -1659,6 +1917,56 @@ mod tests {
             lang: Some(Lang::Ja),
             read: Some(read()),
             active_hkl: JAPANESE,
+            visible: true,
+            ..AppState::default()
+        }
+    }
+
+    // --- The main screen (WP-U1) ---
+
+    const BOOT: &str = "9b1c0d6e-2f4a-4c8b-a1d3-5e6f7a8b9c0d";
+
+    /// A read of the dev machine with the Keychron stored as JIS, still typing US, and a
+    /// schema-1 journal entry in `state` whose `apply_pending` asks for its reset.
+    fn read_with(state: &str) -> SystemRead {
+        let mut snapshot = mklm_core::fixtures::dev_machine();
+        snapshot.keyboards[1].overrides.keyboard_type_override = Some(7);
+        snapshot.keyboards[1].overrides.keyboard_subtype_override = Some(2);
+        let json = format!(
+            r#"{{ "schema_version": 1, "op_id": "0000000a-0000-4000-8000-000000000000",
+              "seq": 1,
+              "kind": {{ "kind": "set-layout",
+                "requested": "HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000",
+                "instance_ids": ["HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000"],
+                "layout": "jis" }},
+              "state": "{state}", "boot_id": "{BOOT}",
+              "owner": {{ "pid": 12345, "creation_time": 134036790000000000 }},
+              "created_at": 1, "updated_at": 2, "apply": "reset-keyboard", "countdown": null,
+              "records": [], "context": [], "failure": null,
+              "apply_pending": {{ "action": "reset-keyboard",
+                "instance_ids": ["HID\\VID_3434&PID_D027&MI_00&COL01\\8&148AD7E3&0&0000"],
+                "since": "{BOOT}" }},
+              "history": [] }}"#
+        );
+        let journal = Journal {
+            entries: vec![mklm_core::JournalEntry::from_json(&json).unwrap()],
+            ..Journal::default()
+        };
+        let boot = BootId::parse(BOOT).unwrap();
+        let summary =
+            mklm_client::startup::summarize(&journal, boot, &|_| mklm_core::Liveness::Dead);
+        SystemRead {
+            snapshot: Some(snapshot),
+            warnings: Vec::new(),
+            journal: Some(journal),
+            boot: Some(boot),
+            summary,
+        }
+    }
+
+    fn with_read(read: SystemRead) -> AppState {
+        AppState {
+            read: Some(read),
             visible: true,
             ..AppState::default()
         }
@@ -2532,5 +2840,277 @@ mod tests {
         update(&mut state, AppMsg::OpenChange(KEYCHRON_ROW.into()));
         update(&mut state, AppMsg::Navigate(Page::Settings));
         assert!(state.draft.is_none());
+    }
+
+    #[test]
+    fn keyboard_notifications_are_read_once_per_burst() {
+        let mut state = AppState::default();
+        assert_eq!(
+            update(&mut state, AppMsg::KeyboardsChanged),
+            vec![Effect::ScheduleSettle(KEYBOARD_SETTLE)]
+        );
+        // A dongle brings several interfaces: they join the scheduled read.
+        assert!(update(&mut state, AppMsg::KeyboardsChanged).is_empty());
+        assert!(update(&mut state, AppMsg::KeyboardsChanged).is_empty());
+        assert_eq!(
+            update(&mut state, AppMsg::KeyboardsSettled),
+            vec![Effect::Read]
+        );
+        // The next change schedules a new read.
+        assert_eq!(
+            update(&mut state, AppMsg::KeyboardsChanged),
+            vec![Effect::ScheduleSettle(KEYBOARD_SETTLE)]
+        );
+        assert_eq!(KEYBOARD_SETTLE, Duration::from_millis(750));
+    }
+
+    #[test]
+    fn hiding_and_showing_are_saved() {
+        let mut state = AppState::default();
+        let container = "{F0D991EA-A583-5B9C-800D-48846AC6E633}";
+        let effects = update(&mut state, AppMsg::ToggleHidden(container.into()));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::SaveSettings(saved), Effect::Render] if saved.is_hidden(container)
+        ));
+        update(&mut state, AppMsg::ToggleHidden(container.to_lowercase()));
+        assert!(state.settings.keyboards.hidden.is_empty());
+        let effects = update(&mut state, AppMsg::ShowHidden(true));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::SaveSettings(saved), Effect::Render] if saved.keyboards.show_hidden
+        ));
+        // Unchanged: nothing to save.
+        assert!(update(&mut state, AppMsg::ShowHidden(true)).is_empty());
+    }
+
+    #[test]
+    fn apply_now_goes_through_the_change_page_and_resets_only_after_the_button() {
+        let mut state = with_read(read_with("confirmed"));
+        let now = Instant::now();
+        // A mouse user: "reset now" is preselected (design m3 B.5, review U1).
+        update(&mut state, AppMsg::PointerUsed(now));
+        assert_eq!(
+            update(&mut state, AppMsg::ApplyNow { at: now }),
+            vec![Effect::Render]
+        );
+        assert_eq!(state.page, Page::Change);
+        assert!(!navigation_enabled(&state));
+        let draft = state.draft.clone().unwrap();
+        assert!(draft.apply_now);
+        assert_eq!(draft.name, "Keychron Receiver");
+        assert_eq!(draft.members, vec![KEYCHRON.to_string()]);
+        assert_eq!(draft.resolved_method(), ApplyMethod::Live);
+        // Opening the page starts nothing; it has no layouts, detection or restore preview.
+        assert_eq!(state.session, SessionPhase::Idle);
+        assert!(update(&mut state, AppMsg::ChangeChoose(0)).is_empty());
+        assert!(update(&mut state, AppMsg::OpenRestore).is_empty());
+        assert!(update(&mut state, AppMsg::ChangeRestartDetection).is_empty());
+        key(&mut state, crate::detect::scancode::YEN);
+        assert_eq!(state.draft.as_ref().unwrap().detection, draft.detection);
+        // The first time through the UAC explanation (M2 R12), as a change.
+        assert_eq!(
+            update(&mut state, AppMsg::ChangeApply),
+            vec![Effect::Render]
+        );
+        assert_eq!(state.page, Page::UacNotice);
+        let effects = update(&mut state, AppMsg::UacGo);
+        let apply = ApplyMethod::Live.options();
+        assert!(
+            matches!(effects.as_slice(), [Effect::SaveSettings(saved), Effect::StartSession {
+                session: 0,
+                request: Request::Recover { apply: sent },
+                apply: options,
+            }, Effect::Render] if saved.change.uac_notice_seen && *sent == apply && *options == apply),
+            "{effects:?}"
+        );
+        assert_eq!(state.overlay, OverlayKind::Progress);
+        // The result says how the reset keyboard types afterwards (design m3 B.17).
+        assert_eq!(
+            state.targets,
+            vec![SessionTarget {
+                name: "Keychron Receiver".into(),
+                members: vec![KEYCHRON.to_string()],
+                before: Some(LayoutTable::Us),
+            }]
+        );
+        // The session ends: back to the main screen, the result over it.
+        update(
+            &mut state,
+            ended(
+                0,
+                SessionEnd::Finished(OperationResult {
+                    op_id: None,
+                    outcome: Outcome::Recovered,
+                    failure: None,
+                    pending_action: None,
+                    conflicts: Vec::new(),
+                    inv_ps2_violation: None,
+                    recovered: Vec::new(),
+                    warnings: Vec::new(),
+                }),
+            ),
+        );
+        assert_eq!(
+            (state.page, state.overlay),
+            (Page::Main, OverlayKind::Result)
+        );
+        assert!(state.draft.is_none());
+    }
+
+    #[test]
+    fn apply_now_does_not_reset_the_only_keyboard_by_default() {
+        let mut state = with_read(read_with("confirmed"));
+        state.settings.change.uac_notice_seen = true;
+        let now = Instant::now();
+        // Only the Keychron typed lately: not now, with the warning of plan 1.4.
+        key(&mut state, 0x1E);
+        update(&mut state, AppMsg::ApplyNow { at: now });
+        let draft = state.draft.clone().unwrap();
+        assert_eq!(draft.resolved_method(), ApplyMethod::Restart);
+        assert!(draft.method_default.unwrap().only_keyboard_warning);
+        // "Not now" sends nothing.
+        assert!(update(&mut state, AppMsg::ChangeApply).is_empty());
+        assert_eq!(state.session, SessionPhase::Idle);
+        // The user's own choice: reset now; the explanation was read before, so the prompt
+        // follows the button directly.
+        assert_eq!(
+            update(&mut state, AppMsg::ChangeChooseMethod(0)),
+            vec![Effect::Render]
+        );
+        let effects = update(&mut state, AppMsg::ChangeApply);
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [
+                    Effect::StartSession {
+                        request: Request::Recover { .. },
+                        ..
+                    },
+                    Effect::Render
+                ]
+            ),
+            "{effects:?}"
+        );
+        // An elevated GUI shows no UAC explanation either (design m3 B.5).
+        let mut elevated = with_read(read_with("confirmed"));
+        elevated.elevated = true;
+        elevated.activity.pointer(now);
+        update(&mut elevated, AppMsg::ApplyNow { at: now });
+        assert!(matches!(
+            update(&mut elevated, AppMsg::ChangeApply)[0],
+            Effect::StartSession { .. }
+        ));
+    }
+
+    #[test]
+    fn apply_now_is_offered_only_while_something_is_left() {
+        let now = Instant::now();
+        // The same keyboard waits for a restart: new operations are blocked.
+        let mut blocked = with_read(read_with("pending-reboot"));
+        assert!(update(&mut blocked, AppMsg::ApplyNow { at: now }).is_empty());
+        assert!(blocked.draft.is_none());
+        // Nothing read yet: nothing to offer.
+        assert!(update(&mut AppState::default(), AppMsg::ApplyNow { at: now }).is_empty());
+        // Not from another page, and not twice.
+        let mut elsewhere = with_read(read_with("confirmed"));
+        elsewhere.page = Page::Settings;
+        assert!(update(&mut elsewhere, AppMsg::ApplyNow { at: now }).is_empty());
+        let mut state = with_read(read_with("confirmed"));
+        state.settings.change.uac_notice_seen = true;
+        state.activity.pointer(now);
+        update(&mut state, AppMsg::ApplyNow { at: now });
+        assert!(update(&mut state, AppMsg::ApplyNow { at: now }).is_empty());
+        // The keyboard is replugged and types JIS meanwhile: the page sends nothing.
+        let mut replugged = read_with("confirmed");
+        if let Some(snapshot) = &mut replugged.snapshot {
+            snapshot.keyboards[1].reported_type = Some(KeyboardType::JIS);
+        }
+        update(&mut state, AppMsg::SystemRead(Box::new(replugged)));
+        assert!(apply_now_targets(&state).is_empty());
+        assert!(update(&mut state, AppMsg::ChangeApply).is_empty());
+        // Cancel: back to the main screen.
+        assert_eq!(
+            update(&mut state, AppMsg::CancelChange),
+            vec![Effect::Read, Effect::Render]
+        );
+        assert_eq!(state.page, Page::Main);
+        assert!(state.draft.is_none());
+    }
+
+    #[test]
+    fn the_banner_button_leads_to_its_page() {
+        let mut state = with_read(read_with("pending-reboot"));
+        let effects = update(&mut state, AppMsg::BannerAction { at: Instant::now() });
+        // The decision page is read again first.
+        assert_eq!(effects, vec![Effect::Read, Effect::Render]);
+        assert_eq!(state.page, Page::Restart);
+        // "今すぐ反映…": the change page for it.
+        let mut state = with_read(read_with("confirmed"));
+        update(&mut state, AppMsg::PointerUsed(Instant::now()));
+        update(&mut state, AppMsg::BannerAction { at: Instant::now() });
+        assert_eq!(state.page, Page::Change);
+        assert!(state.draft.as_ref().is_some_and(|draft| draft.apply_now));
+        // Not while a session runs.
+        let mut busy = with_read(read_with("pending-reboot"));
+        update(&mut busy, undo());
+        assert!(update(&mut busy, AppMsg::BannerAction { at: Instant::now() }).is_empty());
+        // No attention: the banner has no button.
+        let mut quiet = AppState {
+            read: Some(SystemRead {
+                snapshot: None,
+                warnings: Vec::new(),
+                journal: None,
+                boot: None,
+                summary: StartupSummary::default(),
+            }),
+            ..AppState::default()
+        };
+        assert!(update(&mut quiet, AppMsg::BannerAction { at: Instant::now() }).is_empty());
+    }
+
+    #[test]
+    fn identify_is_toggled_only_on_the_main_screen() {
+        let mut state = AppState {
+            page: Page::Journal,
+            ..AppState::default()
+        };
+        assert!(update(&mut state, AppMsg::ToggleIdentify).is_empty());
+        assert!(!state.identify);
+        state.page = Page::Main;
+        update(&mut state, AppMsg::ToggleIdentify);
+        assert!(state.identify);
+        // A session's overlay takes over and ends it.
+        update(&mut state, undo());
+        assert!(!state.identify);
+    }
+
+    #[test]
+    fn identify_from_the_tray_does_not_replace_a_flow() {
+        // In the tray on the settings page: shown, on the main screen, identifying.
+        let mut state = AppState {
+            page: Page::Settings,
+            ..AppState::default()
+        };
+        let effects = update(&mut state, AppMsg::StartIdentify);
+        assert_eq!(effects.first(), Some(&Effect::ShowWindow));
+        assert!(effects.contains(&Effect::Read));
+        assert!(state.visible && state.identify);
+        assert_eq!(state.page, Page::Main);
+        // Leaving the main screen ends identifying.
+        state.highlighted = Some(KEYCHRON.into());
+        update(&mut state, AppMsg::Navigate(Page::Journal));
+        assert!(!state.identify && state.highlighted.is_none());
+        // On the change page: only brought to the front.
+        let mut changing = AppState {
+            page: Page::Change,
+            ..AppState::default()
+        };
+        assert_eq!(
+            update(&mut changing, AppMsg::StartIdentify),
+            vec![Effect::ShowWindow, Effect::Render]
+        );
+        assert_eq!(changing.page, Page::Change);
+        assert!(!changing.identify);
     }
 }
