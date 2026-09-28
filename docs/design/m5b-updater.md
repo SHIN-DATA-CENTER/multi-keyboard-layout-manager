@@ -5,7 +5,7 @@
 | 対象 | マイルストーン M5 の後半（M5b）: アップデーターとリリースの署名（計画 4.2〜4.4、6 章の M5） |
 | 根拠 | 承認済みプラン 2.1〜2.2、4.2〜4.4、5 章（4.x は MSI 向けに書かれている。インストーラーは 2026-09-28 のユーザーの決定で NSIS）。M2 設計（`docs/design/m2-engine.md`）の D.9、E、G.1、I.18。M3 設計（`docs/design/m3-gui.md`）の A.4、B.5、B.17、D、E、F。M5a の実機テスト（`docs/research/m5-install-tests.md`）。main の 37989f8 のコード |
 | ユーザーの決定（M5b の依頼） | 完全な自動更新（ダウンロード、署名の検証、サイレント インストール）。minisign で署名した `latest.json`。**秘密鍵はメンテナーがオフラインで保管し、GitHub の secrets には置かない**。公開鍵を 2 本（通常用とバックアップ用）埋め込み、鍵 ID、失効（`revoked_keys`）、`issued_at`（巻き戻しの防止）、`expires`（凍結の検知）を持つ。確認とダウンロードは自動、インストールは利用者がボタンを押したときだけ。UAC の事前説明あり（未署名のため）。当面バイナリは署名しない。インストーラーは NSIS 3.12（WiX は使わない）。「まず使えるもの」を優先するが、更新の経路は安全に直結するので、検証の正しさは譲らない |
-| 状態 | 設計。**レビュー第 1 回（47 件）と第 2 回（20 件: 第 1 回の対応の検証 17 件、新しい攻撃の検討 3 件）を反映した版**（対応は M 章の 2 つの表）。この段階ではコードを変えない（新しい開発機に Rust ツールチェーン、MSVC Build Tools、NSIS がまだ入っていないため）。骨組み（G.2 の WP-0）は次の段階 |
+| 状態 | 設計。**レビュー第 1 回（47 件）と第 2 回（20 件: 第 1 回の対応の検証 17 件、新しい攻撃の検討 3 件）を反映した版**（対応は M 章の 2 つの表）。**2026-09-29 のユーザーの決定（J 章の J-1〜J-9）を反映した**（有効期限の既定 180 日、署名は普段のアカウント、など）。骨組み（G.2 の WP-0）は次の段階 |
 | 読み手 | M5b を分担して実装する人（G 章、H 章）とレビューする人。指摘に使えるよう、すべての節に番号を付けた |
 
 識別子、コード、コマンドは英語のまま書く。「計画」は承認済みプラン、「m2 D.9」「m3 F.5」は M2 / M3 設計の節を指す。H1 と H2 は D 章で定義する helper の 2 つのプロセスを指す。「未確認」と書いたものは L 章にまとめた。レビューの指摘は「（SECURITY-1）」のように ID で引く。
@@ -84,7 +84,7 @@
 | `channel` | 文字列 | `"stable"` だけ（β チャネルは v1.x。計画 3 章） |
 | `version` | 文字列 | `X.Y.Z`。プレリリースとビルド情報は不可。各数は 0〜65535（VERSIONINFO に入るため）。先頭の `v` は不可 |
 | `issued_at` | 整数 | 署名した時刻（Unix 秒、UTC）。`xtask` が GitHub の時刻から決める（B.3） |
-| `expires` | 整数 | 有効期限（Unix 秒、UTC）。`issued_at < expires`、差は `MAX_VALIDITY_SECS`（800 日）以下 |
+| `expires` | 整数 | 有効期限（Unix 秒、UTC）。`issued_at < expires`、差は `MAX_VALIDITY_SECS`（800 日）以下。`xtask` の既定は `issued_at` + 180 日（`DEFAULT_VALIDITY_DAYS`。J-3 の決定） |
 | `key_ids` | 文字列の配列 | この更新情報に署名した鍵の ID（16 桁の大文字 16 進。B.2）。1 つか 2 つで、重複なし。主署名の鍵が先。検証に使った署名の鍵 ID がこの中にあること（`SignerNotListed`）。レビュー前の `key_id`（1 つ）から変えた（SECURITY-4） |
 | `revoked_keys` | 文字列の配列 | 失効させる鍵 ID（空でもよい）。規則は B.2。以前の更新情報の失効もすべて引き継ぐ（`xtask` が確かめる。B.3） |
 | `min_from_version` | 文字列（省略可） | これより古い版からは自動で更新させない（手で入れてもらう）。段階を踏む必要がある変更のため。形は `version` と同じ |
@@ -103,7 +103,7 @@
   "channel": "stable",
   "version": "0.2.1",
   "issued_at": 1792022400,
-  "expires": 1826582400,
+  "expires": 1807574400,
   "key_ids": ["8F1A2B3C4D5E6F70"],
   "revoked_keys": [],
   "assets": [
@@ -123,7 +123,7 @@
 }
 ```
 
-（1792022400 は 2026-10-15 00:00 UTC、1826582400 はその 400 日後の 2027-11-19。）
+（1792022400 は 2026-10-15 00:00 UTC、1807574400 はその 180 日後（既定の有効期限。J-3）の 2027-04-13。）
 
 ### A.3 形式の決まり
 
@@ -185,7 +185,7 @@
 - GET だけ。送るヘッダーは `User-Agent` と `Accept`（更新情報と署名は `*/*`、インストーラーは `application/octet-stream`）だけ。
 - `User-Agent`: `MKLM/<version> (Windows; <x64|arm64>; +https://github.com/SHIN-DATA-CENTER/multi-keyboard-layout-manager)`。利用者や PC を識別する情報は入れない。
 - Cookie と認証情報（GitHub のトークンを含む）は送らない（`WINHTTP_DISABLE_COOKIES`）。
-- **Windows の資格情報を自動で送らない**（SECURITY-13）: `WINHTTP_OPTION_AUTOLOGON_POLICY` を `WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH` にし、`WinHttpSetCredentials` を決して呼ばない。サーバーの認証（401）は `HttpStatus`、プロキシの認証（407）は `ProxyAuthRequired` として失敗にする。WPAD や PAC でプロキシを指定できる同じネットワークの攻撃者に、利用者の NetNTLM の応答を渡さないため。代わりに、Windows 統合認証を求めるプロキシの内側では自動更新が使えない（E.6 の文でリリース ページに案内する。J 章の質問 8）。
+- **Windows の資格情報を自動で送らない**（SECURITY-13）: `WINHTTP_OPTION_AUTOLOGON_POLICY` を `WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH` にし、`WinHttpSetCredentials` を決して呼ばない。サーバーの認証（401）は `HttpStatus`、プロキシの認証（407）は `ProxyAuthRequired` として失敗にする。WPAD や PAC でプロキシを指定できる同じネットワークの攻撃者に、利用者の NetNTLM の応答を渡さないため。代わりに、Windows 統合認証を求めるプロキシの内側では自動更新が使えない（E.6 の文でリリース ページに案内する。J-8 の決定 (a)）。
 - `Accept-Encoding` を送らない。`Content-Encoding` の付いた応答は拒否（`UnexpectedEncoding`）。
 - TLS は 1.2 と 1.3 だけ（`WINHTTP_OPTION_SECURE_PROTOCOLS`）。証明書の検証は Windows の既定（Schannel と Windows の証明書ストア）。証明書のピン留めはしない（GitHub の証明書の更新で止まるため）。
 - プロキシ: `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY`（Windows 8.1 以降。システムと利用者ごとのプロキシ設定、IE の設定、PAC を使い、複数のプロキシの切り替えを扱う。Microsoft Learn の `WinHttpOpen`）。認証の要らないプロキシはそのまま使える。
@@ -199,6 +199,7 @@
 | `latest.json.minisig`、`latest.json.alt.minisig` | 4 KiB（`MAX_SIGNATURE_LEN`） | 主署名は上の 60 秒の中。副署名は別に 60 秒 |
 | インストーラー | 検証済みの更新情報の `size` ちょうど（64 MiB 以下）。`Content-Length` が違えば読まずに拒否。短くても長くても `SizeMismatch`。読みながら SHA-256 を計算し、違えば `HashMismatch` | 名前解決と接続は同じ。受信 60 秒。全体 30 分 |
 
+- この表の「期限」は取得にかける時間の上限で、更新情報の有効期限 `expires`（既定は発行から 180 日。J-3 の決定。A.2、B.4、C.6）とは別のもの。
 - 取り消し（利用者の［キャンセル］、GUI の終了）は、64 KiB の読み取りの合間にフラグで確かめる。最悪の遅れは受信の期限（30 秒 / 60 秒）。
 - 自動の再試行はしない。失敗は次の定時の確認（E.1）か、利用者の［もう一度確認］でやり直す。
 
@@ -355,7 +356,7 @@ revoked 1111222233334444
 4. **下書き**: `gh release view vX.Y.Z --json isDraft,isPrerelease,assets,name` で、下書きで、プレリリースでなく、ファイルがちょうど `MKLM-Setup-<v>-x64.exe`、`MKLM-Setup-<v>-arm64.exe`、`SHA256SUMS` の 3 つであること。3 つを `<out>\assets\` にダウンロードする。
 5. **ハッシュ**: 2 つのインストーラーの SHA-256 と大きさが、`SHA256SUMS` の同じ名前の行と、GitHub のアセットの `digest`（REST API のアセットの `digest` フィールド。`sha256:<hex>`）の両方と一致すること。`SHA256SUMS` に余分な行や重複があれば拒否。
 6. **来歴の証明**: 各インストーラーについて `gh attestation verify <file> --repo SHIN-DATA-CENTER/multi-keyboard-layout-manager --signer-workflow SHIN-DATA-CENTER/multi-keyboard-layout-manager/.github/workflows/release.yml --source-digest <commit> --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners` が成功すること（フラグは gh の manual で確認）。証明がなければ署名しない（release.yml が必ず付ける。G.6）。来歴の証明は「どこで、どのコミットから作られたか」を示すだけで、ソースが無害であることは示さない。後者はメンテナーの差分のレビュー（B.5 の手順 4）が担う。
-7. **信頼できる時刻**: `gh api -i /` の応答の `Date` を読む。手元の時計との差が 5 分を超えれば拒否（時計を直してからやり直す）。`issued_at` はこの `Date`（秒）。`expires` は `issued_at` + `--expires-days`（既定 400 日、上限 800 日）。
+7. **信頼できる時刻**: `gh api -i /` の応答の `Date` を読む。手元の時計との差が 5 分を超えれば拒否（時計を直してからやり直す）。`issued_at` はこの `Date`（秒）。`expires` は `issued_at` + `--expires-days`（既定 180 日（`DEFAULT_VALIDITY_DAYS`。J-3 の決定）、上限 800 日）。
 8. **公開中の更新情報**: 本番の経路で `latest.json` と署名を取り、**直前のリリースのタグ**の信頼の起点ファイルで検証する（鍵を移行した後でも、公開中のものは古い鍵で署名されているため）。
    - `issued_at` が公開中のもの以下なら拒否。公開中のものが信頼できる時刻より未来の日付なら、`--published-misdated` を付けたときだけ続ける（B.7 の「日付の誤った更新情報」。クライアントは記録を受け取った時刻で抑えているので、正しい日付の次の版を受け付ける）。
    - 公開中の更新情報がない（404）のは、信頼の起点ファイルを持つ過去のタグがないとき（最初の更新対応版 v0.2.0）だけ許す。
@@ -389,7 +390,7 @@ cargo xtask prepare-release --dev --tag vX.Y.Z --dist <dir> --dev-pub <file.pub>
 - `--dev-pub`: 公式の `minisign -G` が書いた開発用の鍵の `.pub`。その鍵 ID が `key_ids` になる。**鍵 ID が `TrustAnchors::release()`（本番の信頼の起点ファイル）にあれば拒否**（本番の鍵を開発用として使わない）。
 - `--minisign`: `SIGN-OFFLINE.txt` に書く `minisign.exe` のパス（F.6 の準備で、確かめた zip から取り出したもの）。`xtask` はこのファイルを実行しない。
 - `--only-arch`: もう一方のアーキテクチャのアセットを「大きさ 1、SHA-256 は 64 個の 0」で埋める（OPS-UX-TEST-9）。
-- `issued_at`: 手元の時計（GitHub には問い合わせない）。`--issued-at` は巻き戻しのリハーサル用。`expires` は `issued_at` + `--expires-days`（既定 400）。
+- `issued_at`: 手元の時計（GitHub には問い合わせない）。`--issued-at` は巻き戻しのリハーサル用。`expires` は `issued_at` + `--expires-days`（既定 180。本番と同じ `DEFAULT_VALIDITY_DAYS`）。
 - `--out`: `--dist` と同じでもよい（F.6 はそうする）。書くもの: `latest.json`（正準形、`revoked_keys` は空）、`trusted-comment.txt`（`mklm-dev-latest-json v1 version=<v> issued_at=<t>`）、`SIGN-OFFLINE.txt`（下の 1 行）。`prepare.json` は書かない（`publish` は `--dev` の成果物を扱わない）。
   ```
   <--minisign> -S -s <--dev-pub と同じフォルダーの、同じ名前の .key> -m <out>\latest.json -x <out>\latest.json.minisig -t "<trusted comment>"
@@ -425,18 +426,18 @@ cargo xtask prepare-release --dev --tag vX.Y.Z --dist <dir> --dev-pub <file.pub>
 
 1. `latest.json` と署名は**下書きのうちに**上げる。公開した後では直せない。上げ忘れたまま公開しないよう、公開は `xtask publish` で行う（B.3）。下書きの題は「MKLM vX.Y.Z — UNSIGNED, DO NOT PUBLISH」にし、ブラウザーで誤って公開しにくくする（release.yml。OPS-UX-TEST-2）。
 2. `releases/latest/download` は最新のリリースのファイルしか配らない。同じリリースの `latest.json` を署名し直して `expires` を延ばすことはできないので、延ばすには新しいリリースが要る。
-3. したがって、有効期限の既定は、今の設計の値では **400 日**（13 か月あまり）にする。年に 1 回以上リリースすれば切れない。依存クレートの更新やセキュリティ修正を兼ねた保守リリースを、年に 1 回の目安にする。期限の長さは J 章の質問 3 で決める。期限は凍結を知らせる唯一の信号なので（下の 4）、レビュー第 2 回の後のおすすめは **180 日**（年に 2 回以上のリリース）に変わった。答えが 180 日なら、`DEFAULT_VALIDITY_DAYS`（H.1）、`prepare-release` の既定（B.3 の手順 7）、この節と B.5 の注の「年に 1 回」、A.2 の例の日付を合わせて変える。
+3. したがって、有効期限の既定は **180 日**（約 6 か月）にする（**J-3 の決定 (b)**、2026-09-29。`DEFAULT_VALIDITY_DAYS`（H.1）、`prepare-release` の既定（B.3 の手順 7）、A.2 の例）。期限は凍結を知らせる唯一の信号なので（下の 4）、短い方を選んだ。少なくとも 5 か月に 1 回（年に 2〜3 回）、依存クレートの更新やセキュリティ修正を兼ねた保守リリースを出せば切れない。見張り（`update-canary.yml`）は期限の 60 日前（発行から 120 日後）から失敗して知らせる（G.6）。レビュー第 2 回の前の既定は 400 日（年に 1 回のリリース）だった。
 4. **`expires` は「凍結の検知」のための助言で、インストールの可否には使わない**（C.6）。
    - 期限切れの更新情報が差す版でも、署名が正しく、入っている版より新しいなら、それを入れて状態が悪くなることはない。
-   - 期限を門にすると、メンテナーが 1 年あまり動けないだけで、正しい最新版すら自動で入らなくなる。
+   - 期限を門にすると、メンテナーが半年（180 日）動けないだけで、正しい最新版すら自動で入らなくなる。
    - 古い更新情報の再送（巻き戻し）は `issued_at` の記録で、ダウングレードは版の比較で防ぐ（C.4、C.5）。
    - **凍結**（新しい版を隠され、古いが正しく署名された更新情報を見せ続けられる）への備えを、レビュー第 2 回で正直に書き直した（RED-TEAM-1）。現実的な凍結は、GitHub のリポジトリに書ける攻撃者が新しいリリースの「最新」の印を外す（または削除する）か、TLS を検査する社内のプロキシを握った攻撃者が、利用者がすでに持っている版の更新情報を返し続けることで起きる。このとき、確認は毎回**成功**し（`last_success` が進む）、`issued_at` は記録と同じ（巻き戻しにならない）で、画面は「最新です」のままになる。見分ける手がかりは次のとおりで、**30 日の確認の失敗のバナーは凍結には効かない**（それが知らせるのは、つながらない、形式が読めない、など失敗が続くときだけ）。
-     1. `expires`: 凍結を知らせる**唯一の自動の信号**。隠された版に気付くまで、最長で `expires - issued_at`（既定 400 日。J 章の質問 3）かかる。
+     1. `expires`: 凍結を知らせる**唯一の自動の信号**。隠された版に気付くまで、最長で `expires - issued_at`（既定 180 日。J-3 の決定）かかる。
      2. 巻き戻しの警告（E.3）: 隠された新しい更新情報を、この PC のどれかの GUI か CLI が一度でも受け取っていた場合だけ（`RecordTrust` で機械の記録にも伝わる）。
      3. 人の目: 更新のページの「最新です」の行に、受け取った更新情報の公開日を出す（「MKLM は最新です（0.2.0。2026/10/15 の更新情報）」。E.2）。`update --check --json` も `issued_at` を出す（D.14）。
      4. メンテナーの見張り: `update-canary.yml` が、配られている版がリポジトリの最も新しい安定版のリリースより古ければ失敗する（G.6）。リポジトリを握った攻撃者はワークフローも止められるので、主に事故の検出になる。
-   - 期限とは別の「更新情報が古い」の信号（たとえば 90 日）は採らなかった: 期限をもう 1 つ短く持つのと同じで、メンテナーがその間隔でリリースしなければ全員に誤報が出る。凍結を早く知らせたいなら、期限そのものを短くする（J 章の質問 3 の (b)）。期限は門ではない（この項の初め）ので、短くしたときの代償は、メンテナーがリリースしない間に出る情報の表示だけである。
-5. **期限が切れたときに利用者が見るもの**: 設定の「更新」欄と更新のページに、情報として「更新情報の有効期限（2027/11/19）を過ぎています。新しい版が長く公開されていないか、古い情報が届いています。GitHub のリリース ページで確かめてください。［リリース ページを開く］」と出す。加えて、メイン画面に情報のバナーを 30 日に 1 回だけ出す（E.3。レビュー前は出さなかった。SECURITY-11）。CLI の `update --check` は警告の行を 1 行出す。キーボードの機能には何も影響しない。
+   - 期限とは別の「更新情報が古い」の信号（たとえば 90 日）は採らなかった: 期限をもう 1 つ短く持つのと同じで、メンテナーがその間隔でリリースしなければ全員に誤報が出る。凍結を早く知らせるために、期限そのものを短くした（J-3 の決定 (b)。180 日）。期限は門ではない（この項の初め）ので、短くしたときの代償は、メンテナーがリリースしない間に出る情報の表示だけである。
+5. **期限が切れたときに利用者が見るもの**: 設定の「更新」欄と更新のページに、情報として「更新情報の有効期限（2027/04/13）を過ぎています。新しい版が長く公開されていないか、古い情報が届いています。GitHub のリリース ページで確かめてください。［リリース ページを開く］」と出す。加えて、メイン画面に情報のバナーを 30 日に 1 回だけ出す（E.3。レビュー前は出さなかった。SECURITY-11）。CLI の `update --check` は警告の行を 1 行出す。キーボードの機能には何も影響しない。
 6. 間違った `latest.json` を公開してしまった、または `latest.json` なしで公開してしまった場合は、そのリリースに「プレリリース」の印を付けて「最新」から外す（公開後も変えられる）。直前のリリースが「最新」に戻る。そのあと次の版（X.Y.(Z+1)）を出す（B.5 の「リリースの事故」）。クライアントの側では、ハッシュが違えばダウンロードで止まり、形式が違えば「更新を確認できません」になるだけで、害はない。
 7. 公開の前の確認は道具で行う（B.3 の `prepare-release` と `publish`）。公開の後は、`publish` の確認と、CI の見張り（`update-canary.yml`。G.6。OPS-UX-TEST-3）が確かめる。
 
@@ -450,9 +451,9 @@ cargo xtask prepare-release --dev --tag vX.Y.Z --dist <dir> --dev-pub <file.pub>
 
 - [ ] 公式の `minisign` を用意する: `https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip` とその `.minisig` をダウンロード → `cargo xtask verify-signer --zip … --sig …` → 表示された SHA-256 を `release-signing.ja.md` に記録 → 確かめた zip を残しておく（F.6 はここから取り出した `minisign.exe` を使う）。鍵の媒体への `minisign.exe` の配置は、下の鍵の生成のときに行う。
 - [ ] （ここから F.6 の後）確かめた zip の中の `minisign.exe` を、通常用の鍵の USB メモリ（`E:\tools\`）とバックアップ用の媒体の両方に置く。
-- [ ] （J 章の質問 6 が (c) のとき）署名専用の Windows のアカウントを作る: 標準ユーザー、名前は例えば `mklm-sign`。このアカウントでは Rust、git、エディター、ブラウザーの拡張などを一切入れず、実行しない。受け渡しのフォルダー `C:\Users\Public\mklm-sign\` を作り（公開のデータだけを置く）、2 つのアカウントが互いの作ったファイルを読み書きできるよう `icacls C:\Users\Public\mklm-sign /grant "mklm-sign:(OI)(CI)M" "<開発用のアカウント>:(OI)(CI)M"` を実行する（既定の継承だけで足りるかは未確認。L 章）。
-- [ ] ネットワークを切る →（(c) のときは開発用のアカウントからサインアウトし、署名専用のアカウントでサインイン）→ 通常用の USB メモリ（BitLocker To Go）をつなぐ → `E:\tools\minisign.exe -G -p E:\mklm-keys\mklm-primary.pub -s E:\mklm-keys\mklm-primary.key`（パスワードを 2 回）→ 外す。
-- [ ] 同じく、別の媒体でバックアップ用: `F:\tools\minisign.exe -G -p F:\mklm-keys-backup\mklm-backup.pub -s F:\mklm-keys-backup\mklm-backup.key` → 外す。2 つのパスワードは別々の保管場所に置く（B.6）。
+- [ ] 鍵は普段の開発機の、普段のアカウントで作り、署名する（**J-6 の決定 (a)**、2026-09-29。署名専用のアカウントは作らない）。その前に B.6 の「署名に使う PC の条件」を確かめる: F.6 の後片付けが済み、デバッグ ビルドの MKLM と開発用の鍵（`%USERPROFILE%\mklm-dev-keys\`）が残っていない。
+- [ ] ネットワークを切る → エディター、ブラウザー、`cargo` を動かしているターミナルを閉じる → 通常用の USB メモリ（BitLocker To Go）をつなぐ → `Get-FileHash E:\tools\minisign.exe` が記録した値と一致することを確かめる → `E:\tools\minisign.exe -G -p E:\mklm-keys\mklm-primary.pub -s E:\mklm-keys\mklm-primary.key`（パスワードを 2 回）→ 外す。
+- [ ] 同じく（ネットワークを切ったまま）、別の媒体でバックアップ用: `F:\tools\minisign.exe -G -p F:\mklm-keys-backup\mklm-backup.pub -s F:\mklm-keys-backup\mklm-backup.key` → 外す → ネットワークを戻す。2 つのパスワードは別々の保管場所に置く（B.6）。
 - [ ] 2 つの `.pub`（公開鍵。秘密ではない）を作業用の PC に写し、`cargo xtask pubkey-line --pub … --role primary`、`--role backup` → 表示された 2 行を `crates/mklm-update/trust/anchors.txt` に貼る → `cargo xtask check-keys` → コミット（公開鍵だけ。秘密鍵は決してリポジトリに入れない）。`minisign -G` が表示した鍵 ID と、`pubkey-line` の ID が一致することを目で確かめる（L 章の ID の表記の確認を兼ねる）。
 - [ ] 公開鍵を `docs/install-guide.ja.md` の「ファイルが正しいか確かめる」に載せる。
 - [ ] GitHub アカウントにハードウェア キーの 2 段階認証。`main` とタグ `v*` の保護（計画 4.3）。
@@ -466,15 +467,15 @@ cargo xtask prepare-release --dev --tag vX.Y.Z --dist <dir> --dev-pub <file.pub>
 3. Actions の「Release」が緑になり、題が「MKLM vX.Y.Z — UNSIGNED, DO NOT PUBLISH」の下書きに、2 つのインストーラーと `SHA256SUMS` が付くのを待つ（来歴の証明も CI が付ける）。
 4. **レビュー**: `git fetch --tags` → `git switch --detach vX.Y.Z` → `git rev-parse HEAD` をメモする（これが `--commit`）。`git diff <直前のタグ>..vX.Y.Z` を読む。特に `.github/`、`installer/`、各 `build.rs`、`Cargo.lock`、`rust-toolchain.toml`、`xtask/`、`crates/mklm-update/trust/`。意図しない変更があれば止める。
 5. （任意）同じコミットを手元でビルドし、インストーラーのハッシュを比べる（再現可能なビルドかは確かめていない。L 章。違っても直ちに異常とは言えないので、比べた結果を記録するだけ）。
-6. `cargo xtask prepare-release --tag vX.Y.Z --commit <SHA> --main-key-id <通常用の ID> --out C:\Users\Public\mklm-sign\vX.Y.Z`（J 章の質問 6 が (a) か (b) なら `--out release-work\vX.Y.Z`）。表示された UTC の日付と、取り残しの表と、2 つのインストーラーの SHA-256 を見る。ここで `xtask` がコンパイルされる（**鍵はまだつながない**）。
-7. **ネットワークを切る**（Wi-Fi をオフ、ケーブルを抜く）。(c) のときは、続けて開発用のアカウントから**サインアウト**し（ユーザーの切り替えではなく。そのアカウントのプロセスを残さないため）、署名専用のアカウントでサインインする。
+6. `cargo xtask prepare-release --tag vX.Y.Z --commit <SHA> --main-key-id <通常用の ID> --out release-work\vX.Y.Z`。表示された UTC の日付と、取り残しの表と、2 つのインストーラーの SHA-256 を見る。ここで `xtask` がコンパイルされる（**鍵はまだつながない**）。
+7. **ネットワークを切る**（Wi-Fi をオフ、ケーブルを抜く）。エディター、ブラウザー、`cargo` を動かしているターミナルを閉じる。鍵をつないでいる間は、`minisign.exe` 以外を起動しない（J-6 の決定 (a) の注意。B.6）。
 8. 通常用の USB メモリをつなぐ。`Get-FileHash E:\tools\minisign.exe` が記録した SHA-256 と一致することを確かめる。（任意）`Get-Content …\latest.json` で版と 2 つの SHA-256 を表示し、手順 6 で見た値と一致することを確かめる。
-9. 署名のコマンドを実行し、`minisign` にパスワードを入れる。(a) か (b) なら `SIGN-OFFLINE.txt` の行を貼る。**(c) では `SIGN-OFFLINE.txt` を貼らない**: 開発用のアカウントが書いたファイルで、侵されていれば別のコマンド（`&` の後ろや 2 行目）を紛れ込ませ、鍵をつないだ署名専用のアカウントで実行させられるため。代わりに `release-signing.ja.md` の固定の形を打ち、版と `issued_at` の 2 つの値だけを、`trusted-comment.txt` をメモ帳で開いて読み写す:
+9. 署名のコマンドを実行し、`minisign` にパスワードを入れる。`SIGN-OFFLINE.txt` の行を貼ってよいが、貼る前に、それが 1 行（副署名があれば 2 行）だけで、`release-signing.ja.md` に載せた次の固定の形と、版と `issued_at` の値のほかは同じであることを目で確かめる（紛れ込んだ別のコマンド、たとえば `&` の後ろや 3 行目がないこと）:
    ```
-   E:\tools\minisign.exe -S -s E:\mklm-keys\mklm-primary.key -m C:\Users\Public\mklm-sign\vX.Y.Z\latest.json -x C:\Users\Public\mklm-sign\vX.Y.Z\latest.json.minisig -t "mklm-latest-json v1 version=X.Y.Z issued_at=<数字>"
+   E:\tools\minisign.exe -S -s E:\mklm-keys\mklm-primary.key -m release-work\vX.Y.Z\latest.json -x release-work\vX.Y.Z\latest.json.minisig -t "mklm-latest-json v1 version=X.Y.Z issued_at=<数字>"
    ```
-   （副署名があるときは、鍵と `-x` の名前を変えた 2 行目。）値を写し間違えても、`publish` が trusted comment の不一致で公開を止める（B.3）。
-10. USB メモリを外す。(c) のときは署名専用のアカウントからサインアウトし、開発用のアカウントでサインインする。**ネットワークを戻す。**
+   （副署名があるときは、鍵と `-x` の名前を変えた 2 行目。）値を写し間違えても、`publish` が trusted comment の不一致で公開を止める（B.3）。秘密鍵に触れるのは公式の `minisign` だけ（0.2 の 9。J-9 の決定 (a)）。
+10. USB メモリを外す。**ネットワークを戻す。**
 11. `cargo xtask publish --tag vX.Y.Z --dir <手順 6 の --out>`。署名の検証、アップロード、ファイルの組の確認、公開、公開後の確認（インストーラーのダウンロードを含む）が終わるのを待つ。
 12. Actions の「Update canary」（公開で動く）が緑であることを確かめる。
 13. `git switch main`。手順 6 の `--out` のフォルダーは消してよい（公開のデータだけ）。
@@ -499,26 +500,27 @@ cargo xtask prepare-release --dev --tag vX.Y.Z --dist <dir> --dev-pub <file.pub>
 
 **注**
 
-- 年に 1 回は保守リリースを出す（B.4 の 3）。見張りは期限の 60 日前から失敗して知らせるが、公開のリポジトリの定期のワークフローは 60 日間活動がないと GitHub が止めるので、`prepare-release` が表示する有効期限の日付の 2 か月前をカレンダーにも入れる。
+- 少なくとも 5 か月に 1 回は保守リリースを出す（有効期限の既定は 180 日。B.4 の 3、J-3 の決定）。見張りは期限の 60 日前から失敗して知らせるが、公開のリポジトリの定期のワークフローは 60 日間活動がないと GitHub が止めるので、`prepare-release` が表示する有効期限の日付の 2 か月前をカレンダーにも入れる。
 
 ### B.6 鍵の保管と点検
 
 - 通常用の秘密鍵: 暗号化した USB メモリ（BitLocker To Go）に、公式の `minisign.exe` と一緒に置き、署名するときだけつなぐ。パスワードはパスワード マネージャー A に置く。
 - バックアップ用の秘密鍵: 通常用とは別の媒体で、別の場所に置く（例: 自宅の金庫と別の建物）。`minisign.exe` の写しも同じ媒体に置く。日常では使わない。**パスワードは、通常用のパスワードとは別の保管場所に置き、バックアップ用の媒体と同じ場所にも置かない**（例: 紙に書いて封をし、媒体とは別の金庫。パスワード マネージャー A をなくすと 2 本とも使えなくなる、を避ける。OPS-UX-TEST-13）。
 - 秘密鍵をクラウドの同期フォルダー、GitHub、CI、開発機のディスクに置かない。`xtask` は秘密鍵を開かない。
-- **署名に使う PC の条件**（J 章の質問 6。SECURITY-2、SECURITY-9）
-  - 署名の間はネットワークを切る。鍵をつないでいる間は、`minisign.exe` 以外を実行しない。
-  - F.6 のデバッグ ビルドの MKLM が入っていないこと、開発用の鍵が残っていないこと（F.6 の後片付け）。
+- **署名に使う PC の条件**（**J-6 の決定 (a)**、2026-09-29: 普段の開発機の、普段のアカウントで署名する。SECURITY-2、SECURITY-9）
+  - 署名の間はネットワークを切る。鍵をつないでいる間は、`minisign.exe` 以外を実行しない（エディター、ブラウザー、`cargo` を動かしているターミナルは先に閉じる）。
+  - F.6 のデバッグ ビルドの MKLM が入っていないこと、開発用の鍵（`%USERPROFILE%\mklm-dev-keys\`）が残っていないこと（F.6 の後片付け）。
+  - 秘密鍵に触れるのは、鍵の媒体に置いた、ハッシュを確かめた公式の `minisign` だけ（J-9 の決定 (a)）。`xtask` もほかの道具も鍵のファイルを開かない。
   - Windows と Defender が最新であること。
-- **残る危険**（FIX-VERIFICATION-16）: `xtask` は鍵に触れないが、`cargo xtask prepare-release`（B.5 の手順 6）は、タグの `xtask` と、`Cargo.lock` のすべてのビルド スクリプトと proc-macro を、メンテナーの権限でコンパイルして実行する。ふだんの開発でも毎日同じことが起きる。`Cargo.lock` の差分のレビューは版を見るだけで、コードは読まない。侵された依存のクレートが利用者の権限で常駐するプログラムを仕込めば、数分後につないだ USB メモリの `E:\mklm-keys\*.key` を写し、`minisign` に打ち込むパスワードを記録し、手順 10 でネットワークが戻った後に送り出せる。そうなれば、オフラインの鍵はオンラインの鍵と同じだけ危うい。ネットワークを切るだけでは防げない。安い順の対策:
-  1. **署名専用の Windows のアカウント**（J 章の質問 6 の (c)。おすすめ）: 標準ユーザーで、cargo も git も一度も実行しない。開発用のアカウントが書いたファイルを実行しない、貼らない（B.5 の手順 9 は固定の形のコマンドを打つ）。署名の前に開発用のアカウントから**サインアウト**する（ユーザーの切り替えでは、そのアカウントのプロセスが動き続け、BitLocker To Go で開いた USB メモリ（exFAT / FAT にはアクセス権がない）を読める）。利用者の権限の常駐プログラムは、別のアカウントのサインインの後には動かず、そのアカウントのキー入力も読めない。管理者の権限まで奪われていれば防げない（開発用のアカウントで UAC を承認するのは、MKLM の試験など限られた場面だけにする）。
-  2. 署名専用の PC（(b)）、または毎回きれいな状態から起動する仮想マシンやライブ USB で署名する。
+- **残る危険**（FIX-VERIFICATION-16。**ユーザーが 2026-09-29 に受け入れた**。J-6、G.7 の 21）: `xtask` は鍵に触れないが、`cargo xtask prepare-release`（B.5 の手順 6）は、タグの `xtask` と、`Cargo.lock` のすべてのビルド スクリプトと proc-macro を、メンテナーの権限でコンパイルして実行する。ふだんの開発でも毎日同じことが起きる。`Cargo.lock` の差分のレビューは版を見るだけで、コードは読まない。侵された依存のクレートが利用者の権限で常駐するプログラムを仕込めば、数分後につないだ USB メモリの `E:\mklm-keys\*.key` を写し、`minisign` に打ち込むパスワードを記録し、手順 10 でネットワークが戻った後に送り出せる。そうなれば、オフラインの鍵はオンラインの鍵と同じだけ危うい。ネットワークを切るだけでは防げない。署名は普段のアカウントで行うので、この危険は上の注意では消えない。将来、危険を下げたくなったときの安い順の対策（今は採らない）:
+  1. 署名専用の Windows のアカウント（J-6 の選択肢 (c)）: 標準ユーザーで、cargo も git も一度も実行しない。開発用のアカウントが書いたファイルを実行しない、貼らない。署名の前に開発用のアカウントから**サインアウト**する（ユーザーの切り替えでは、そのアカウントのプロセスが動き続け、BitLocker To Go で開いた USB メモリ（exFAT / FAT にはアクセス権がない）を読める）。利用者の権限の常駐プログラムを締め出せるが、管理者の権限まで奪われていれば防げない。
+  2. 署名専用の PC（J-6 の (b)）、または毎回きれいな状態から起動する仮想マシンやライブ USB で署名する。
   3. `prepare-release` を別の PC で実行し、公開のデータ（`latest.json`、`trusted-comment.txt`、`SIGN-OFFLINE.txt`）だけを署名する PC に運ぶ。
   - 同じ理由で、署名するもの（`latest.json` の中身）の正しさは、それを作った開発用のアカウントを信頼している。B.5 の手順 8 の任意の照合（手順 6 で表示した値との比較）は、受け渡しの間の差し替えを見つけるだけで、`xtask` そのものが侵された場合は、来歴の証明と公開後の `verify --remote --installers` と見張り（G.6）が後から見つける（G.7 の 19）。
 - **点検（年に 1 回、バックアップ用。通常用の鍵を新しくした後にも）**
-  1. `cargo xtask key-drill start --role backup --out C:\Users\Public\mklm-sign\drill-2027`（(a) か (b) なら `--out drill-2027`。ネットワークはつないだまま、鍵はつながない）。
-  2. ネットワークを切る →（(c) のときは開発用のアカウントからサインアウトし、署名専用のアカウントでサインイン）→ バックアップ用の媒体をつなぐ → `minisign.exe` の SHA-256 を確かめる → 手順 1 の `SIGN-OFFLINE.txt` のコマンドを実行してパスワードを入れる（(c) では貼らずに、`release-signing.ja.md` の固定の形 `F:\tools\minisign.exe -S -s F:\mklm-keys-backup\mklm-backup.key -m <out>\nonce.bin -x <out>\nonce.bin.minisig -t "mklm-key-drill v1"` を打つ。`<out>` は手順 1 のフォルダー。B.5 の手順 9 と同じ理由）→ 外す →（(c) ではサインアウトして開発用のアカウントへ）→ ネットワークを戻す。
-  3. （開発用のアカウントに戻って）`cargo xtask key-drill check --dir <手順 1 の --out> --role backup` → 「窓の中の版（B.3）がすべて信頼するバックアップ用の鍵（ID …）で署名されています」。
+  1. `cargo xtask key-drill start --role backup --out drill-2027`（ネットワークはつないだまま、鍵はつながない）。
+  2. ネットワークを切る → エディター、ブラウザー、`cargo` を動かしているターミナルを閉じる → バックアップ用の媒体をつなぐ → `minisign.exe` の SHA-256 を確かめる → 手順 1 の `SIGN-OFFLINE.txt` のコマンド（`release-signing.ja.md` の固定の形 `F:\tools\minisign.exe -S -s F:\mklm-keys-backup\mklm-backup.key -m <out>\nonce.bin -x <out>\nonce.bin.minisig -t "mklm-key-drill v1"` と同じであることを目で確かめてから。`<out>` は手順 1 のフォルダー。B.5 の手順 9 と同じ理由）を実行してパスワードを入れる → 外す → ネットワークを戻す。
+  3. `cargo xtask key-drill check --dir <手順 1 の --out> --role backup` → 「窓の中の版（B.3）がすべて信頼するバックアップ用の鍵（ID …）で署名されています」。
   4. `release-signing.ja.md` の点検の記録に、日付、鍵 ID、結果を 1 行足す。
   - これで確かめられること: 媒体が読める、パスワードを覚えている、**その鍵が出荷したビルドに埋め込んだバックアップ用の鍵そのものである**（古い鍵のファイルを取り違えていない）。レビュー前の「適当なファイルに署名する」では、最後の点を確かめられなかった。
 
@@ -646,14 +648,15 @@ H1 の手順の駆動部（`stage_update`）は、パイプのメッセージを
 ### C.6 `expires` の扱い
 
 - 検証は通し、`Freshness::Expired` を返すだけ（B.4 の 4）。
-- 正しく署名された古い更新情報を見せ続けられる凍結を、自動で知らせるのはこの期限だけである（B.4 の 4。RED-TEAM-1）。
+- 期限の既定は発行から 180 日（`DEFAULT_VALIDITY_DAYS`。J-3 の決定）。メンテナーが 180 日リリースしなければ、すべての利用者の確認が `Expired` になる（G.7 の 7）。
+- 正しく署名された古い更新情報を見せ続けられる凍結を、自動で知らせるのはこの期限だけである（B.4 の 4。RED-TEAM-1）。凍結に気付くまでの最長の時間も 180 日になる。
 - GUI と CLI は E.3 と E.6 の文で知らせる。helper は拒否しない（ログに残すだけ）。
 - PC の時計が大きくずれていると、期限切れの表示が誤ることがある。インストールの判断には影響しない。
 
 ### C.7 アーキテクチャ
 
 - 選ぶアセットは、**動いている MKLM のビルドのアーキテクチャ**（`Arch::of_this_build()`、`cfg!(target_arch)`）にする。GUI と helper は同じインストールなので一致する。
-- 理由: ARM64 版は実機で試していない（m2 I.16。ARM64 の PC がない）。ARM64 の PC で x64 版を使っている利用者を、更新のついでに未検証の ARM64 版に切り替えない（J 章の質問 1）。
+- 理由: ARM64 版は実機で試していない（m2 I.16。ARM64 の PC がない）。ARM64 の PC で x64 版を使っている利用者を、更新のついでに未検証の ARM64 版に切り替えない（J-1 の決定 (a)）。
 - ネイティブのアーキテクチャ（`IsWow64Process2` の `pNativeMachine`。x64 のエミュレーションで動く x64 版でも ARM64 を返すと広く報告されている — 未確認）は、GUI の情報表示（「この PC では ARM64 版も使えます」）にだけ使う（`mklm_win::os::native_machine`）。
 - helper は、自分のビルドのアーキテクチャのアセットだけを受け付ける。
 - ARM64 のインストーラーは x64 の PC で `.onInit` が拒否する（D.9.1 の終了コード 21）ので、誤って選ばれても入らない。
@@ -890,7 +893,7 @@ mklm-update-runner.exe --run-update <run-id>
      - `busy`: その GUI は helper のセッション中か、利用者への問いかけ（終了の確認、再接続待ち、回復の確認）を出している。**GUI は何も変えていない**（取り消しも、後で終了する印も立てない）。H2 は更新をやめる（`NotInstalled(InstanceBusy { sessions })`。`busy` を返した GUI のセッション ID を残し、管理者が誰の MKLM かを調べられるようにする。RED-TEAM-3）。その利用者が自分の GUI に手を加えれば、いつでも `busy` を返させられる（G.7 の 16）。
      - 返事がない（期限切れ、パイプのスレッドが止まっている）: 「終了しなかった」とみなし、3 に任せる。
    - GUI の側の `quit-if-idle` の決まりは E.4.1。GUI は終了する前に、自分の HKCU の RunOnce に `--after-update` を登録する（昇格していなければ。RELIABILITY-7）。
-   - **ほかの利用者の GUI について正直に書くと**（RELIABILITY-7、OPS-UX-TEST-21）: ユーザーの切り替えで別の利用者の画面に戻るのはサインインではなく再接続なので、Run キーも RunOnce も動かない。終わらせた GUI は、**その利用者が MKLM を開き直すか、サインアウトしてサインインし直すまで戻らない**（その間、その利用者のトレイのアイコンと通知が消える）。次のサインインでは、RunOnce で結果と「別のユーザーの更新のために MKLM が終了していました」が出る（E.5）。H2 はほかの利用者のセッションに GUI を起動しない（その利用者のトークンを持たない。タスク スケジューラーで起動し直す案は採らなかった。I.11、J 章の質問 2）。
+   - **ほかの利用者の GUI について正直に書くと**（RELIABILITY-7、OPS-UX-TEST-21）: ユーザーの切り替えで別の利用者の画面に戻るのはサインインではなく再接続なので、Run キーも RunOnce も動かない。終わらせた GUI は、**その利用者が MKLM を開き直すか、サインアウトしてサインインし直すまで戻らない**（その間、その利用者のトレイのアイコンと通知が消える）。次のサインインでは、RunOnce で結果と「別のユーザーの更新のために MKLM が終了していました」が出る（E.5）。H2 はほかの利用者のセッションに GUI を起動しない（その利用者のトークンを持たない。タスク スケジューラーで起動し直す案は採らなかった。I.11、J-2 の決定 (a)）。
 3. **すべてのプロセス**: 実行ファイルが `$INSTDIR` の `mklm.exe`、`mklm-cli.exe`、`mklm-helper.exe` のどれかであるプロセスを `proc_identity::processes_with_images` で探し、なくなるまで待つ。GUI と CLI は 30 秒、helper は最大 75 秒（何もしていない helper は 60 秒で終わる。m2 E.7）。残れば `NotInstalled(ProgramsStillRunning { programs, holders })`（`holders` は残ったプロセスの PID、セッション ID、実行ファイルの名前。RED-TEAM-3）。
 4. **ファイルが使われていないこと**（SECURITY-10）: 3 つの exe のそれぞれを `DELETE` の権利と、読み取り、書き込み、削除のすべての共有で開けること（`update_dir::files_in_use`）。ほかのプロセスが削除の共有なしで開いていれば開けない（NSIS の名前の変更も同じ理由で失敗する）。ウイルス対策ソフトの一時的な読み取りを見込み、最大 10 秒、250 ms ごとに試す。開けなければ、開いているプロセスを Restart Manager（`RmStartSession`、`RmRegisterResources`、`RmGetList`。`update_dir::file_holders`）で調べ、`NotInstalled(FilesInUse { programs, holders })` にする（調べられなければ `holders` は空。未確認。I.16）。
    - 標準ユーザーは Program Files のファイルを読めるので、**ほかの利用者は、ファイルを削除の共有なしで開いたままにするだけで、すべての更新（と手でのインストール。NSIS の終了コード 26）を止め続けられる**。そのプロセスが動いている限り、何度試しても入らず、自動で抜ける方法はない（RED-TEAM-3。レビュー第 1 回の後の版は「遅らせる」と書いていたが、実際には期限のない妨害である）。半端に入ることはない（D.9.2）。
@@ -1127,8 +1130,8 @@ SectionEnd
 - **更新中の早い終了**（RELIABILITY-2 の 4。対象を FIX-VERIFICATION-14 で絞った）: 書き込みのコマンド（`set`、`migrate`、`revert`、`undo`、`resolve`、`restore`、`recover`、`keep`、`reboot`、`post-reboot`）と `update --check` は、起動の直後に `classify_run` を見て、`ready` 以降の `InProgress` なら「MKLM is being updated. Try again in a minute.」を出して終了コード 6（`BLOCKED`。書き込みのコマンドの既存の意味「ほかのものが道をふさいでいる」と同じ）で終わる。GUI と同じく、更新の途中で `mklm-cli.exe` を長く動かし続けないため（`update --check` はネットワークの待ちで 1 分を超えうる。H2 は CLI の終了を 30 秒しか待たない）。
   - 読み取りだけのコマンド（`list`、`status`、`global status`、`journal`、`update --status`）は早い終了の対象にしない。1 秒ほどで終わり、H2 の待ち（D.8 の 3）の間に終わるので、更新を止めない。`main.rs` の約束（読み取りのコマンドは 0 / 1 / 2）はそのまま保つ。監視のスクリプトが更新の間に見慣れない 6 を受け取ることはない。
   - `update --check` の 6 は、上の表と `docs/install-guide.ja.md` の終了コードの表に載せる（WP-U）。
-- **CLI はインストールしない**（J 章の質問 4）。理由: `mklm-cli.exe` 自身が `$INSTDIR` にあり、インストールの前に終わらなければならない。結果を表示できるのは次に起動した GUI か `update --status` になり、CLI の利点（その場で結果と終了コードが分かる）がない。GUI の引き継ぎと起動し直しをもう 1 組作る価値は小さい。スクリプトや管理ツールからは、インストーラーを直接 `/S` で実行すればよい（終了コードは D.9.1。`docs/install-guide.ja.md` に、この表と並べて書く）。
-- 出力は英語（M1、M2 と同じ）。`--json` の形は `{"installed":"0.2.0","status":"update-available"|"up-to-date"|"manual-required","offered":"0.2.1","freshness":"fresh"|"expired","issued_at":1792022400,"expires":1826582400,"release_page":"https://…","rollback_ignored":null|{"issued_at":…,"seen":…}}`（`--check`）。
+- **CLI はインストールしない**（J-4 の決定 (a): `update --check` と `--status` だけ）。理由: `mklm-cli.exe` 自身が `$INSTDIR` にあり、インストールの前に終わらなければならない。結果を表示できるのは次に起動した GUI か `update --status` になり、CLI の利点（その場で結果と終了コードが分かる）がない。GUI の引き継ぎと起動し直しをもう 1 組作る価値は小さい。スクリプトや管理ツールからは、インストーラーを直接 `/S` で実行すればよい（終了コードは D.9.1。`docs/install-guide.ja.md` に、この表と並べて書く）。
+- 出力は英語（M1、M2 と同じ）。`--json` の形は `{"installed":"0.2.0","status":"update-available"|"up-to-date"|"manual-required","offered":"0.2.1","freshness":"fresh"|"expired","issued_at":1792022400,"expires":1807574400,"release_page":"https://…","rollback_ignored":null|{"issued_at":…,"seen":…}}`（`--check`）。
 
 ### D.15 helper の終了コード（m2 E.8 への追加）
 
@@ -1198,7 +1201,7 @@ H1 は、H2 が `ready` の前に終了したとき、その終了コードを `
 
 - 確認 → `Available` で、スキップしていなければ自動でダウンロード → `Ready`（ボタンが押せる）。スキップした版は、更新のページの［ダウンロード］でだけダウンロードする。
 - 新しい版が出れば、古いダウンロードを捨てて取り直す（D.11 の条件で消せるものだけ）。
-- 従量制の接続でもダウンロードする（数 MB のため。J 章の質問 7）。
+- 従量制の接続でもダウンロードする（数 MB のため。J-7 の決定 (a)）。
 
 ### E.2 状態と、更新のページ
 
@@ -1245,7 +1248,7 @@ H1 は、H2 が `ready` の前に終了したとき、その終了コードを `
 ### E.3 バナーとトレイ
 
 - **更新あり**（情報）: 「MKLM の新しい版（0.2.1）を使えます。［詳細…］」。準備完了（ダウンロード済み）のときだけ出す。スキップした版には出さない。
-- **長く確認できていない、または期限切れ**（情報。SECURITY-11、OPS-UX-TEST-5）: `auto_check` がオンで、更新が使える（`Availability::Available`）か確認だけできる（`NotInstalledCopy`）とき、最後に成功した確認が 30 日以上前（成功がなければ、記録した最初の失敗から 30 日以上）か、キャッシュの更新情報が期限切れのとき。`stale_notice_at` から 30 日以上たっていれば 1 回出し、`stale_notice_at` を書く。
+- **長く確認できていない、または期限切れ**（情報。SECURITY-11、OPS-UX-TEST-5）: `auto_check` がオンで、更新が使える（`Availability::Available`）か確認だけできる（`NotInstalledCopy`）とき、最後に成功した確認が 30 日以上前（成功がなければ、記録した最初の失敗から 30 日以上）か、キャッシュの更新情報が期限切れ（既定では発行から 180 日。J-3 の決定）のとき。`stale_notice_at` から 30 日以上たっていれば 1 回出し、`stale_notice_at` を書く。
   - 最後の失敗の種類は `classify`（H.4）が決め、`ClientState.last_failure` に残す。取り消し（`Cancelled`）と `NotConfigured` は失敗として記録しない（30 日の数え始めにならない。FIX-VERIFICATION-12）。
   - 最後の失敗が一時的なもの: 「30 日以上、MKLM の更新を確認できていません。インターネットやプロキシの設定を確かめてください。［詳細…］」
   - 最後の失敗が構造的なもの（E.6 の「構造」。`Rollback` を含む）か、期限切れ: 「MKLM の自動更新が使えなくなっている可能性があります。GitHub のリリース ページで新しい版を確かめてください。［リリース ページを開く］［詳細…］」
@@ -1410,16 +1413,16 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
 | 信頼の起点ファイル | 正しいファイル、コメントだけ（`NotConfigured`）、形の誤りの行（行番号付きの `BadAnchorsLine`）、ID と公開鍵の不一致、重複、`check_release_roles`（通常用 2 本、バックアップ用なし、失効した鍵を埋め込み） |
 | URL | https だけ、ホストの規則、userinfo、ポート、IP、非 ASCII、相対の `Location` の解決、`Endpoints::production()` の URL の文字列、`tag_from_location`（`latest.json` と `SHA256SUMS` の両方。形が違えば `None`）、副署名の URL |
 | `Stager` | 順番の違う `offset`、空のチャンク、64 KiB + 1 のチャンク、合計の超過、足りないまま `finish` |
-| 定数 | `installer_name`、`release_page_url`、`user_agent`、`RUNNER_EXE_NAME` の文字列 |
+| 定数 | `installer_name`、`release_page_url`、`user_agent`、`RUNNER_EXE_NAME` の文字列。`DEFAULT_VALIDITY_DAYS` が 180（J-3 の決定）で、`MAX_VALIDITY_SECS` 以下 |
 | base64 | RFC 4648 の例、パディングなし、余分なパディング、正準形でない最後の文字 |
 
 **`xtask` の単体テスト**（`ReleaseHost` の偽物と、使い捨ての鍵で署名した偽のリリース。ネットワークなし）
 
-- `prepare-release`: 正常（`latest.json`、trusted comment、`SIGN-OFFLINE.txt`、`prepare.json`）。拒否するもの: プレリリースの tag、手元の HEAD とタグとコミットの不一致、GitHub のタグのコミットの不一致、下書きでない、余分なアセット、`SHA256SUMS` の食い違い、`digest` の食い違い、来歴の証明の失敗、手元の時計と `Date` の差が 5 分を超える、`issued_at` が公開中のもの以下（未来の日付の公開中のものは `--published-misdated` のときだけ通る）、公開中の失効を引き継いでいない（`--revoke` の欠け）、B.2 に反する `--revoke`、取り残しの検査で受け付けない版がある（`--allow-strand` で通る）。
+- `prepare-release`: 正常（`latest.json`、trusted comment、`SIGN-OFFLINE.txt`、`prepare.json`）。`--expires-days` なしでは `expires` = `issued_at` + 180 日（J-3 の決定）、`--expires-days 800` まで通り、801 は拒否。拒否するもの: プレリリースの tag、手元の HEAD とタグとコミットの不一致、GitHub のタグのコミットの不一致、下書きでない、余分なアセット、`SHA256SUMS` の食い違い、`digest` の食い違い、来歴の証明の失敗、手元の時計と `Date` の差が 5 分を超える、`issued_at` が公開中のもの以下（未来の日付の公開中のものは `--published-misdated` のときだけ通る）、公開中の失効を引き継いでいない（`--revoke` の欠け）、B.2 に反する `--revoke`、取り残しの検査で受け付けない版がある（`--allow-strand` で通る）。
 - `publish`: 通る組、プレリリースの tag の拒否、`prepare.json` の後に下書きの `digest` が変わった、署名が対象の版で通らない、trusted comment の不一致、アップロード後のファイルの組の不一致。
 - `prepare-release` の取り残しの検査（FIX-VERIFICATION-1、FIX-VERIFICATION-2）: F.1 の「バックアップ用の鍵の回転」の 4 つの版を窓の中に置き、(a) と (b) の更新情報が拒否されないこと（`--allow-strand` なしで通る）。`window_targets` の B.3 の例の時系列（v0.4.0 が v0.5.0 の公開から 60 日で窓の中 → v0.6.0 の主 P2 だけの準備は拒否、副 B1 を付ければ通る）。後継の公開から 399 日と 401 日の境目。公開後にプレリリースの印を付けた安定版の形のタグは対象に入り、`-` のタグは入らない。
 - `check-keys`: 過去のタグで同じ ID が別の公開鍵を指す → 拒否。過去のタグで `revoked` にした ID を埋め込む → 拒否。浅いリポジトリ、`v*` のタグがない、ファイルを持つ最初のタグより後のタグでファイルが読めない → 飛ばさずに失敗（FIX-VERIFICATION-15）。
-- `prepare-release --dev`（FIX-VERIFICATION-17）: B.3 の文法どおりの出力（`latest.json`、`trusted-comment.txt` の開発用の接頭辞、`SIGN-OFFLINE.txt` の 1 行）。`--dev-pub` の鍵 ID が本番の信頼の起点にある → 拒否。`--dev` なしの `--dist` などの拒否。`--only-arch` の埋め物。
+- `prepare-release --dev`（FIX-VERIFICATION-17）: B.3 の文法どおりの出力（`latest.json`（既定の `expires` は `issued_at` + 180 日）、`trusted-comment.txt` の開発用の接頭辞、`SIGN-OFFLINE.txt` の 1 行）。`--dev-pub` の鍵 ID が本番の信頼の起点にある → 拒否。`--dev` なしの `--dist` などの拒否。`--only-arch` の埋め物。
 - `key-drill check`: 正しいバックアップ用の鍵 → 通る。古い（埋め込みにない）バックアップ用の鍵 → 拒否。通常用の鍵 → 拒否。別の `nonce.bin`（前回の点検のもの）の署名 → 拒否。trusted comment が `mklm-key-drill v1` でない → 拒否。対象の版は `window_targets` と同じ。
 - `pubkey-line`: 公式の `minisign -G` の `.pub` の形（テストのデータに、形を写したもの）から正しい行と ID。
 - 本番のコマンドが、開発用の cfg のビルドで失敗すること（開発用の cfg のテストで）。
@@ -1499,7 +1502,7 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
   - 起動時の `InProgress`（`ready` 以降）→ すぐ終了。セッションが `Run.caller_session` と同じ → RunOnce を消さず、何も書かない。違う、または `caller_session` がない → 昇格していなければ RunOnce を登録し、`closed_by_update` を書いてから終了（FIX-VERIFICATION-9）。
   - `classify`（FIX-VERIFICATION-12）: `CheckError` のすべての列挙子について、E.6 の表と同じ種類と文の ID。`Cancelled`（2 つ）と `NotConfigured` → `None` で、`last_failure` と `last_check` が変わらない。`Rollback` → `Structural`。30 日の間 `Rollback` だけが続いた後のバナーは構造の文（`upd-stale-structural`）と巻き戻しの警告。
   - 結果の表示の条件（D.13）: 14 日を過ぎた `LastResult`、今の版と合わない `LastResult`、ほかの利用者の更新（中立の文）、失敗はほかの利用者に出さない、中断は利用者ごとに 1 回だけ、表示するものがなければ `unregister_after_update`。
-  - バナー: 30 日以上確認できていない（一時 / 構造）、期限切れ、30 日に 1 回、巻き戻しの警告（同じ `issued_at` に 1 回）。
+  - バナー: 30 日以上確認できていない（一時 / 構造）、期限切れ（発行から 180 日を過ぎた更新情報。J-3）、30 日に 1 回、巻き戻しの警告（同じ `issued_at` に 1 回）。
   - UAC の説明の画面の行き先（`UacNoticeOrigin::Update` で［キャンセル］→ 更新のページ）。
 - `vm::update` のスナップショット（日英、m3 H.3）: E.2 の各状態、E.6 の表のすべての行。ラテン文字の検査（E.7）。
 - `mklm-client::update`: 偽の `Transport` で `check`（主署名、副署名の取得の条件、キャッシュ、記録の更新、スキップ、巻き戻しの記録、最後の失敗の種類と最初の時刻）と `download`。偽の `Link` で `stage`（正常、`Refused`、途中の取り消し、元のファイルの変化、helper の喪失、`SendInstaller` の中身が申し出と違う、`StartingRunner` の後の Heartbeat の間の待ち）。`pending_trust_report`（利用者の記録が進んでいるときだけ）。
@@ -1606,7 +1609,7 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 1. **WP-0**（1 人）: 骨組み。コンパイルが通り、既存のテストがすべて通る状態で渡す（G.2）。
 2. **WP-U、WP-H、WP-C**（並行）: ファイルの持ち主は重ならない（G.3〜G.5）。互いの実装を待たずに、H 章の約束に対して書く。
 3. **統合**: 3 つを合わせ、F.4 の結合テストを含めて `cargo test --workspace`、F.3 の開発用の cfg のテスト、`clippy -D warnings`（x64 と ARM64）、`fmt` を通す。
-4. **レビュー**（G.6 の確認事項。`minisign-verify` のソースの読み合わせを含む）→ 公式の `minisign` の用意と `xtask verify-signer`（メンテナー。B.5 の準備の最初の項目。F.6 がこれを使う。FIX-VERIFICATION-17）→ F.6 のリハーサル（と後片付け）→ 鍵の生成（メンテナー。B.5 の準備の残り。J 章の質問 6 が (c) なら署名専用のアカウントを先に作る）→ `fetch-smoke`（F.8）→ v0.2.0 → F.7 のグループ A → （キーボードを調べた後）グループ B。
+4. **レビュー**（G.6 の確認事項。`minisign-verify` のソースの読み合わせを含む）→ 公式の `minisign` の用意と `xtask verify-signer`（メンテナー。B.5 の準備の最初の項目。F.6 がこれを使う。FIX-VERIFICATION-17）→ F.6 のリハーサル（と後片付け）→ 鍵の生成（メンテナー。B.5 の準備の残り。J-6 の決定 (a) により普段の開発機の普段のアカウントで、ネットワークを切り、F.6 のデバッグ ビルドと開発用の鍵が残っていないことを確かめてから、公式の `minisign` だけで行う。署名専用のアカウントは作らない）→ `fetch-smoke`（F.8）→ v0.2.0 → F.7 のグループ A → （キーボードを調べた後）グループ B。
 
 ### G.2 WP-0: 骨組み
 
@@ -1804,27 +1807,27 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 4. **起動し直しの失敗**: 別の管理者で昇格した場合など（D.10）。RunOnce、Run キー、案内の文で補うが、「MKLM が消えた」と感じる利用者がいうる。
 5. **途中で止まったインストール**: 電源断や、利用者が強制したシャットダウン（D.12）。2 段階の置き換えで半端の時間は短くなり、検出と［インストーラーを実行］で直せる。
 6. **ウイルス対策ソフト**: 署名のないインストーラーと runner を `ProgramData` から実行するので、止められたり遅くなったりしうる（`InstallerNotStarted`、準備の期限 120 秒、インストールの期限 15 分〜60 分）。
-7. **有効期限の失効**: メンテナーが 13 か月リリースしないと、全員に期限切れの情報とバナーが出る（B.4）。見張りが 60 日前から知らせる。
+7. **有効期限の失効**: 有効期限の既定は 180 日（J-3 の決定）なので、メンテナーが 180 日（約 6 か月）リリースしないと、全員に期限切れの情報とバナーが出る（B.4）。見張りが 60 日前（発行から 120 日後）から知らせる。インストールは止まらない（C.6）。
 8. **鍵をなくす**: 両方をなくすと自動更新が止まり、手で入れ直してもらうしかない（B.7）。**バックアップ用の鍵の漏れは、通常用の漏れと同じかそれ以上に重い**（B.2 の規則 4）。通常用を替えた後の移行の窓では、バックアップ用の鍵をリリースのたびに使う。
 9. **feature の統合**: ワークスペースのビルドで helper にも WinHTTP のコードがコンパイルされる。リンカーが落とす前提で、release.yml のインポートの検査で守る（A.9）。
-10. **ほかの利用者の MKLM を終わらせる**: 何もしていない MKLM は、その利用者の同意なしに終わり、**その利用者が開き直すかサインインし直すまで戻らない**（ユーザーの切り替えで戻るのは再接続で、Run キーは動かない。D.8、J 章の質問 2）。更新の途中（`ready` から `finishing`）にサインインした、または MKLM を開いたほかの利用者の MKLM も、起動を見送り、次に開くかサインインするまで動かない（D.13 の 1。FIX-VERIFICATION-9）。
+10. **ほかの利用者の MKLM を終わらせる**: 何もしていない MKLM は、その利用者の同意なしに終わり、**その利用者が開き直すかサインインし直すまで戻らない**（ユーザーの切り替えで戻るのは再接続で、Run キーは動かない。D.8、J-2 の決定 (a)）。更新の途中（`ready` から `finishing`）にサインインした、または MKLM を開いたほかの利用者の MKLM も、起動を見送り、次に開くかサインインするまで動かない（D.13 の 1。FIX-VERIFICATION-9）。
 11. **ロックの受け渡しの隙間**: H1 がロックを放してから H2 が取るまでの間に、ほかの書き手が操作を始めうる。H2 がジャーナルを確かめ直して止めるので安全だが、更新はやり直しになる（D.7 の 10）。
 12. **ジョブ オブジェクト**: H1 が kill-on-close のジョブに入っていると、H1 の終了で H2 も終わる。H1 は UAC（AppInfo）が作るので呼び出し元のジョブには入らないはずだが、確かめていない。H2 は `ready` の前に H1 に見られているので、止められても `Interrupted` として検出される。
 13. **更新とアンインストールの同時実行**: アンインストーラー（`--uninstall-restore` はロックで待つが、ファイルの削除は止まらない）と重なると、結果が壊れうる。起こりにくいので、検出（D.13）に任せる。
-14. **x64 版を ARM64 の PC で使っている利用者**: ARM64 版に切り替わらない（C.7。J 章の質問 1）。
+14. **x64 版を ARM64 の PC で使っている利用者**: ARM64 版に切り替わらない（C.7。J-1 の決定 (a)）。
 15. **リハーサルと本番の違い**: F.6 はデバッグ ビルドと平文の HTTP で、TLS、GitHub、リリース ビルドの最適化は F.7 と F.8 でしか確かめられない。本番の取得の経路は `fetch-smoke` で v0.2.0 の前に確かめる。
 16. **ほかの利用者による妨害**（SECURITY-10。FIX-VERIFICATION-7、RED-TEAM-3 で書き直した）: この PC の**どの利用者も、期限なしに、すべての更新（セキュリティの修正を含む）と手でのインストールを止め続けられる**。半端には入らない（D.9.2）が、防ぎようがなく、自動で抜ける方法もない。方法は少なくとも次の 4 つ。
     - `$INSTDIR` の exe を削除の共有なしで開いたままにする（D.8 の 4 の `FilesInUse`、NSIS の 26）。
     - 自分の MKLM を何かの途中（キーボードの変更の確認待ちなど）にしておく、または自分の MKLM に手を加えて `quit-if-idle` にいつも `busy` を返させる（`InstanceBusy`）。
     - `mklm-cli`（`set` の `Continue? [y/N]` など）を入力待ちのまま置く（`ProgramsStillRunning`。F.7 の T-UPD-6A と同じ形）。
     - GUI より先に、その利用者の多重起動のパイプの名前を作っておく（その GUI は `NotOurs` になり、3 の待ちで `ProgramsStillRunning`。D.8 の 2）。
-    - 管理者への手がかりとして、結果と `update --status` に相手のプロセス（PID、セッション ID、名前）を残す（D.8、E.6）。管理者はそのプロセスを止めるか、PC を再起動してほかの利用者がサインインする前に更新する（`docs/recovery.md`）。J 章の質問 2 のどの選択肢でも、この妨害は変わらない。
-17. **認証の要るプロキシ**（SECURITY-13）: Windows の資格情報を自動で送らないので、統合認証のプロキシの内側では自動更新が使えない（J 章の質問 8）。
+    - 管理者への手がかりとして、結果と `update --status` に相手のプロセス（PID、セッション ID、名前）を残す（D.8、E.6）。管理者はそのプロセスを止めるか、PC を再起動してほかの利用者がサインインする前に更新する（`docs/recovery.md`）。J-2 のどの選択肢でも、この妨害は変わらない（決定は (a)）。
+17. **認証の要るプロキシ**（SECURITY-13）: Windows の資格情報を自動で送らないので、統合認証のプロキシの内側では自動更新が使えない（J-8 の決定 (a)）。
 18. **機械の記録の遅れ**（SECURITY-5）: 機械の記録が進むのは誰かが helper を起動したときだけなので、悪意のある利用者が管理者に古い正しい版を入れさせる攻撃は、記録が進んでいない PC では防げない（C.4）。
 19. **来歴の証明とレビューの限界**（SECURITY-1）: 来歴の証明は「どのワークフローが、どのコミットから作ったか」を示すだけ。依存のクレートや GitHub のランナーそのものが侵されていれば防げない。差分のレビューと、任意の手元のビルドとの比べ合わせで減らす。
 20. **公式の `minisign` の信頼**: 秘密鍵に触れる唯一の道具なので、初回に作者の署名で確かめ、ハッシュを固定し、鍵と同じ媒体に置く（B.5）。作者の鍵そのものが侵されれば防げない。
-21. **署名する PC で動く開発のコード**（FIX-VERIFICATION-16）: `prepare-release` とふだんの開発は、依存のクレートのビルド スクリプトと proc-macro をメンテナーの権限で実行する。侵された依存が常駐すれば、数分後につなぐ鍵のファイルとパスワードを盗める（B.6 の「残る危険」）。署名専用の Windows のアカウント（J 章の質問 6 の (c)）で、利用者の権限の常駐を締め出す。管理者の権限まで奪われた場合と、署名する中身を作る `xtask` そのものが侵された場合は、それでも防げない（19 と同じく、来歴の証明、公開後の検査、見張りで後から見つける）。
-22. **凍結**（RED-TEAM-1）: GitHub のリポジトリに書ける攻撃者（「最新」の印を外す、リリースを消す）か、TLS を検査するプロキシを握った攻撃者は、正しく署名された古い更新情報を見せ続けて、新しい版（セキュリティの修正を含む）を隠せる。確認は成功し続け、画面は「最新です」のまま。自動で知らせるのは `expires` だけで、最長で有効期限の長さ（既定 400 日）かかる（B.4 の 4）。期限を短くすれば早まる（J 章の質問 3）。時刻の新しさだけを頻繁に保証する別の鍵（TUF の timestamp の役割）は、オンラインの鍵が要るので、今の決定（秘密鍵はオフラインだけ）の外にある。
+21. **署名する PC で動く開発のコード**（FIX-VERIFICATION-16）: `prepare-release` とふだんの開発は、依存のクレートのビルド スクリプトと proc-macro をメンテナーの権限で実行する。侵された依存が常駐すれば、数分後につなぐ鍵のファイルとパスワードを盗める（B.6 の「残る危険」）。**J-6 の決定 (a)**（2026-09-29）で、署名は普段の開発機の普段のアカウントで行い、署名専用のアカウントは作らない。ネットワークを切る、開発用の鍵とデバッグ ビルドを残さない、鍵に触れるのは公式の `minisign` だけ、という注意（B.6）は、侵された依存の常駐を締め出さない。**ユーザーはこの残る危険（侵されたビルドの依存が鍵とパスワードを盗みうること）を受け入れた**。起きた場合は、来歴の証明、公開後の検査、見張りで後から見つけ（19 と同じ）、B.7 の手順で鍵を替える。危険を下げたくなったときの対策は B.6 の「残る危険」の 1〜3。
+22. **凍結**（RED-TEAM-1）: GitHub のリポジトリに書ける攻撃者（「最新」の印を外す、リリースを消す）か、TLS を検査するプロキシを握った攻撃者は、正しく署名された古い更新情報を見せ続けて、新しい版（セキュリティの修正を含む）を隠せる。確認は成功し続け、画面は「最新です」のまま。自動で知らせるのは `expires` だけで、最長で有効期限の長さ（既定 180 日。J-3 の決定）かかる（B.4 の 4）。時刻の新しさだけを頻繁に保証する別の鍵（TUF の timestamp の役割）は、オンラインの鍵が要るので、今の決定（秘密鍵はオフラインだけ）の外にある。
 
 ---
 
@@ -1885,7 +1888,9 @@ pub const MAX_MANIFEST_LEN: usize = 64 * 1024;
 pub const MAX_SIGNATURE_LEN: usize = 4 * 1024;
 pub const MAX_INSTALLER_LEN: u64 = 64 * 1024 * 1024;
 pub const MAX_VALIDITY_SECS: u64 = 800 * 86_400;
-pub const DEFAULT_VALIDITY_DAYS: u64 = 400;
+/// xtask's default `--expires-days` (user decision J-3, 2026-09-29: 180 days; the canary warns 60
+/// days before).
+pub const DEFAULT_VALIDITY_DAYS: u64 = 180;
 /// A release stays a strand-check target until this many days after its successor was published
 /// (xtask `window_targets`, design m5b B.3; FIX-VERIFICATION-2).
 pub const TRANSITION_WINDOW_DAYS: u64 = 400;
@@ -3962,34 +3967,36 @@ JSON の例（形を固定するテストの期待値に使う）:
 6. **ARM64 のネイティブの判定**（C.7）: x64 のエミュレーションの中で `IsWow64Process2` が ARM64 を返すことは広く報告されているが、実機で確かめていない（ARM64 の PC がない）。今の設計では表示にしか使わない。
 7. **サインアウトとインストール**（D.7、D.12）: `installing` の間はセッションの終了を止めることにした。0x3FF の H2 に `WM_QUERYENDSESSION` が NSIS より先に届くこと、Windows が理由の文をどう見せるかは、F.6 と T-UPD-16 で確かめる。
 8. **`ProgramData` の先回り**（m2 I.18）: `Updates` も先回りして作られうる。隔離の仕組み（m2 S1）がそのまま効くが、隔離できない場合は更新も `Storage` で止まる。
-9. **従量制の接続**（E.1）: ダウンロードを自動で行う。問題になれば、`NetworkInformation` の接続の費用を見て止める。
+9. **従量制の接続**（E.1）: ダウンロードを自動で行う（J-7 の決定 (a)）。問題になれば、`NetworkInformation` の接続の費用を見て止める。
 10. **`CARGO_CFG_DEBUG_ASSERTIONS`**（A.10）: ビルド スクリプトに、対象のデバッグの表明の設定が渡るか。WP-0 が確かめる。渡らなくても、ビルドの前の環境の検査と、陽性の対照つきの目印の検査が守る。
-11. **ほかの利用者のセッションでの起動し直し**（D.8）: `quit-if-idle` で終わらせたほかの利用者の GUI は、その利用者が開き直すかサインインし直すまで戻らない。タスク スケジューラーの 1 回だけのタスク（その利用者の SID、`TASK_LOGON_INTERACTIVE_TOKEN`、`RunLevel` LUA）で戻す案は、管理者がパスワードなしで登録できるか未確認で、コードも増えるので採らなかった（J 章の質問 2）。
+11. **ほかの利用者のセッションでの起動し直し**（D.8）: `quit-if-idle` で終わらせたほかの利用者の GUI は、その利用者が開き直すかサインインし直すまで戻らない。タスク スケジューラーの 1 回だけのタスク（その利用者の SID、`TASK_LOGON_INTERACTIVE_TOKEN`、`RunLevel` LUA）で戻す案は、管理者がパスワードなしで登録できるか未確認で、コードも増えるので採らなかった（J-2 の決定は (a)。(c) は選ばれなかった）。
 12. **ほかの利用者の GUI のプロセスを開けるか、SID が取れるか**（D.8）: 昇格した H2 が、ほかの利用者の `mklm.exe` を `PROCESS_QUERY_LIMITED_INFORMATION` で開けるかは確かめていない。開けなければ、作成時刻付きの識別を前後で比べる方式に落ちる。また、パイプの名前を計算するのに使う `WTSEnumerateProcessesW` の `pUserSid` が、SYSTEM でない昇格したプロセスから見て、ほかの利用者のプロセスについても入っているかを、この PC で確かめていない（Microsoft Learn は「プロセスのプライマリ トークンの利用者の SID」とだけ書く。FIX-VERIFICATION-5）。入っていなければ、その GUI は飛ばされ、D.8 の 3 の待ちで `ProgramsStillRunning` になる（安全側）。F.6 の任意の 2 つ目のアカウントか T-UPD-7 で確かめる。
 13. **再現可能なビルド**（B.5 の 5）: 同じコミットを手元でビルドして CI と同じハッシュになるかは確かめていない（PDB のパス、時刻、NSIS の圧縮など）。比べるのは任意で、違っても直ちに異常とはしない。
 14. **ウイルス対策ソフトの遅れ**（D.4、RELIABILITY-5）: H2 の起動から `ready` までの時間。F.6 と T-UPD-15 で測り、120 秒で足りなければ見直す。
 15. **最小の環境ブロック**（D.9.4）: NSIS、プラグイン、`mklm.exe --quit` が、ほかの環境変数を必要としないか。F.6 と煙の試験で確かめる。
 16. **Restart Manager でファイルを開いているプロセスが分かるか**（D.8 の 4。RED-TEAM-3）: `RmGetList` は、読み込まれたモジュールだけでなく、ふつうに開いたファイルのハンドルの持ち主も返すと理解しているが、確かめていない。煙の試験の 4（PowerShell でファイルを開いたまま）と同じ状態で `file_holders` が `powershell.exe` を返すかを、F.6 で確かめる。返さなければ `holders` は空のままで、理由の文は変わらない。
-17. **凍結への備え**（B.4 の 4。RED-TEAM-1）: 自動の信号は `expires` だけ。期限を短くするか（J 章の質問 3）、将来、オンラインの鍵で新しさだけを保証する仕組み（TUF の timestamp）を足すかは、ユーザーの判断に残る。
+17. **凍結への備え**（B.4 の 4。RED-TEAM-1）: 自動の信号は `expires` だけ。期限は 180 日に短くした（J-3 の決定 (b)）。将来、オンラインの鍵で新しさだけを保証する仕組み（TUF の timestamp）を足すかは、ユーザーの判断に残る。
 
 ---
 
 ## J. ユーザーに決めてもらうこと
 
-| # | 質問 | 選択肢 | おすすめ |
-|---|---|---|---|
-| 1 | ARM64 の PC で x64 版を使っている利用者を、自動更新で ARM64 版に切り替えるか | (a) 切り替えない（今のアーキテクチャのまま） (b) 自動で切り替える (c) 画面で尋ねる | (a)。ARM64 版は実機で試していない（M6 で試した後に見直す） |
-| 2 | 更新のとき、ほかの利用者（ユーザーの切り替え）の MKLM が何もせず動いていたら | (a) 終わらせて更新する。その利用者の MKLM は、その利用者が開き直すか、サインアウトしてサインインし直すまで戻らない（ユーザーの切り替えで戻るのは再接続で、自動起動は動かない）。次のサインインで結果と「いったん終了していました」が出る (b) 更新をやめて「別のユーザーの MKLM が開いています。そのユーザーに終了してもらってから更新してください」と出す (c) (a) に加えて、タスク スケジューラーでその利用者のセッションに MKLM を起動し直す（コードが増え、動くか未確認） | (a)。自動起動が既定でオンなので、共有の PC ではほかの利用者の MKLM がほぼいつも動いており、(b) では更新がほとんどできない。キーボードの操作の途中や確認待ちなら、どれでも更新をやめる。**注**（FIX-VERIFICATION-7）: どの選択肢でも、この PC のほかの利用者は更新を期限なしに止め続けられる。MKLM のファイルを開いたままにする、自分の MKLM を何かの途中にしておく（または手を加えていつも `busy` を返させる）、`mklm-cli` を入力待ちのまま置く、などで（G.7 の 16）。半端には入らず、管理者には相手のプロセスが示される |
-| 3 | 更新情報の有効期限（凍結に気付くまでの最長の時間でもある） | (a) 400 日（年 1 回のリリースで切れない） (b) 180 日（5 か月ごとのリリースが要る。見張りは期限の 60 日前に知らせる） (c) 2 年 | **(b) に変えた**（RED-TEAM-1）。レビュー第 1 回の後の版は「30 日以上確認できないときのバナーと巻き戻しの警告も凍結に気付かせる」として (a) を勧めたが、誤りだった: 正しく署名された古い更新情報を見せ続けられると、確認は成功し続け、どちらも出ない。凍結を自動で知らせるのは期限だけで、期限の長さがそのまま、隠されたセキュリティの修正に気付くまでの最長の時間になる（B.4 の 4）。期限はインストールの門ではないので、メンテナーがリリースできなかったときの代償は、利用者に出る「期限切れ」の情報の表示（とバナー 30 日に 1 回）だけ。年に 2 回以上リリースできないなら (a) |
-| 4 | CLI からインストールできるようにするか | (a) 確認と状態の表示だけ (b) インストールもできる | (a)。スクリプトはインストーラーを直接 `/S` で実行できる |
-| 6 | 署名をする PC | (a) 普段の開発機の、普段のアカウント。署名の間はネットワークを切る、F.6 のデバッグ ビルドと開発用の鍵が残っていない、署名は鍵の USB の公式の `minisign` だけで行う（B.6）。**残る危険**: `prepare-release` とふだんの開発は、依存のクレートのビルド スクリプトと proc-macro を同じアカウントで実行する。侵された依存が常駐すれば、数分後につなぐ鍵のファイルと、打ち込むパスワードを盗み、ネットワークが戻った後に送り出せる（FIX-VERIFICATION-16） (b) 専用のオフラインの PC（または毎回きれいな状態から起動する仮想マシンやライブ USB） (c) 普段の開発機に、署名専用の標準ユーザーのアカウントを 1 つ作る。そのアカウントでは cargo も git も実行しない。署名の前に開発用のアカウントから**サインアウト**してから、そのアカウントで署名する（B.5 の手順 7〜10） | **(c)**。アカウントを 1 つ作り、署名のたびにサインアウトとサインインを 1 回ずつ足すだけで、(a) の残る危険のうち、利用者の権限で常駐するものを締め出せる。管理者の権限まで奪われた場合は (b) でなければ防げない |
-| 7 | 従量制の接続でも自動でダウンロードするか | (a) する（数 MB） (b) しない | (a) |
-| 8 | 認証の要るプロキシ（Windows の統合認証）への対応 | (a) Windows の資格情報を自動で送らない。そのプロキシの内側では自動更新が使えず、リリース ページへ案内する (b) プロキシにだけ既定の資格情報を送る（同じネットワークの攻撃者が WPAD でプロキシを名乗ると、利用者の NetNTLM の応答が渡る） | (a)。署名で更新の中身は守られても、資格情報の漏れは守れない（SECURITY-13） |
-| 9 | 秘密鍵を扱う道具 | (a) 公式の `minisign` 0.12 の Windows 版（作者の鍵で確かめ、ハッシュを固定し、鍵と同じ媒体に置く。ISC ライセンスで、同意の操作はない） (b) minisign をソースから自分でビルドする（Zig か CMake と libsodium が要る） (c) 一度だけ、読み合わせたコミットから `xtask` の署名の道具をビルドし、鍵と一緒に保管する | (a)。手間が最も少なく、作者の署名で出どころを確かめられる |
+2026-09-29 に、ユーザーがすべての質問に答えた（右端の列）。設計の本文は決定に合わせてある（J-3 の有効期限 180 日: A.2、A.8、B.3、B.4、B.5、C.6、E.3、F.1、G.7 の 7 と 22、H.1。J-6 の署名の PC: B.5、B.6、G.1、G.7 の 21、L 章）。本文では「J-n の決定」と引く。
 
-- レビュー前の質問 5（immutable releases をいつ有効にするか）は、公開後も「最新」と「プレリリース」の印を変えられると確かめられ、事故の手順（B.5）もできたので、(a) v0.2.0 から、に決めて質問から外した。
+| # | 質問 | 選択肢 | おすすめ | 決定（2026-09-29） |
+|---|---|---|---|---|
+| 1 | ARM64 の PC で x64 版を使っている利用者を、自動更新で ARM64 版に切り替えるか | (a) 切り替えない（今のアーキテクチャのまま） (b) 自動で切り替える (c) 画面で尋ねる | (a)。ARM64 版は実機で試していない（M6 で試した後に見直す） | 決定（2026-09-29）: **(a)** 自動で ARM64 版に切り替えない（C.7、G.7 の 14） |
+| 2 | 更新のとき、ほかの利用者（ユーザーの切り替え）の MKLM が何もせず動いていたら | (a) 終わらせて更新する。その利用者の MKLM は、その利用者が開き直すか、サインアウトしてサインインし直すまで戻らない（ユーザーの切り替えで戻るのは再接続で、自動起動は動かない）。次のサインインで結果と「いったん終了していました」が出る (b) 更新をやめて「別のユーザーの MKLM が開いています。そのユーザーに終了してもらってから更新してください」と出す (c) (a) に加えて、タスク スケジューラーでその利用者のセッションに MKLM を起動し直す（コードが増え、動くか未確認） | (a)。自動起動が既定でオンなので、共有の PC ではほかの利用者の MKLM がほぼいつも動いており、(b) では更新がほとんどできない。キーボードの操作の途中や確認待ちなら、どれでも更新をやめる。**注**（FIX-VERIFICATION-7）: どの選択肢でも、この PC のほかの利用者は更新を期限なしに止め続けられる。MKLM のファイルを開いたままにする、自分の MKLM を何かの途中にしておく（または手を加えていつも `busy` を返させる）、`mklm-cli` を入力待ちのまま置く、などで（G.7 の 16）。半端には入らず、管理者には相手のプロセスが示される | 決定（2026-09-29）: **(a)** 何もしていないほかの利用者の MKLM を `quit-if-idle` で終わらせて更新する（D.8、E.4.1、G.7 の 10）。タスク スケジューラーでの起動し直し（(c)）は作らない（I.11） |
+| 3 | 更新情報の有効期限（凍結に気付くまでの最長の時間でもある） | (a) 400 日（年 1 回のリリースで切れない） (b) 180 日（5 か月ごとのリリースが要る。見張りは期限の 60 日前に知らせる） (c) 2 年 | **(b) に変えた**（RED-TEAM-1）。レビュー第 1 回の後の版は「30 日以上確認できないときのバナーと巻き戻しの警告も凍結に気付かせる」として (a) を勧めたが、誤りだった: 正しく署名された古い更新情報を見せ続けられると、確認は成功し続け、どちらも出ない。凍結を自動で知らせるのは期限だけで、期限の長さがそのまま、隠されたセキュリティの修正に気付くまでの最長の時間になる（B.4 の 4）。期限はインストールの門ではないので、メンテナーがリリースできなかったときの代償は、利用者に出る「期限切れ」の情報の表示（とバナー 30 日に 1 回）だけ。年に 2 回以上リリースできないなら (a) | 決定（2026-09-29）: **(b)** 180 日。`DEFAULT_VALIDITY_DAYS` = 180（H.1）、`prepare-release` の既定も 180 日（B.3）。見張り（`update-canary.yml`）は期限の 60 日前に知らせる（`--min-days-left 60`。G.6）。保守リリースは少なくとも 5 か月に 1 回（B.4 の 3、B.5 の注） |
+| 4 | CLI からインストールできるようにするか | (a) 確認と状態の表示だけ (b) インストールもできる | (a)。スクリプトはインストーラーを直接 `/S` で実行できる | 決定（2026-09-29）: **(a)** CLI は `update --check` と `update --status` だけ（D.14） |
+| 6 | 署名をする PC | (a) 普段の開発機の、普段のアカウント。署名の間はネットワークを切る、F.6 のデバッグ ビルドと開発用の鍵が残っていない、署名は鍵の USB の公式の `minisign` だけで行う（B.6）。**残る危険**: `prepare-release` とふだんの開発は、依存のクレートのビルド スクリプトと proc-macro を同じアカウントで実行する。侵された依存が常駐すれば、数分後につなぐ鍵のファイルと、打ち込むパスワードを盗み、ネットワークが戻った後に送り出せる（FIX-VERIFICATION-16） (b) 専用のオフラインの PC（または毎回きれいな状態から起動する仮想マシンやライブ USB） (c) 普段の開発機に、署名専用の標準ユーザーのアカウントを 1 つ作る。そのアカウントでは cargo も git も実行しない。署名の前に開発用のアカウントから**サインアウト**してから、そのアカウントで署名する（B.5 の手順 7〜10） | **(c)**。アカウントを 1 つ作り、署名のたびにサインアウトとサインインを 1 回ずつ足すだけで、(a) の残る危険のうち、利用者の権限で常駐するものを締め出せる。管理者の権限まで奪われた場合は (b) でなければ防げない | 決定（2026-09-29）: **(a)** 普段の開発機の、普段のアカウントで署名する。署名専用のアカウントは作らない。守る注意: 署名の間はネットワークを切る、F.6 のデバッグ ビルドと開発用の鍵を残さない、鍵に触れるのは公式の `minisign` だけ（B.5、B.6）。**ユーザーは残る危険（侵されたビルドの依存が鍵とパスワードを盗みうること）を受け入れた**（G.7 の 21） |
+| 7 | 従量制の接続でも自動でダウンロードするか | (a) する（数 MB） (b) しない | (a) | 決定（2026-09-29）: **(a)** 従量制の接続でもダウンロードする（E.1、I.9） |
+| 8 | 認証の要るプロキシ（Windows の統合認証）への対応 | (a) Windows の資格情報を自動で送らない。そのプロキシの内側では自動更新が使えず、リリース ページへ案内する (b) プロキシにだけ既定の資格情報を送る（同じネットワークの攻撃者が WPAD でプロキシを名乗ると、利用者の NetNTLM の応答が渡る） | (a)。署名で更新の中身は守られても、資格情報の漏れは守れない（SECURITY-13） | 決定（2026-09-29）: **(a)** プロキシにも Windows の資格情報を送らない（A.7、G.7 の 17） |
+| 9 | 秘密鍵を扱う道具 | (a) 公式の `minisign` 0.12 の Windows 版（作者の鍵で確かめ、ハッシュを固定し、鍵と同じ媒体に置く。ISC ライセンスで、同意の操作はない） (b) minisign をソースから自分でビルドする（Zig か CMake と libsodium が要る） (c) 一度だけ、読み合わせたコミットから `xtask` の署名の道具をビルドし、鍵と一緒に保管する | (a)。手間が最も少なく、作者の署名で出どころを確かめられる | 決定（2026-09-29）: **(a)** 秘密鍵に触れるのは公式の `minisign` 0.12 のバイナリだけ（0.2 の 9、B.1、B.5） |
 
-最初の更新対応版（v0.2.0）の前に、メンテナーが公式の `minisign` を用意し、鍵を作る必要がある（B.5 の準備）。
+- レビュー前の質問 5（immutable releases をいつ有効にするか）は、公開後も「最新」と「プレリリース」の印を変えられると確かめられ、事故の手順（B.5）もできたので、(a) v0.2.0 から、に決めて質問から外した。2026-09-29 にユーザーも確かめた: **immutable releases は v0.2.0 から有効にする**（B.4、B.5 の準備）。
+
+最初の更新対応版（v0.2.0）の前に、メンテナーが公式の `minisign` を用意し、鍵を作る必要がある（B.5 の準備。J-6 の決定 (a) により、普段のアカウントで行う）。
 
 ---
 
@@ -4047,8 +4054,8 @@ JSON の例（形を固定するテストの期待値に使う）:
 - Restart Manager の `RmGetList` が、ふつうに開いたファイルのハンドルの持ち主を返すこと（I.16。RED-TEAM-3）。`windows` 0.62.2 の feature 名 `Win32_System_RemoteDesktop`（`WTSEnumerateProcessesW`）と `Win32_System_RestartManager`。
 - `std::hint::black_box` で参照した `#[used]` の静的な値が、`/OPT:REF` のリンクの後も 3 つの exe に残ること（A.10。ci.yml と `-Profile dev` の陽性の対照が、残らなければ失敗して知らせる）。
 - `apps/build_id.rs` に `anchors.txt` を足したとき、3 つの exe の `MKLMBuildId` が変わること（WP-0 が一度確かめる。G.2）。
-- `C:\Users\Public` の下に開発用のアカウントが作ったフォルダーに、署名専用のアカウントが書け、その作ったファイルを開発用のアカウントが読めること（B.5 の準備では念のため `icacls` で両方に許可を与える）。
-- 署名専用の Windows のアカウントで、BitLocker To Go の USB メモリの鍵を開けたとき、サインアウトした開発用のアカウントのプロセスが残らないこと（ふつうはサインアウトですべて終わる。B.6）。GitHub の下書きのページがアセットの SHA-256 を表示するか（B.5 の手順 8 の任意の照合の手段にならないか。今の手順は手順 6 の表示と比べるだけ）。
+- GitHub の下書きのページがアセットの SHA-256 を表示するか（B.5 の手順 8 の任意の照合の手段にならないか。今の手順は手順 6 の表示と比べるだけ）。
+- （確かめる必要がなくなったもの）署名専用のアカウントにかかわる 2 つ（`C:\Users\Public` の受け渡しのフォルダーの権限、サインアウトした開発用のアカウントのプロセスが残らないこと）は、J-6 の決定 (a)（普段のアカウントで署名する）で不要になった。
 - 引き継ぎの案内の文（約 110 文字）を、ナレーターが 15 秒で読み終えること（E.4。T-UPD-14 で確かめる）。
 - NSIS: `AllowSkipFiles on` の `File` の失敗のサイレントの既定の答え、`Rename` の失敗が `${Errors}` を立てること、`windows-2025` のランナーが build 26100 であること。NSIS の zip（`nsis-3.12.zip`）の SHA-256（WP-H が SourceForge の表示と照らして記録する）。
 - `CARGO_CFG_DEBUG_ASSERTIONS` がビルド スクリプトに、対象のデバッグの表明の設定として渡ること（I.10）。
@@ -4086,7 +4093,7 @@ JSON の例（形を固定するテストの期待値に使う）:
 | SECURITY-8 | minor | 採用 | H2 はほかのどの COM の呼び出しより前に `CoInitializeSecurity`（`RPC_C_IMP_LEVEL_IDENTIFY`、`EOAC_NO_CUSTOM_MARSHAL | EOAC_DISABLE_AAA`）を呼ぶ（D.7 の 1、D.10、H.3 の `init_com_for_runner`）。起動し直しは最後の手順（ロックを放し、ハンドルを閉じ、`LastResult` を書いた後）。レジストリの事実を D.10、I.2、L 章に書き、T-UPD-8 を残した |
 | SECURITY-9 | minor | 採用 | 開発用の経路をすべて `cfg(all(debug_assertions, mklm_update_dev))` にした。cfg は F.3 と F.6 のコマンドだけが渡す。`build.rs` は `CARGO_CFG_DEBUG_ASSERTIONS` で `VS_FF_DEBUG` を決める（Cargo が渡すかは WP-0 が確かめる）。release.yml は `RUSTFLAGS` などの環境変数と `.cargo/config.toml` を検査し、6 つの exe の目印を探す（A.10、G.6）。F.6: 開発用の鍵は `%TEMP%` の外に置いて消す、デバッグ ビルドをアンインストールしてから署名する |
 | SECURITY-10 | minor | 採用 | NSIS の 2 段階の置き換え（`.new` に展開、名前の変更で入れ替え、失敗したら戻す）と、終了コード 26（`FILES_IN_USE`）と 27（`FILE_WRITE`）（D.9.1、D.9.2）。H2 は NSIS の前に同じ条件を確かめ、`NotInstalled(FilesInUse)`（D.8 の 4）。ほかの利用者が更新を遅らせられることを G.7 の 16 と E.6 の文に書いた。**第 2 回で訂正**: 「J 章の質問 2 の説明に書いた」は誤りで、書いていなかった。また「遅らせる」ではなく期限のない妨害で、方法もファイルを開くことだけではない（`busy` を返す GUI、入力待ちの CLI、先回りのパイプの名前）。J 章の質問 2 の注、G.7 の 16、D.8 の 4 を書き直し、管理者に相手のプロセスを示す `holders` を足した（FIX-VERIFICATION-7、RED-TEAM-3） |
-| SECURITY-11 | minor | 一部採用 | 30 日以上確認に成功していない、または期限切れのとき、メイン画面のバナーを 30 日に 1 回（E.3）。自動の確認の `Rollback` も警告として見せる（E.3、E.6）。**採らなかった部分**: 期限を 180 日に短くすることは、メンテナーのリリースの頻度（利用者の負担）に関わるので、設計では決めず J 章の質問 3 で尋ねる（おすすめは 400 日のまま。気付かせる仕組みを 2 つ足したため） |
+| SECURITY-11 | minor | 一部採用 | 30 日以上確認に成功していない、または期限切れのとき、メイン画面のバナーを 30 日に 1 回（E.3）。自動の確認の `Rollback` も警告として見せる（E.3、E.6）。**採らなかった部分**: 期限を 180 日に短くすることは、メンテナーのリリースの頻度（利用者の負担）に関わるので、設計では決めず J 章の質問 3 で尋ねる（おすすめは 400 日のまま。気付かせる仕組みを 2 つ足したため）。**その後**: 第 2 回（RED-TEAM-1）でおすすめを 180 日に変え、2026-09-29 のユーザーの決定（J-3）で 180 日になった |
 | SECURITY-12 | minor | 一部採用 | `prepare-release` は `issued_at` を GitHub の `Date` から決め、手元の時計との差が 5 分を超えるか、公開中の `issued_at` 以下なら拒否し、UTC の日付を大きく表示する（B.3 の 7、8）。クライアントの記録は **`min(issued_at, 受け取った時刻)`** にした。**変えた部分**: 指摘の `now + 2 日` ではなく `now` にした。2 日の余裕があると、誤った日付の更新情報を見てから 2 日以内に出た次の正しい版を、毎日確認するクライアントの多くが永久に拒むため（B.2） |
 | SECURITY-13 | minor | 採用 | `WINHTTP_OPTION_AUTOLOGON_POLICY` を HIGH、`WinHttpSetCredentials` を呼ばない、401 と 407 は失敗（A.7、H.3）。F.3 に 401 / 407（NTLM、Negotiate）で `Authorization` を送らないテスト（**第 2 回で訂正**: 407 のテストはプロキシなしのセッションで、プロキシの認証の経路を通っていなかった。名前付きのプロキシと LOW の対照の試験を足し、L 章を未確認に戻した。FIX-VERIFICATION-4）。G.6 の確認事項。統合認証のプロキシの内側で自動更新が使えなくなるので、J 章の質問 8 で確かめる |
 | SECURITY-14 | minor | 採用 | 更新のページと UAC の説明の画面に「詳細を表示」でプログラムの場所を確かめる手順と、「MKLM が許可を求めるのは［今すぐ更新］を押した直後だけ」を足した（E.2、E.4）。`install-guide.ja.md` にも書く（G.3） |
@@ -4145,7 +4152,7 @@ JSON の例（形を固定するテストの期待値に使う）:
 | FIX-VERIFICATION-13 | minor | 採用 | `HANDOFF_OVERLAY_MIN`（5 秒）を `HANDOFF_OVERLAY_MAX`（15 秒）に替えた。［OK］でいつでも閉じ、押されなければ 15 秒で閉じる。`CALLER_EXIT_WAIT`（30 秒）との関係を F.4 のテストで固定する。15 秒にしたのは、指摘の 10 秒では日本語の案内（約 110 文字）の読み上げが終わらない見込みのため。同じ内容は UAC の前のページにもある（E.4、E.7、H.1、H.4、D.1） |
 | FIX-VERIFICATION-14 | minor | 採用（両方の案を組み合わせた） | 早い終了（6）の対象を、書き込みのコマンドと `update --check` に絞った。読み取りのコマンド（`list`、`status`、`global status`、`journal`、`update --status`）は 1 秒ほどで終わり更新を止めないので、`main.rs` の 0 / 1 / 2 の約束を保つ。`update --check` はネットワークで長く動きうるので 6 を残し、D.14 の表と `install-guide.ja.md` に載せる（G.3）。F.4 のテスト |
 | FIX-VERIFICATION-15 | minor | 採用 | (a) `apps/build_id.rs` に `HASHED_FILES`（`crates/mklm-update/trust/anchors.txt`）を足し、ハッシュと `watched_paths` に入れる（G.2）。`build_id.rs` にテストがないので、WP-0 が手で一度確かめる。(b) release.yml の `build` のジョブの checkout に `fetch-depth: 0`。`check-keys` は浅いリポジトリ、タグなし、読めないタグで、飛ばさずに失敗する（B.3、G.6、F.1） |
-| FIX-VERIFICATION-16 | minor | 採用 | B.6 に「残る危険」（開発のコードが鍵とパスワードを盗みうる）と、安い順の対策（署名専用のアカウント、専用の PC かきれいな起動、`prepare-release` を別の PC で）を書いた。J 章の質問 6 に (c) 署名専用の Windows のアカウントを足し、おすすめにした。B.5 の準備と手順 6〜11、B.6 の点検を (c) の流れにした（受け渡しは `C:\Users\Public\mklm-sign\`）。加えて、書き直しの中で見つけた穴を塞いだ: (c) で開発用のアカウントが書いた `SIGN-OFFLINE.txt` を貼ると、侵されていれば鍵をつないだ署名のセッションで任意のコマンドを実行させられるので、(c) では固定の形のコマンドを打ち、値だけを写す（B.5 の手順 9、B.6 の点検）。そのため鍵の点検の trusted comment を固定の `mklm-key-drill v1` にした（署名が新しい乱数のファイルにかかるので、nonce を写す必要はない）。G.7 に 21 を足した |
+| FIX-VERIFICATION-16 | minor | 採用 | B.6 に「残る危険」（開発のコードが鍵とパスワードを盗みうる）と、安い順の対策（署名専用のアカウント、専用の PC かきれいな起動、`prepare-release` を別の PC で）を書いた。J 章の質問 6 に (c) 署名専用の Windows のアカウントを足し、おすすめにした。B.5 の準備と手順 6〜11、B.6 の点検を (c) の流れにした（受け渡しは `C:\Users\Public\mklm-sign\`）。加えて、書き直しの中で見つけた穴を塞いだ: (c) で開発用のアカウントが書いた `SIGN-OFFLINE.txt` を貼ると、侵されていれば鍵をつないだ署名のセッションで任意のコマンドを実行させられるので、(c) では固定の形のコマンドを打ち、値だけを写す（B.5 の手順 9、B.6 の点検）。そのため鍵の点検の trusted comment を固定の `mklm-key-drill v1` にした（署名が新しい乱数のファイルにかかるので、nonce を写す必要はない）。G.7 に 21 を足した。**その後**: 2026-09-29 のユーザーの決定（J-6）は (a)（普段のアカウントで署名）で、B.5、B.6、G.1 から (c) の流れを外し、G.7 の 21 に受け入れた残る危険を書いた |
 | FIX-VERIFICATION-17 | minor | 採用 | G.1 で「公式の `minisign` の用意と `verify-signer`」を F.6 の前に、鍵の生成を後に分けた（B.5 の準備にも書いた）。B.3 に `prepare-release --dev` の文法（`--dist`、`--dev-pub`、`--minisign`、`--only-arch`、`--issued-at`、`--out`、`SIGN-OFFLINE.txt` の 1 行、拒否するもの）と `serve-releases` を書き、F.6 の手順 1、5、6 と後片付けを合わせた。F.1 にテスト |
 | RED-TEAM-1 | major | 一部採用 | B.4 の 4 を書き直した: 正しく署名された古い更新情報を見せ続ける凍結では、確認が成功し続け、30 日のバナーも巻き戻しの警告も出ない。自動の信号は `expires` だけ（C.6、E.3、G.7 の 22、I.17）。人の手がかりとして、「最新です」の行と `update --check --json` に更新情報の日付（`issued_at`）を出す（E.2、D.14）。見張りに `verify --newest-published`（配られている版が公開済みの最も新しい安定版より古ければ失敗）を足した（B.3、G.6、F.8）。J 章の質問 3 のおすすめを 180 日に変えた（期限は門ではないので、短くする代償は情報の表示だけ）。**採らなかった部分**: 期限とは別の「更新情報の古さ」の警告（たとえば 90 日）。期限をもう 1 つ短く持つのと同じで、メンテナーがその間隔でリリースしなければ全員に誤報が出るので、期限そのものを短くする方を選んだ。オンラインの鍵による新しさの保証（TUF の timestamp）は、秘密鍵をオフラインだけに置く決定の外にあるので、I.17 に残した |
 | RED-TEAM-2 | minor | 採用（主張を取り下げた） | D.13 の［インストーラーを実行］の照合を「壊れたファイルを見つけるためだけで、安全の保証ではない」と書き直した。閉じる案（helper が検証して実行する、管理者だけの場所に写す）は、ファイルの版がそろっていないときは helper を起動できず（ビルド ID の不一致）、GUI 自身がその利用者のプロセスなので、どれもその利用者に対しては何も守れないため採らなかった。画面と読み上げの文で「検証済み」と言わない。ほかの利用者の PC で管理者として承認するときの注意を `recovery.md` と `install-guide.ja.md` に書く（D.13、E.7、H.3、G.3、G.4）。標準ユーザーはこの経路がなくても同じ見た目の UAC を出せるので、新しい昇格の道ではない |
