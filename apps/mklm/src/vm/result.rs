@@ -924,7 +924,7 @@ mod tests {
             ja.snapshot_text(),
             "title: ほかの操作が終わっていません\n\
              tone: Warning\n\
-             message: PC の再起動を待っている変更があります（Keychron Receiver を JIS）。再起動するまで、ほかの変更はできません。\n\
+             message: PC の再起動を待っている変更があります（Keychron Receiver を JIS に）。再起動するまで、ほかの変更はできません。\n\
              next: 再起動の画面へ\n"
         );
         plain_japanese(&ja.snapshot_text());

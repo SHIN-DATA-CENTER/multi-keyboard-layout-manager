@@ -17,6 +17,10 @@
 //! an answer the progress dialog says what MKLM waits for, and a late countdown tick does not
 //! bring the question back. The result waits for the read that follows the session
 //! ([`Effect::ReadForResult`]) before it says what the keyboards do now.
+//!
+//! The pages about journal entries (design m3 B.8 to B.12; WP-U4, WP-U5) — the restart, the check
+//! after it, conflicts, the history and the recovery page — are in [`journal_pages`]; their
+//! requests go through the same session flow.
 
 use std::time::Instant;
 
@@ -37,6 +41,11 @@ use crate::settings::{PhysicalKind, PhysicalLayout, PhysicalSource, Settings};
 use crate::vm::change::{ApplyMethod, DraftPlan, InputActivity, MethodDefault};
 use crate::vm::keytest::{self, Expected, KeyContext, KeyTest};
 use crate::vm::session::Stage;
+
+/// The restart, post-reboot, conflict, history and recovery pages (WP-U4, WP-U5).
+pub mod journal_pages;
+
+pub use journal_pages::{JournalEffect, JournalMsg, JournalPages};
 
 /// The page in the main area (matches `Screen` in ui/structs.slint). Twelve pages: the change
 /// page covers assignment, detection and the apply method (review U14).
@@ -302,6 +311,12 @@ pub struct AppState {
     pub visible: bool,
     /// Quitting once the running session ends (design m3 F.5).
     pub quit_pending: bool,
+    /// What the restart, post-reboot, conflict, history and recovery pages keep.
+    pub journal_pages: JournalPages,
+    /// When the message being handled arrived: set by `app.rs` right before `update`, so that a
+    /// page opened by it can preset what depends on recent input (the recovery page's apply
+    /// method, design m3 B.5). `None` (tests) counts as no recent input.
+    pub now: Option<Instant>,
 }
 
 /// Something that happened (a user action, a worker's answer, a watcher).
@@ -355,6 +370,8 @@ pub enum AppMsg {
     UacGo,
     /// "キャンセル" on the change page (to the main screen) or on the UAC explanation (back).
     CancelChange,
+    /// The restart, post-reboot, conflict, history and recovery pages.
+    Journal(JournalMsg),
     /// Start a helper session for `request` (the change page's button, recovery, undo …).
     StartRequest {
         request: Request,
@@ -437,6 +454,8 @@ pub enum Effect {
     RunOnceRule,
     /// Put text on the clipboard ("詳細をコピー": English diagnostics only, never keys).
     CopyText(String),
+    /// Restart the PC, keep the window on top, open the recovery files folder.
+    Journal(JournalEffect),
     ShowWindow,
     HideWindow,
     Quit,
@@ -463,7 +482,8 @@ fn current_session(state: &AppState, session: SessionId) -> bool {
     state.session.id() == Some(session)
 }
 
-/// The navigation rail is off while a change, a check or a session runs (design m3 B.0).
+/// The navigation rail is off while the wizard, a change, a helper session or the post-reboot
+/// check runs (design m3 B.0): each has its own way back ("キャンセル", "後で決める").
 pub fn navigation_enabled(state: &AppState) -> bool {
     state.session == SessionPhase::Idle
         && state.overlay == OverlayKind::None
@@ -503,15 +523,29 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             if !matches!(page, Page::Change | Page::UacNotice) {
                 state.draft = None;
             }
+            journal_pages::entered(state, page);
             let mut effects = vec![Effect::Render];
-            if page == Page::Main || page == Page::Journal {
+            // Pages that show the journal read it again, so that a decision is made on what the
+            // journal says now.
+            if matches!(
+                page,
+                Page::Main
+                    | Page::Journal
+                    | Page::Restart
+                    | Page::PostReboot
+                    | Page::Conflict
+                    | Page::Recovery
+            ) {
                 effects.insert(0, Effect::Read);
             }
             effects
         }
         AppMsg::SystemRead(read) => {
             state.read = Some(*read);
-            vec![Effect::Render]
+            let mut effects = vec![Effect::Render];
+            // The post-reboot check and the recovery page open by themselves (design m3 B.18).
+            effects.extend(journal_pages::after_read(state));
+            effects
         }
         AppMsg::ResultReadArrived => {
             if !state.result_read_pending {
@@ -520,6 +554,7 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             state.result_read_pending = false;
             vec![Effect::Render]
         }
+        AppMsg::Journal(msg) => journal_pages::handle(state, msg),
         AppMsg::ActiveLayout(hkl) if hkl != state.active_hkl => {
             state.active_hkl = hkl;
             vec![Effect::Render]
@@ -759,6 +794,7 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             }
             state.overlay = OverlayKind::None;
             state.blocked = None;
+            journal_pages::result_closed(state);
             if matches!(state.page, Page::Change | Page::UacNotice) {
                 state.page = Page::Main;
                 state.draft = None;
@@ -1132,6 +1168,8 @@ fn session_ended(state: &mut AppState, outcome: SessionOutcome) -> Vec<Effect> {
             mklm_client::session::SessionEnd::Abandoned { .. }
         )
     );
+    // A conflict resolution the helper refused for INV-PS2 is explained on its page.
+    journal_pages::session_ended(state, &outcome.report);
     state.outcome = Some(outcome);
     // The RunOnce rule already ran on the worker (design m3 A.2.3).
     let mut effects = if abandoned {
@@ -1189,8 +1227,11 @@ fn key_test_pressed(state: &mut AppState, text: &str, shift: bool) -> Vec<Effect
         .last_key
         .as_ref()
         .map(|(id, _)| display_name(state, id));
-    // WP-U4: the post-reboot check passes its row's expectation the same way.
-    let expectation = session_view(state).and_then(keytest::session_expectation);
+    // The open question's expectation; on the post-reboot check, the row of the keyboard that
+    // typed (review U2).
+    let expectation = session_view(state)
+        .and_then(keytest::session_expectation)
+        .or_else(|| journal_pages::key_expectation(state));
     let expected = expectation.as_ref().map(|(targets, name, table)| Expected {
         targets,
         name,
@@ -1205,13 +1246,16 @@ fn key_test_pressed(state: &mut AppState, text: &str, shift: bool) -> Vec<Effect
         active_hkl: state.active_hkl,
         expected,
     };
-    match keytest::key_pressed(text, shift, &context, lang) {
-        Some(test) => {
-            state.key_test = test;
-            vec![Effect::Render]
+    let test = keytest::key_pressed(text, shift, &context, lang);
+    // The post-reboot check's "typed" column.
+    let mut effects = journal_pages::key_typed(state, text, shift);
+    if let Some(test) = test {
+        state.key_test = test;
+        if !effects.contains(&Effect::Render) {
+            effects.push(Effect::Render);
         }
-        None => Vec::new(),
     }
+    effects
 }
 
 /// A Raw Input key press: remember it (seen, recent activity, physical hints) and render only
@@ -2087,7 +2131,7 @@ mod tests {
         assert!(
             shown
                 .message
-                .starts_with("PC の再起動を待っている変更があります（Keychron Receiver を US）")
+                .starts_with("PC の再起動を待っている変更があります（Keychron Receiver を US に）")
         );
         // The next step leaves the change: the restart page.
         let effects = update(&mut state, AppMsg::ResultNextStep);

@@ -216,6 +216,17 @@ export struct CheckRowVm {
     details: string,
 }
 
+// One value of a keyboard in conflict, in the folded details (design m3 B.10): its numbers and a
+// choice that overrides the keyboard's option for this value only.
+export struct ConflictValueVm {
+    // The record's index in the operation (what the callback passes back).
+    record: int,
+    // "…\KeyboardTypeOverride: 今の値 8 / MKLM が最後に書いた値 7 / …".
+    line: string,
+    // Index into `conflict-value-options` (0 = as chosen for the keyboard).
+    selected: int,
+}
+
 // One keyboard of an operation in conflict (design m2 D.8, m3 B.10; review U6).
 export struct ConflictKeyboardVm {
     name: string,
@@ -224,13 +235,20 @@ export struct ConflictKeyboardVm {
     // By layout name, "（おすすめ）" on the recommended one.
     options: [string],
     selected: int,
-    // The per-value numbers, folded under "詳細".
-    details: string,
+    // A value MKLM could not write: what to do (the error is in the values' lines).
+    write-error: string,
+    // A stopped restore to before MKLM: what the keyboard had then ("MKLM 導入前: US"); empty
+    // for an operation in conflict (then `options` has the choices).
+    baseline: string,
+    // The per-value numbers and choices, folded under "詳細".
+    values: [ConflictValueVm],
 }
 
 // One journal entry in the history (design m3 B.11): local time (design m3 G.1).
 export struct JournalRowVm {
     op: string,
+    // The full operation ID (what "元に戻す…" passes back).
+    op-id: string,
     when: string,
     what: string,
     state: string,
@@ -243,9 +261,37 @@ export struct JournalRowVm {
 
 // One entry on the recovery page (design m3 B.12; review U9).
 export struct RecoveryItemVm {
+    // The full operation ID (what the item's buttons pass back).
+    op-id: string,
     operation: string,
     outcome: string,
     tone: Tone,
+    // Waits for keep or revert: "このままにする" and "元に戻す…".
+    can-keep: bool,
+    can-revert: bool,
+}
+
+// The recovery page and its undo and revert previews (design m3 B.12): all but the items.
+export struct RecoveryPageVm {
+    title: string,
+    // "回復する（おすすめ）" / "すべて元に戻す" / "元に戻す".
+    primary-text: string,
+    can-recover: bool,
+    // Some entry waits for keep or revert: "確認待ちの変更をすべて元に戻す…".
+    can-undo: bool,
+    // "後で" / "キャンセル".
+    dismiss-text: string,
+    // What "後で" costs (review U9).
+    later-note: string,
+    // The line about the Windows prompt that follows (design m3 B.5).
+    uac-line: string,
+    empty-note: string,
+    // The two ways a HID keyboard takes the values back (design m3 B.5).
+    method-visible: bool,
+    live-text: string,
+    live-detail: string,
+    later-text: string,
+    later-detail: string,
 }
 
 // One connected keyboard on the wizard's keyboards step (plan 3.1, design m3 B.1; review U3).

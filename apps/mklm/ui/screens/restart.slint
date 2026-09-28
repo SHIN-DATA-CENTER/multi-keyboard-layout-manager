@@ -14,8 +14,21 @@ export component RestartScreen inherits VerticalLayout {
     in property <bool> ready;
     // Some keyboard types differently after the restart: the password warning (review U15 d).
     in property <bool> layout-changes;
+    // A change that still waits can be taken back before the restart (`Request::Undo`).
+    in property <bool> can-undo;
+    // Nothing waits for a restart: why the page has no button to press.
+    in property <string> empty-note;
+    // The restart was asked for; "restart now" stays off meanwhile.
+    in property <bool> restarting;
+    in property <string> restarting-text;
+    // The restart failed: what to do, and the diagnostics.
+    in property <string> error;
+    in property <string> error-details;
+    // The check after the restart could not be registered to open by itself.
+    in property <string> run-once-note;
     in-out property <bool> acknowledged: false;
-    callback restart-now();
+    // Passes the acknowledgement, which the state checks again.
+    callback restart-now(bool);
     callback later();
     callback undo();
     callback open-settings-page(int);
@@ -28,20 +41,23 @@ export component RestartScreen inherits VerticalLayout {
     }
 
     DialogBody {
+        if root.empty-note != "": Banner {
+            tone: Tone.info;
+            text: root.empty-note;
+        }
         for reason in root.reasons: Body {
             text: "・" + reason;
         }
 
-        Banner {
+        if root.ready: Banner {
             tone: Tone.warning;
             text: @tr("If you cannot type at the sign-in screen: use the on-screen keyboard (the accessibility button at the bottom right), sign in with your PIN or fingerprint, or plug in another keyboard.");
         }
-
-        if root.layout-changes: Banner {
+        if root.ready && root.layout-changes: Banner {
             tone: Tone.warning;
             text: @tr("If your password contains symbols: when the layout changes, the same keys type other symbols. Sign in with a PIN (digits), or set up a PIN before the restart.");
         }
-        if root.layout-changes: HorizontalLayout {
+        if root.ready && root.layout-changes: HorizontalLayout {
             alignment: start;
             Button {
                 text: @tr("Open the sign-in options");
@@ -50,46 +66,60 @@ export component RestartScreen inherits VerticalLayout {
                 }
             }
         }
-        CheckBox {
+        if root.ready: CheckBox {
             text: @tr("I know how to sign in if a keyboard types differently");
             checked <=> root.acknowledged;
         }
-
-        Caption {
+        if root.ready: Caption {
             text: @tr("Save your open files before you choose Restart now.");
         }
-
-        Caption {
+        if root.ready: Caption {
             text: @tr("Until the PC restarts, no keyboard's layout can be changed.");
+        }
+        if root.run-once-note != "": Banner {
+            tone: Tone.warning;
+            text: root.run-once-note;
+        }
+        if root.error != "": Banner {
+            tone: Tone.danger;
+            text: root.error;
+            accessible-live-region: assertive;
+        }
+        if root.error-details != "": Caption {
+            text: root.error-details;
+        }
+        if root.restarting: Body {
+            text: root.restarting-text;
+            accessible-live-region: polite;
         }
     }
 
     DialogButtons {
         alignment: stretch;
-        Button {
+        if root.can-undo: Button {
             text: @tr("Undo the change…");
             clicked => {
                 root.undo();
             }
         }
-
         Rectangle {
             horizontal-stretch: 1;
         }
 
         Button {
             text: @tr("Later");
+            enabled: !root.restarting;
             clicked => {
                 root.later();
             }
         }
 
-        Button {
+        if root.ready: Button {
             text: @tr("Restart now");
             primary: true;
-            enabled: root.ready && root.acknowledged;
+            enabled: root.acknowledged && !root.restarting;
             clicked => {
-                root.restart-now();
+                root.restart-now(root.acknowledged);
             }
         }
     }
@@ -137,6 +167,14 @@ export component PostRebootScreen inherits VerticalLayout {
     in property <string> keep-warning;
     // "元に戻す", or "元に戻す（もう一度 PC の再起動が必要）" (review U15 c).
     in property <string> revert-text;
+    // Not before the restart (design m3 B.9).
+    in property <bool> can-keep;
+    // The line about the Windows prompt that keep and revert bring up (design m3 B.5).
+    in property <string> uac-line;
+    // Nothing waits for the check: the page only says so.
+    in property <string> empty-note;
+    // The check could not be registered again for the next sign-in.
+    in property <string> run-once-note;
     in property <KeyTestVm> key-test;
     in-out property <bool> show-details: false;
     callback key-pressed(string, bool);
@@ -152,11 +190,14 @@ export component PostRebootScreen inherits VerticalLayout {
     }
 
     DialogBody {
+        if root.empty-note != "": Body {
+            text: root.empty-note;
+        }
         if root.not-restarted: Banner {
             tone: Tone.warning;
             text: @tr("Not in effect yet: the PC has not restarted since the change. Restart it with Restart, not Shut down.");
         }
-        HorizontalLayout {
+        if root.empty-note == "": HorizontalLayout {
             spacing: 8px;
             Caption {
                 text: @tr("Keyboard");
@@ -186,51 +227,56 @@ export component PostRebootScreen inherits VerticalLayout {
         if root.migration-note != "": Caption {
             text: root.migration-note;
         }
-        KeyTestArea {
+        if root.empty-note == "": KeyTestArea {
             vm: root.key-test;
             key-pressed(text, shift) => {
                 root.key-pressed(text, shift);
             }
         }
-
         if root.keep-warning != "": Banner {
             tone: Tone.danger;
             text: root.keep-warning;
+            accessible-live-region: polite;
         }
-        CheckBox {
+        if root.empty-note == "": CheckBox {
             text: @tr("Show the technical details");
             checked <=> root.show-details;
         }
-
         if root.show-details: VerticalLayout {
             for row in root.rows: Caption {
                 text: row.name + ": " + row.details;
             }
         }
-        Caption {
+        if root.run-once-note != "": Banner {
+            tone: Tone.warning;
+            text: root.run-once-note;
+        }
+        if root.empty-note == "": Caption {
             text: @tr("Until you decide, no keyboard's layout can be changed.");
+        }
+        if root.empty-note == "" && root.uac-line != "": Caption {
+            text: root.uac-line;
         }
     }
 
     DialogButtons {
         Button {
-            text: @tr("Decide later");
+            text: root.empty-note != "" ? @tr("Close") : @tr("Decide later");
             clicked => {
                 root.later();
             }
         }
 
-        Button {
+        if root.empty-note == "": Button {
             text: root.revert-text != "" ? root.revert-text : @tr("Revert");
             clicked => {
                 root.revert();
             }
         }
-
-        Button {
+        if root.empty-note == "": Button {
             text: @tr("Keep");
             primary: true;
-            enabled: !root.not-restarted;
+            enabled: root.can-keep;
             clicked => {
                 root.keep();
             }

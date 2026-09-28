@@ -14,6 +14,8 @@ pub mod restart;
 pub mod result;
 pub mod session;
 pub mod status;
+#[cfg(test)]
+pub(crate) mod test_journal;
 pub mod wizard;
 
 /// Colour role of a badge, banner or state (matches `Tone` in ui/structs.slint).

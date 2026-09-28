@@ -94,6 +94,9 @@ msgstr "履歴"
 msgid "How the change takes effect"
 msgstr "切り替え方"
 
+msgid "How the keyboard switches back"
+msgstr "元の配列への戻し方"
+
 msgid "I know how to sign in if a keyboard types differently"
 msgstr "キーボードの配列が変わってもサインインする方法を確認しました"
 
@@ -166,9 +169,6 @@ msgstr "MKLM はタスク バー右端の「^」（隠れているインジケ�
 msgid "MKLM keeps running on the taskbar"
 msgstr "MKLM はタスク バーで動き続けます"
 
-msgid "MKLM needs your attention"
-msgstr "確認が必要なことがあります"
-
 msgid "MKLM's administrator program (mklm-helper.exe) stopped before it finished. To finish or undo the change now, Windows asks for administrator permission once more (the publisher shows as \"Unknown\")."
 msgstr "MKLM の管理用プログラム（mklm-helper.exe）が途中で止まりました。今すぐ回復するには、Windows がもう一度管理者の許可を求めます（発行元は「不明」と表示されます）。"
 
@@ -240,9 +240,6 @@ msgstr "MKLM を終了"
 
 msgid "Quit and decide later"
 msgstr "終了して後で決める"
-
-msgid "Recover (recommended)"
-msgstr "回復する（おすすめ）"
 
 msgid "Refresh"
 msgstr "最新の情報に更新"
@@ -358,9 +355,6 @@ msgstr "再起動するまで、ほかのキーボードの配列も変更でき
 msgid "Until you decide, no keyboard's layout can be changed."
 msgstr "決めるまで、ほかのキーボードの配列も変更できません。"
 
-msgid "Until you recover, no keyboard's layout can be changed."
-msgstr "回復するまで、キーボードの配列は変更できません。"
-
 msgid "User Account Control"
 msgstr "ユーザー アカウント制御"
 
@@ -369,6 +363,12 @@ msgstr "確認済みの発行元: 不明"
 
 msgid "What the Windows prompt looks like"
 msgstr "Windows の確認画面の例"
+
+msgid "What this value becomes"
+msgstr "この値をどうするか"
+
+msgid "What to do with the values changed outside MKLM"
+msgstr "MKLM 以外が変えた値をどうするか"
 
 msgid "What {} becomes"
 msgstr "{} をどうするか"

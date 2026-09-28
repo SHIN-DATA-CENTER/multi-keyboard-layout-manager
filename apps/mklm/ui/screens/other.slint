@@ -1,22 +1,43 @@
 // The remaining pages (design m3 B.10 to B.15): conflict resolution, history, the recovery
-// prompt, the IME guide, settings and About.
+// prompt (with its undo and revert previews), the IME guide, settings and About.
 
 import { AboutSlint, Button, CheckBox, ComboBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
-import { ConflictKeyboardVm, JournalRowVm, RecoveryItemVm, Tone } from "../structs.slint";
 import {
-    Banner, Body, Caption, DialogBody, DialogButtons, PageHeader, StubNotice,
+    ChoiceVm, ConflictKeyboardVm, JournalRowVm, RecoveryItemVm, RecoveryPageVm, Tone,
+} from "../structs.slint";
+import {
+    Banner, Body, Caption, DialogBody, DialogButtons, PageHeader, RadioList, StubNotice,
 } from "../widgets.slint";
 
 // Decide what each keyboard of an operation in conflict becomes (design m2 D.8; review U6): one
-// row per keyboard, options by layout name, the recommended one marked; the per-value numbers are
-// folded under "詳細".
+// row per keyboard, options by layout name, the recommended one marked; the per-value numbers and
+// a per-value override are folded under "詳細". A restore to before MKLM that stopped at values
+// changed outside MKLM uses the same page with one choice for the whole restore (leave those
+// values, or put them back too) and no per-value override.
 export component ConflictScreen inherits VerticalLayout {
     in property <string> operation;
     in property <[ConflictKeyboardVm]> keyboards;
+    // The choices of a value in the details (index 0 follows the keyboard's option); empty for a
+    // stopped restore.
+    in property <[string]> value-options;
     in property <string> error;
+    // The line about the Windows prompt that follows (design m3 B.5).
+    in property <string> uac-line;
+    // No entry in conflict: the page only says so.
+    in property <string> empty-note;
+    // A stopped restore: what happened, and the two ways to send it again.
+    in property <string> restore-note;
+    in property <[ChoiceVm]> restore-choices;
+    in-out property <int> restore-selected: -1;
+    in property <bool> can-resolve;
+    in property <bool> can-undo;
     in-out property <bool> show-details: false;
+    // (keyboard, option)
     callback choice(int, int);
+    // (record, option)
+    callback value-choice(int, int);
+    callback restore-choice(int);
     callback resolve();
     callback undo();
     callback cancel();
@@ -29,9 +50,17 @@ export component ConflictScreen inherits VerticalLayout {
     }
 
     DialogBody {
+        if root.empty-note != "": Body {
+            text: root.empty-note;
+        }
+        if root.restore-note != "": Banner {
+            text: root.restore-note;
+            tone: Tone.warning;
+        }
         if root.error != "": Banner {
             text: root.error;
             tone: Tone.danger;
+            accessible-live-region: assertive;
         }
         for keyboard[index] in root.keyboards: VerticalLayout {
             spacing: 2px;
@@ -44,7 +73,10 @@ export component ConflictScreen inherits VerticalLayout {
                 text: keyboard.now;
             }
 
-            ComboBox {
+            if keyboard.baseline != "": Caption {
+                text: keyboard.baseline;
+            }
+            if keyboard.options.length > 0: ComboBox {
                 model: keyboard.options;
                 current-index: keyboard.selected;
                 accessible-label: @tr("What {} becomes", keyboard.name);
@@ -52,26 +84,54 @@ export component ConflictScreen inherits VerticalLayout {
                     root.choice(index, self.current-index);
                 }
             }
+            if keyboard.write-error != "": Banner {
+                text: keyboard.write-error;
+                tone: Tone.warning;
+            }
+            if root.show-details: VerticalLayout {
+                spacing: 2px;
+                for value in keyboard.values: VerticalLayout {
+                    spacing: 2px;
+                    Caption {
+                        text: value.line;
+                    }
 
-            if root.show-details: Caption {
-                text: keyboard.details;
+                    if root.value-options.length > 0: ComboBox {
+                        model: root.value-options;
+                        current-index: value.selected;
+                        accessible-label: @tr("What this value becomes");
+                        selected => {
+                            root.value-choice(value.record, self.current-index);
+                        }
+                    }
+                }
             }
         }
-        CheckBox {
+        if root.restore-choices.length > 0: RadioList {
+            label: @tr("What to do with the values changed outside MKLM");
+            choices: root.restore-choices;
+            selected <=> root.restore-selected;
+            chosen(index) => {
+                root.restore-choice(index);
+            }
+        }
+        if root.keyboards.length > 0: CheckBox {
             text: @tr("Show the details");
             checked <=> root.show-details;
+        }
+        if root.can-resolve && root.uac-line != "": Caption {
+            text: root.uac-line;
         }
     }
 
     DialogButtons {
         alignment: stretch;
-        Button {
+        if root.can-undo: Button {
             text: @tr("Undo every change waiting for you…");
             clicked => {
                 root.undo();
             }
         }
-
         Rectangle {
             horizontal-stretch: 1;
         }
@@ -83,7 +143,7 @@ export component ConflictScreen inherits VerticalLayout {
             }
         }
 
-        Button {
+        if root.can-resolve: Button {
             text: @tr("Apply the choices");
             primary: true;
             clicked => {
@@ -97,6 +157,12 @@ export component ConflictScreen inherits VerticalLayout {
 export component JournalScreen inherits VerticalLayout {
     in property <[JournalRowVm]> rows;
     in property <string> empty-text;
+    // Entries of a newer MKLM: update first (design m2 C.10).
+    in property <string> notice;
+    // Why no revert is offered now (an interrupted or busy operation).
+    in property <string> blocked-note;
+    // The recovery files folder could not be opened.
+    in property <string> folder-error;
     callback revert(string);
     callback open-recovery-folder();
     padding: 16px;
@@ -106,8 +172,16 @@ export component JournalScreen inherits VerticalLayout {
         title: @tr("History");
     }
 
-    if root.rows.length == 0: Caption {
+    if root.notice != "": Banner {
+        text: root.notice;
+        tone: Tone.danger;
+    }
+    if root.empty-text != "": Caption {
         text: root.empty-text;
+    }
+    if root.blocked-note != "": Banner {
+        text: root.blocked-note;
+        tone: Tone.info;
     }
     ScrollView {
         vertical-stretch: 1;
@@ -138,13 +212,17 @@ export component JournalScreen inherits VerticalLayout {
                     text: @tr("Revert…");
                     accessible-label: row.revert-label;
                     clicked => {
-                        root.revert(row.op);
+                        root.revert(row.op-id);
                     }
                 }
             }
         }
     }
 
+    if root.folder-error != "": Banner {
+        text: root.folder-error;
+        tone: Tone.warning;
+    }
     HorizontalLayout {
         alignment: start;
         Button {
@@ -156,23 +234,34 @@ export component JournalScreen inherits VerticalLayout {
     }
 }
 
-// What the journal needs at start-up (design m2 D.7, m3 B.12; review U9): each entry with what
-// recovering will do to it; one primary button.
+// What the journal needs (design m2 D.7, m3 B.12; review U9): each entry with what recovering
+// will do to it; one primary button. The same page previews "undo every change waiting for you"
+// and the history's revert of one operation, with the choice of how a HID keyboard switches back
+// (design m3 B.5).
 export component RecoveryScreen inherits VerticalLayout {
+    in property <RecoveryPageVm> page;
     in property <[RecoveryItemVm]> items;
-    in property <bool> can-recover;
-    in property <bool> can-undo;
+    // 0 = switch back now, 1 = when replugged or at the restart (the state's choice).
+    in-out property <int> method: 1;
+    callback choose-method(int);
+    // The primary button (the method is the state's).
     callback recover();
     callback undo();
+    // "このままにする" / "元に戻す…" of an entry that waits for the user (operation ID).
+    callback keep(string);
+    callback revert(string);
     callback later();
     padding: 16px;
     spacing: 12px;
 
     PageHeader {
-        title: @tr("MKLM needs your attention");
+        title: root.page.title;
     }
 
     DialogBody {
+        if root.page.empty-note != "": Body {
+            text: root.page.empty-note;
+        }
         for item in root.items: VerticalLayout {
             spacing: 2px;
             Body {
@@ -184,28 +273,59 @@ export component RecoveryScreen inherits VerticalLayout {
                 text: item.outcome;
                 tone: item.tone;
             }
+
+            if item.can-keep || item.can-revert: HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                if item.can-keep: Button {
+                    text: @tr("Keep");
+                    clicked => {
+                        root.keep(item.op-id);
+                    }
+                }
+                if item.can-revert: Button {
+                    text: @tr("Revert…");
+                    clicked => {
+                        root.revert(item.op-id);
+                    }
+                }
+            }
         }
-        Caption {
-            text: @tr("Until you recover, no keyboard's layout can be changed.");
+        if root.page.method-visible: RadioList {
+            label: @tr("How the keyboard switches back");
+            choices: [
+                { text: root.page.live-text, detail: root.page.live-detail, enabled: true },
+                { text: root.page.later-text, detail: root.page.later-detail, enabled: true },
+            ];
+            selected <=> root.method;
+            chosen(index) => {
+                root.choose-method(index);
+            }
+        }
+        if root.page.later-note != "": Caption {
+            text: root.page.later-note;
+        }
+        if root.page.uac-line != "": Caption {
+            text: root.page.uac-line;
         }
     }
 
     DialogButtons {
         Button {
-            text: @tr("Later");
+            text: root.page.dismiss-text;
             clicked => {
                 root.later();
             }
         }
 
-        if root.can-undo: Button {
+        if root.page.can-undo: Button {
             text: @tr("Undo every change waiting for you…");
             clicked => {
                 root.undo();
             }
         }
-        if root.can-recover: Button {
-            text: @tr("Recover (recommended)");
+        if root.page.can-recover: Button {
+            text: root.page.primary-text;
             primary: true;
             clicked => {
                 root.recover();

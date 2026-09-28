@@ -7,7 +7,7 @@ import { Theme } from "theme.slint";
 import {
     BadgeVm, ChangeVm, ChoiceVm, CheckRowVm, ConflictKeyboardVm, CountdownVm, JournalRowVm,
     KeyboardRowVm, KeyTestVm, Overlay, PlanLineVm, ProgressVm, ReconnectVm, RecoveryItemVm,
-    ResultVm, Screen, StatusVm, Tone, WizardKeyboardVm,
+    RecoveryPageVm, ResultVm, Screen, StatusVm, Tone, WizardKeyboardVm,
 } from "structs.slint";
 import { MainScreen } from "screens/main.slint";
 import { WizardScreen } from "screens/wizard.slint";
@@ -169,8 +169,17 @@ export component AppWindow inherits Window {
     in property <[string]> restart-reasons;
     in property <bool> restart-ready;
     in property <bool> restart-layout-changes;
-    callback restart-now();
+    in property <bool> restart-can-undo;
+    in property <string> restart-empty;
+    in property <bool> restart-restarting;
+    in property <string> restart-restarting-text;
+    in property <string> restart-error;
+    in property <string> restart-error-details;
+    in property <string> restart-run-once-note;
+    // With the acknowledgement's state.
+    callback restart-now(bool);
     callback restart-later();
+    // "確認待ちの変更をすべて元に戻す…" (restart, conflict and recovery pages).
     callback undo-open();
     in property <string> post-reboot-operation;
     in property <bool> post-reboot-not-restarted;
@@ -178,6 +187,10 @@ export component AppWindow inherits Window {
     in property <string> post-reboot-migration-note;
     in property <string> post-reboot-keep-warning;
     in property <string> post-reboot-revert-text;
+    in property <bool> post-reboot-can-keep;
+    in property <string> post-reboot-uac-line;
+    in property <string> post-reboot-empty;
+    in property <string> post-reboot-run-once-note;
     callback post-reboot-keep();
     callback post-reboot-revert();
     callback post-reboot-later();
@@ -185,17 +198,36 @@ export component AppWindow inherits Window {
     // --- Conflict, history, recovery (B.10 to B.12) ---
     in property <string> conflict-operation;
     in property <[ConflictKeyboardVm]> conflict-keyboards;
+    in property <[string]> conflict-value-options;
     in property <string> conflict-error;
+    in property <string> conflict-uac-line;
+    in property <string> conflict-empty;
+    in property <string> conflict-restore-note;
+    in property <[ChoiceVm]> conflict-restore-choices;
+    in-out property <int> conflict-restore-selected: -1;
+    in property <bool> conflict-can-resolve;
+    in property <bool> conflict-can-undo;
     callback conflict-choice(int, int);
+    // (record, option) from the details.
+    callback conflict-value-choice(int, int);
+    // A stopped restore: 0 = leave the values changed outside MKLM, 1 = put them back too.
+    callback conflict-restore-choice(int);
     callback conflict-resolve();
     in property <[JournalRowVm]> journal-rows;
     in property <string> journal-empty;
+    in property <string> journal-notice;
+    in property <string> journal-blocked;
+    in property <string> journal-folder-error;
     callback journal-revert(string);
     callback open-recovery-folder();
+    in property <RecoveryPageVm> recovery;
     in property <[RecoveryItemVm]> recovery-items;
-    in property <bool> recovery-can-recover;
-    in property <bool> recovery-can-undo;
+    // The apply method of the recovery page (0 = now, 1 = later), from the state.
+    in-out property <int> recovery-method: 1;
+    callback recovery-choose-method(int);
     callback recover();
+    callback recovery-keep(string);
+    callback recovery-revert(string);
     callback recovery-later();
 
     // --- Guide, settings, About (B.13 to B.15) ---
@@ -388,8 +420,15 @@ export component AppWindow inherits Window {
                 reasons: root.restart-reasons;
                 ready: root.restart-ready;
                 layout-changes: root.restart-layout-changes;
-                restart-now => {
-                    root.restart-now();
+                can-undo: root.restart-can-undo;
+                empty-note: root.restart-empty;
+                restarting: root.restart-restarting;
+                restarting-text: root.restart-restarting-text;
+                error: root.restart-error;
+                error-details: root.restart-error-details;
+                run-once-note: root.restart-run-once-note;
+                restart-now(acknowledged) => {
+                    root.restart-now(acknowledged);
                 }
                 later => {
                     root.restart-later();
@@ -408,6 +447,10 @@ export component AppWindow inherits Window {
                 migration-note: root.post-reboot-migration-note;
                 keep-warning: root.post-reboot-keep-warning;
                 revert-text: root.post-reboot-revert-text;
+                can-keep: root.post-reboot-can-keep;
+                uac-line: root.post-reboot-uac-line;
+                empty-note: root.post-reboot-empty;
+                run-once-note: root.post-reboot-run-once-note;
                 key-test: root.key-test;
                 key-pressed(text, shift) => {
                     root.key-pressed(text, shift);
@@ -425,9 +468,23 @@ export component AppWindow inherits Window {
             if root.screen == Screen.conflict: ConflictScreen {
                 operation: root.conflict-operation;
                 keyboards: root.conflict-keyboards;
+                value-options: root.conflict-value-options;
                 error: root.conflict-error;
+                uac-line: root.conflict-uac-line;
+                empty-note: root.conflict-empty;
+                restore-note: root.conflict-restore-note;
+                restore-choices: root.conflict-restore-choices;
+                restore-selected <=> root.conflict-restore-selected;
+                can-resolve: root.conflict-can-resolve;
+                can-undo: root.conflict-can-undo;
                 choice(row, choice) => {
                     root.conflict-choice(row, choice);
+                }
+                value-choice(record, choice) => {
+                    root.conflict-value-choice(record, choice);
+                }
+                restore-choice(index) => {
+                    root.conflict-restore-choice(index);
                 }
                 resolve => {
                     root.conflict-resolve();
@@ -442,6 +499,9 @@ export component AppWindow inherits Window {
             if root.screen == Screen.journal: JournalScreen {
                 rows: root.journal-rows;
                 empty-text: root.journal-empty;
+                notice: root.journal-notice;
+                blocked-note: root.journal-blocked;
+                folder-error: root.journal-folder-error;
                 revert(op) => {
                     root.journal-revert(op);
                 }
@@ -450,14 +510,23 @@ export component AppWindow inherits Window {
                 }
             }
             if root.screen == Screen.recovery: RecoveryScreen {
+                page: root.recovery;
                 items: root.recovery-items;
-                can-recover: root.recovery-can-recover;
-                can-undo: root.recovery-can-undo;
+                method <=> root.recovery-method;
+                choose-method(index) => {
+                    root.recovery-choose-method(index);
+                }
                 recover => {
                     root.recover();
                 }
                 undo => {
                     root.undo-open();
+                }
+                keep(op) => {
+                    root.recovery-keep(op);
+                }
+                revert(op) => {
+                    root.recovery-revert(op);
                 }
                 later => {
                     root.recovery-later();
