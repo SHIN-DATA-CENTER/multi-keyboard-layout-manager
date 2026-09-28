@@ -651,10 +651,7 @@ mod tests {
         let last = bytes.len() - 1;
         bytes[last] ^= 0xff;
         fs::write(&path, &bytes).unwrap();
-        // The stub digest of the skeleton is all zeros: another digest for the offer makes the
-        // mismatch visible whatever the digest implementation.
-        let mut offer = offer;
-        offer.verified.asset.sha256 = mklm_update::Sha256Digest([0xAA; 32]);
+        // The offer keeps the digest of the original bytes.
         h1.on_stage = [update(UpdateMessage::SendInstaller {
             name: offer.verified.asset.name.clone(),
             size: offer.verified.asset.size,

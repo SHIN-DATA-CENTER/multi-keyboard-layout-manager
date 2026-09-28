@@ -1,8 +1,6 @@
 //! The update check and the download over the real verification and fetch policy (design m5b
 //! F.4): a release played by a fake transport, manifests signed with throwaway keys, the user's
 //! cache in a scratch folder. No network, no registry.
-//!
-//! Runs after the M5b merge: while mklm-update is the skeleton, each test says so and returns.
 
 mod update_common;
 
@@ -35,9 +33,6 @@ fn run(
 
 #[test]
 fn a_new_release_is_offered_downloaded_and_recorded() {
-    if !wp_u_ready() {
-        return;
-    }
     let scratch = Scratch::new("check-new");
     let cache = UpdateCache::new(scratch.0.clone());
     let mut github = FakeGitHub::new(new_release());
@@ -113,9 +108,6 @@ fn a_new_release_is_offered_downloaded_and_recorded() {
 
 #[test]
 fn up_to_date_manual_and_expired() {
-    if !wp_u_ready() {
-        return;
-    }
     let scratch = Scratch::new("check-offers");
     let mut github = FakeGitHub::new(new_release());
     assert!(matches!(
@@ -145,9 +137,6 @@ fn up_to_date_manual_and_expired() {
 /// C.3, B.7).
 #[test]
 fn the_alternate_signature_of_a_key_transition() {
-    if !wp_u_ready() {
-        return;
-    }
     let scratch = Scratch::new("check-alt");
     let mut github = FakeGitHub::new(transition_release());
     let outcome = run(&mut github, "0.2.0", &scratch, &TrustState::default(), NOW).unwrap();
@@ -175,9 +164,6 @@ fn the_alternate_signature_of_a_key_transition() {
 /// An older manifest after a newer one was recorded is ignored and noted (design m5b C.4, E.3).
 #[test]
 fn an_older_manifest_is_a_rollback() {
-    if !wp_u_ready() {
-        return;
-    }
     let scratch = Scratch::new("check-rollback");
     let mut github = FakeGitHub::new(new_release());
     run(&mut github, "0.2.0", &scratch, &TrustState::default(), NOW).unwrap();

@@ -73,18 +73,14 @@ mod tests {
         assert_eq!(pending_trust_report(&cache, &machine), None);
     }
 
-    /// With `TrustState::is_ahead_of` of mklm-update (WP-U): the cached manifest goes when the
-    /// user's record is ahead. Skipped while the skeleton's `is_ahead_of` answers false.
+    /// The cached manifest goes when the user's record is ahead.
     #[test]
     fn the_cached_manifest_is_sent_when_the_user_knows_more() {
         let mut ahead = TrustState::default();
         ahead
             .max_issued_at
             .insert("DE84F116B8548221".into(), 1_792_022_400);
-        if !ahead.is_ahead_of(&TrustState::default()) {
-            eprintln!("skipped: TrustState::is_ahead_of is the m5b skeleton's");
-            return;
-        }
+        assert!(ahead.is_ahead_of(&TrustState::default()));
         let scratch = Scratch::new("trust-report-ahead");
         let cache = scratch.cache();
         cache.store_manifest(b"{\"m\":1}", b"sig").unwrap();

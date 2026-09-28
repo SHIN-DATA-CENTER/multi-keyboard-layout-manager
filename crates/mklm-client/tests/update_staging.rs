@@ -1,9 +1,6 @@
 //! The update session end to end in memory (design m5b F.4): the caller's `update::stage` against
 //! the helper's `mklm_ipc::staging::stage_update` (H1) over a duplex link of channels, with a fake
 //! `StagerEnv` in place of the machine. Nothing is written outside memory and a scratch folder.
-//!
-//! Runs after the M5b merge (WP-U's verification, WP-H's driver): while either is the skeleton,
-//! each test says so and returns.
 
 mod update_common;
 
@@ -351,23 +348,8 @@ fn machine(free: u64) -> FakeMachine {
     }
 }
 
-/// While H1 is the skeleton's, it refuses everything with "not implemented (m5b skeleton)".
-fn skeleton(end: &StageEnd) -> bool {
-    let stub = matches!(end, StageEnd::Refused(UpdateRefusal::Internal { detail })
-        if detail.contains("m5b skeleton"));
-    if stub {
-        eprintln!(
-            "skipped: mklm-ipc's stage_update is the m5b skeleton (runs after the WP-H merge)"
-        );
-    }
-    stub
-}
-
 #[test]
 fn the_installer_reaches_h1_and_the_runner_takes_over() {
-    if !wp_u_ready() {
-        return;
-    }
     let scratch = Scratch::new("staging-ok");
     let (offer, path) = downloaded_offer(&scratch);
     let (mut caller, helper) = pipe();
@@ -376,9 +358,6 @@ fn the_installer_reaches_h1_and_the_runner_takes_over() {
     let end = stage(&mut caller, &offer, &path, &mut frontend, &mut NoProbe);
     drop(caller);
     let state = h1.join().unwrap();
-    if skeleton(&end) {
-        return;
-    }
     assert_eq!(
         end,
         StageEnd::HandedOff {
@@ -413,9 +392,6 @@ fn the_installer_reaches_h1_and_the_runner_takes_over() {
 
 #[test]
 fn a_refusal_changes_nothing() {
-    if !wp_u_ready() {
-        return;
-    }
     let scratch = Scratch::new("staging-refused");
     let (offer, path) = downloaded_offer(&scratch);
     let (mut caller, helper) = pipe();
@@ -430,9 +406,6 @@ fn a_refusal_changes_nothing() {
     );
     drop(caller);
     let state = h1.join().unwrap();
-    if skeleton(&end) {
-        return;
-    }
     assert!(
         matches!(end, StageEnd::Refused(UpdateRefusal::DiskFull { .. })),
         "{end:?}"

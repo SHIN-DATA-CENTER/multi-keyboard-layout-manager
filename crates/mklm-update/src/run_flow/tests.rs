@@ -42,27 +42,21 @@ struct Signer {
     anchors: TrustAnchors,
 }
 
-/// A primary and a backup key; `None` while WP-U's key handling is the WP-0 skeleton (the tests
-/// that need a verified manifest then return early; the M5b integration removes this probe).
-fn signer() -> Option<Signer> {
+/// A primary and a backup key.
+fn signer() -> Signer {
     let primary = minisign::KeyPair::generate_unencrypted_keypair().expect("a throwaway key");
     let backup = minisign::KeyPair::generate_unencrypted_keypair().expect("a throwaway key");
-    match TrustAnchors::from_keys(
+    let anchors = TrustAnchors::from_keys(
         &[
             (KeyRole::Primary, &primary.pk.to_base64()),
             (KeyRole::Backup, &backup.pk.to_base64()),
         ],
         &[],
-    ) {
-        Ok(anchors) => Some(Signer {
-            pair: primary,
-            anchors,
-        }),
-        Err(KeyError::NotConfigured) => {
-            eprintln!("skipped: TrustAnchors::from_keys is WP-U's skeleton until the integration");
-            None
-        }
-        Err(error) => panic!("throwaway keys refused: {error}"),
+    )
+    .unwrap_or_else(|error: KeyError| panic!("throwaway keys refused: {error}"));
+    Signer {
+        pair: primary,
+        anchors,
     }
 }
 
@@ -536,7 +530,7 @@ fn before_ready_nothing_is_recorded() {
 
 #[test]
 fn installs_and_relaunches_last() {
-    let Some(signer) = signer() else { return };
+    let signer = signer();
     let mut fake = Fake::signed(signer);
     assert_eq!(run(&mut fake), EXIT_INSTALLED);
     assert_eq!(fake.outcome(), UpdateOutcome::Installed);
@@ -589,8 +583,8 @@ fn installs_and_relaunches_last() {
 
 /// Runs a signed fake with `inject`, expects exit 7, `outcome`, and the end state of a failure
 /// before the installer ran: no Run, lock released, clean-up, relaunch last.
-fn fails_with(label: &str, inject: impl FnOnce(&mut Fake), outcome: UpdateOutcome) -> Option<Fake> {
-    let signer = signer()?;
+fn fails_with(label: &str, inject: impl FnOnce(&mut Fake), outcome: UpdateOutcome) -> Fake {
+    let signer = signer();
     let mut fake = Fake::signed(signer);
     inject(&mut fake);
     assert_eq!(run(&mut fake), EXIT_NOT_INSTALLED, "{label}");
@@ -615,7 +609,7 @@ fn fails_with(label: &str, inject: impl FnOnce(&mut Fake), outcome: UpdateOutcom
             "{label}"
         );
     }
-    Some(fake)
+    fake
 }
 
 fn refused(refusal: UpdateRefusal) -> UpdateOutcome {
@@ -624,16 +618,15 @@ fn refused(refusal: UpdateRefusal) -> UpdateOutcome {
 
 #[test]
 fn verification_again_before_the_lock() {
-    if let Some(fake) = fails_with(
+    let fake = fails_with(
         "tampered manifest",
         |f| {
             let at = f.manifest.len() / 2;
             f.manifest[at] ^= 0x01;
         },
         refused(UpdateRefusal::BadSignature),
-    ) {
-        assert!(!fake.has("lock"));
-    }
+    );
+    assert!(!fake.has("lock"));
     fails_with(
         "another installer",
         |f| f.installer[1000] ^= 0x01,
@@ -674,13 +667,12 @@ impl Fake {
 
 #[test]
 fn the_lock_the_journal_and_the_installed_copy() {
-    if let Some(fake) = fails_with(
+    let fake = fails_with(
         "busy",
         |f| f.lock_result = Err(UpdateRefusal::Busy),
         refused(UpdateRefusal::Busy),
-    ) {
-        assert!(!fake.has("unlock"), "never held");
-    }
+    );
+    assert!(!fake.has("unlock"), "never held");
     let mut pending_reboot = Journal::default();
     let (ops, baselines) = mklm_core::fixtures::schema_1_journal();
     let parsed = Journal::parse(&ops, &baselines);
@@ -731,15 +723,14 @@ fn the_lock_the_journal_and_the_installed_copy() {
 
 #[test]
 fn other_mklm_programs() {
-    if let Some(fake) = fails_with(
+    let fake = fails_with(
         "the caller did not exit",
         |f| {
             f.stuck.insert(CALLER);
         },
         UpdateOutcome::NotInstalled(NotInstalledReason::CallerDidNotExit),
-    ) {
-        assert!(!fake.has("quit_idle"));
-    }
+    );
+    assert!(!fake.has("quit_idle"));
     fails_with(
         "another user's MKLM is busy",
         |f| {
@@ -775,7 +766,7 @@ fn other_mklm_programs() {
         }),
     );
     // A helper gets 75 s.
-    if let Some(fake) = fails_with(
+    let fake = fails_with(
         "a helper does not end",
         |f| {
             f.programs = vec![RunningProgram {
@@ -793,9 +784,8 @@ fn other_mklm_programs() {
                 name: "mklm-helper.exe".to_string(),
             }],
         }),
-    ) {
-        assert!(fake.has("wait_exit:6000:75"));
-    }
+    );
+    assert!(fake.has("wait_exit:6000:75"));
     fails_with(
         "a file held without delete sharing",
         |f| {
@@ -821,64 +811,54 @@ fn other_mklm_programs() {
 
 #[test]
 fn the_session_end_before_the_installer() {
-    if let Some(fake) = fails_with(
+    let fake = fails_with(
         "sign-out during waiting",
         |f| f.session_ending = true,
         UpdateOutcome::NotInstalled(NotInstalledReason::SessionEnding),
-    ) {
-        assert!(!fake.has("spawn"), "no installer once the session ends");
-        assert!(
-            !fake.has("relaunch"),
-            "the GUI would not outlive the sign-out"
-        );
-        assert!(!fake.last_result.clone().unwrap().gui_relaunch_attempted);
-    }
+    );
+    assert!(!fake.has("spawn"), "no installer once the session ends");
+    assert!(
+        !fake.has("relaunch"),
+        "the GUI would not outlive the sign-out"
+    );
+    assert!(!fake.last_result.clone().unwrap().gui_relaunch_attempted);
 }
 
 #[test]
 fn the_installer_does_not_start() {
     // 225: blocked by antivirus software (design m5b D.7 step 16).
-    if let Some(fake) = fails_with(
+    let fake = fails_with(
         "blocked",
         |f| f.spawn = Err(225),
         UpdateOutcome::NotInstalled(NotInstalledReason::InstallerNotStarted { code: 225 }),
-    ) {
-        assert!(fake.position("claim") < fake.position("release_installing"));
-    }
+    );
+    assert!(fake.position("claim") < fake.position("release_installing"));
     // Run = installing cannot be written: the never-run installer is terminated.
-    if let Some(fake) = fails_with(
+    let fake = fails_with(
         "Run = installing not written",
         |f| f.fail_write_run = Some(RunPhase::Installing),
         refused(UpdateRefusal::Storage {
             detail: "RegSetValueExW failed with Win32 error 5".to_string(),
         }),
-    ) {
-        assert!(fake.position("spawn") < fake.position("terminate"));
-        assert!(!fake.has("block:on"));
-    }
-    if let Some(fake) = fails_with(
+    );
+    assert!(fake.position("spawn") < fake.position("terminate"));
+    assert!(!fake.has("block:on"));
+    let fake = fails_with(
         "resume fails",
         |f| f.resume_fails = true,
         refused(UpdateRefusal::Internal {
             detail: "the installer could not be resumed: ResumeThread failed with Win32 error 5"
                 .to_string(),
         }),
-    ) {
-        assert!(fake.position("block:on") < fake.position("terminate"));
-        assert!(fake.position("terminate") < fake.position("block:off"));
-    }
+    );
+    assert!(fake.position("block:on") < fake.position("terminate"));
+    assert!(fake.position("terminate") < fake.position("block:off"));
 }
 
 // ---- After the installer (design m5b D.13) ----
 
-fn after_installer(
-    label: &str,
-    exit: u32,
-    after: InstallState,
-    outcome: UpdateOutcome,
-    code: u32,
-) -> Option<Fake> {
-    let signer = signer()?;
+fn after_installer(label: &str, exit: u32, after: InstallState, outcome: UpdateOutcome, code: u32) {
+    let signer = signer();
     let mut fake = Fake::signed(signer);
     fake.installer_waits = VecDeque::from([Some(exit)]);
     fake.after_install = after;
@@ -888,7 +868,6 @@ fn after_installer(
     assert_eq!(fake.run, None);
     assert!(!fake.lock_held);
     assert_eq!(fake.events.last().map(String::as_str), Some("relaunch"));
-    Some(fake)
 }
 
 fn state(ids: [Option<&str>; 3]) -> InstallState {
@@ -943,7 +922,7 @@ fn the_installers_result() {
 #[test]
 fn a_slow_installer_is_never_stopped() {
     // Ends after 15 minutes but within 60: the timed-out result is replaced by the real one.
-    let Some(signer) = signer() else { return };
+    let signer = signer();
     let mut fake = Fake::signed(signer);
     fake.installer_waits = VecDeque::from([None, Some(0)]);
     assert_eq!(run(&mut fake), EXIT_INSTALLED);
@@ -960,7 +939,7 @@ fn a_slow_installer_is_never_stopped() {
     assert_eq!(fake.run, None);
 
     // Still running after 60 minutes: Run stays with the installer, nothing relaunched, 7.
-    let Some(second) = self::signer() else { return };
+    let second = self::signer();
     let mut fake = Fake::signed(second);
     fake.installer_waits = VecDeque::from([None, None]);
     assert_eq!(run(&mut fake), EXIT_NOT_INSTALLED);
@@ -997,7 +976,7 @@ fn a_slow_installer_is_never_stopped() {
 
 #[test]
 fn a_last_result_that_cannot_be_written_keeps_the_run() {
-    let Some(signer) = signer() else { return };
+    let signer = signer();
     let mut fake = Fake::signed(signer);
     fake.fail_last_result = true;
     assert_eq!(run(&mut fake), EXIT_INSTALLED);
@@ -1010,7 +989,7 @@ fn a_last_result_that_cannot_be_written_keeps_the_run() {
 
 #[test]
 fn a_failed_relaunch_changes_nothing() {
-    let Some(signer) = signer() else { return };
+    let signer = signer();
     let mut fake = Fake::signed(signer);
     fake.relaunch = Err("ShellWindows: access denied".to_string());
     assert_eq!(run(&mut fake), EXIT_INSTALLED);

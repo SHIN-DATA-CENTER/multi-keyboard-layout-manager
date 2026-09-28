@@ -184,13 +184,6 @@ pub enum StateError {
     Schema(u32),
 }
 
-/// What the WP-0 skeleton's unimplemented functions return (design m5b G.2). Kept for the WP-H
-/// skeleton files (`run.rs`) until integration.
-#[allow(dead_code)]
-pub(crate) fn skeleton() -> StateError {
-    StateError::Malformed("not implemented (m5b skeleton)".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

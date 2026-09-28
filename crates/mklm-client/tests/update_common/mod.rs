@@ -5,8 +5,7 @@
 //! thrown away; only the public keys and the signatures are here. The texts are built with
 //! explicit `\n` (a checkout that turns line ends into CRLF must not change the signed bytes).
 //!
-//! These tests run the real `mklm_update` verification and fetch policy (WP-U). While the M5b
-//! skeleton stands in for it, [`wp_u_ready`] is false and the tests return early, saying so.
+//! These tests run the real `mklm_update` verification and fetch policy.
 
 #![allow(dead_code)]
 
@@ -17,7 +16,7 @@ use std::time::SystemTime;
 use mklm_client::update::env::{Availability, UpdateEnv};
 use mklm_update::fetch::{Response, Timeouts, Transport, TransportError};
 use mklm_update::url::{Endpoints, Url};
-use mklm_update::{Arch, KeyRole, Sha256Digest, TrustAnchors, Version};
+use mklm_update::{Arch, KeyRole, TrustAnchors, Version};
 
 /// Key IDs of the throwaway keys.
 pub const PRIMARY_ID: &str = "DE84F116B8548221";
@@ -161,21 +160,6 @@ pub fn anchors() -> TrustAnchors {
         &[],
     )
     .expect("the test keys")
-}
-
-/// The real verification and fetch policy are there (not the m5b skeleton's stubs).
-pub fn wp_u_ready() -> bool {
-    let ready = TrustAnchors::from_keys(&[(KeyRole::Primary, PRIMARY_PUB)], &[]).is_ok()
-        && Sha256Digest::of(b"abc") != Sha256Digest([0; 32])
-        && Url::parse(
-            "https://github.com/SHIN-DATA-CENTER/multi-keyboard-layout-manager",
-            Endpoints::production().policy(),
-        )
-        .is_ok();
-    if !ready {
-        eprintln!("skipped: mklm-update is the m5b skeleton (runs after the WP-U merge)");
-    }
-    ready
 }
 
 /// This build installed as 0.2.0 (or `installed`), updates available.

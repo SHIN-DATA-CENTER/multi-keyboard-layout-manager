@@ -5,9 +5,6 @@
 //! The manifests below were signed once with a throwaway minisign key pair whose secret key was
 //! discarded (mklm-ipc has no minisign dependency to make one here). Only the public keys are
 //! kept; they are trusted by nothing but these tests (`TrustAnchors::from_keys`).
-//!
-//! Until the M5b integration, WP-U's verification and receiving state machine are WP-0 skeletons;
-//! the tests that need them return early then (the probes `anchors` and `stager_works`).
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -60,22 +57,16 @@ fn digest(hex: &str) -> Sha256Digest {
     Sha256Digest(bytes.try_into().expect("32 bytes"))
 }
 
-/// The fixture keys; `None` while WP-U's key handling is the skeleton.
-fn anchors() -> Option<TrustAnchors> {
-    match TrustAnchors::from_keys(
+/// The fixture keys.
+fn anchors() -> TrustAnchors {
+    TrustAnchors::from_keys(
         &[
             (KeyRole::Primary, PRIMARY_KEY),
             (KeyRole::Backup, BACKUP_KEY),
         ],
         &[],
-    ) {
-        Ok(anchors) => Some(anchors),
-        Err(KeyError::NotConfigured) => {
-            eprintln!("skipped: TrustAnchors::from_keys is WP-U's skeleton until the integration");
-            None
-        }
-        Err(error) => panic!("the fixture keys are refused: {error}"),
-    }
+    )
+    .unwrap_or_else(|error: KeyError| panic!("the fixture keys are refused: {error}"))
 }
 
 const RUN: &str = "0.2.1-0102030405060708";
@@ -91,18 +82,6 @@ fn plan(size: u64, sha256: Sha256Digest) -> StagePlan {
             size,
             sha256,
         },
-    }
-}
-
-/// False while WP-U's `Stager` is the skeleton.
-fn stager_works() -> bool {
-    let mut probe = Stager::new(plan(1, digest(INSTALLER_SHA256)));
-    match probe.accept(0, &[0]) {
-        Err(UpdateRefusal::Internal { detail }) if detail.contains("skeleton") => {
-            eprintln!("skipped: Stager is WP-U's skeleton until the integration");
-            false
-        }
-        _ => true,
     }
 }
 
@@ -211,8 +190,7 @@ fn receive(link: &mut Link, sink: &mut Sink, bytes_in_plan: &[u8]) -> StagingEnd
     )
 }
 
-/// SHA-256 without a hashing crate here: `Sha256Stream` is WP-U's (the tests that call this run
-/// only once WP-U is in, see `stager_works`).
+/// SHA-256 without a hashing crate here: `Sha256Stream` is mklm-update's.
 fn sha256_of(bytes: &[u8]) -> [u8; 32] {
     let mut stream = mklm_update::Sha256Stream::new();
     stream.update(bytes);
@@ -223,9 +201,6 @@ fn sha256_of(bytes: &[u8]) -> [u8; 32] {
 
 #[test]
 fn receives_the_installer_in_order() {
-    if !stager_works() {
-        return;
-    }
     let bytes = installer();
     let mut link = Link::with(chunks(&bytes));
     let mut sink = Sink::default();
@@ -258,9 +233,6 @@ fn receives_the_installer_in_order() {
 
 #[test]
 fn transfer_failures() {
-    if !stager_works() {
-        return;
-    }
     let bytes = installer();
     let cases: Vec<(&str, Incoming, StagingEnd, bool)> = vec![
         (
@@ -378,9 +350,6 @@ fn transfer_failures() {
 
 #[test]
 fn sizes_and_deadlines() {
-    if !stager_works() {
-        return;
-    }
     // More bytes than the manifest's size: refused at the chunk that goes past it.
     let small = vec![7u8; 100];
     let mut link = Link::with(chunks(&[7u8; 101]));
@@ -753,7 +722,7 @@ fn caller_link() -> Link {
 }
 
 fn refused_before_anything(label: &str, inject: impl FnOnce(&mut Fake), refusal: UpdateRefusal) {
-    let Some(keys) = anchors() else { return };
+    let keys = anchors();
     let mut fake = Fake::new(Some(keys));
     inject(&mut fake);
     let run_before = fake.run.clone();
@@ -774,7 +743,7 @@ fn refused_before_anything(label: &str, inject: impl FnOnce(&mut Fake), refusal:
 
 #[test]
 fn stages_and_hands_off() {
-    let Some(keys) = anchors() else { return };
+    let keys = anchors();
     let mut fake = Fake::new(Some(keys));
     let mut link = caller_link();
     let end = stage_update(&mut fake, &mut link, &request(MANIFEST_NEW, SIGNATURE_NEW));
@@ -906,7 +875,7 @@ fn refusals_before_the_run_folder() {
         },
     );
     // A tampered manifest: refused at step 3, before the lock.
-    let Some(keys) = anchors() else { return };
+    let keys = anchors();
     let mut fake = Fake::new(Some(keys));
     let mut link = caller_link();
     let tampered = MANIFEST_NEW.replace("6029312", "6029313");
@@ -950,7 +919,7 @@ fn another_update_in_progress_or_interrupted() {
         UpdateRefusal::UpdateInProgress,
     );
     // An interrupted one is moved to LastResult, then this run goes on.
-    let Some(keys) = anchors() else { return };
+    let keys = anchors();
     let mut fake = Fake::new(Some(keys));
     fake.run = Some(installing.clone());
     let mut link = caller_link();
@@ -1025,7 +994,7 @@ fn failures_after_the_run_folder_remove_it() {
         ),
     ];
     for (label, fail, refusal) in cases {
-        let Some(keys) = anchors() else { return };
+        let keys = anchors();
         let mut fake = Fake::new(Some(keys));
         fake.fail = fail;
         let mut link = caller_link();
@@ -1044,7 +1013,7 @@ fn failures_after_the_run_folder_remove_it() {
 
 #[test]
 fn the_caller_leaves_during_the_transfer() {
-    let Some(keys) = anchors() else { return };
+    let keys = anchors();
     let mut fake = Fake::new(Some(keys));
     let mut messages = chunks(&installer());
     messages.truncate(5);
@@ -1060,7 +1029,7 @@ fn the_caller_leaves_during_the_transfer() {
         "an uncommitted installer file is deleted with its folder"
     );
     // Other bytes than the manifest's: refused, removed.
-    let Some(keys) = anchors() else { return };
+    let keys = anchors();
     let mut fake = Fake::new(Some(keys));
     let mut other = installer();
     other[0] ^= 0x01;
@@ -1077,7 +1046,7 @@ fn the_caller_leaves_during_the_transfer() {
 #[test]
 fn the_runner_that_does_not_get_ready() {
     // It ends before `ready`: its exit code is in the refusal; nothing needs stopping.
-    let Some(keys) = anchors() else { return };
+    let keys = anchors();
     let mut fake = Fake::new(Some(keys));
     fake.runner = RunnerScript::ExitsAfter(2, 7);
     let mut link = caller_link();
@@ -1098,7 +1067,7 @@ fn the_runner_that_does_not_get_ready() {
         ]
     ));
     // Not ready within 120 s: stopped and waited for first, then its folder and Run removed.
-    let Some(keys) = anchors() else { return };
+    let keys = anchors();
     let mut fake = Fake::new(Some(keys));
     fake.runner = RunnerScript::NeverReady;
     let mut link = caller_link();
@@ -1120,7 +1089,7 @@ fn the_runner_that_does_not_get_ready() {
 
 #[test]
 fn a_caller_gone_before_the_runner_starts_stops_the_run() {
-    let Some(keys) = anchors() else { return };
+    let keys = anchors();
     let mut fake = Fake::new(Some(keys));
     let mut link = caller_link();
     // SendInstaller and Received went out; StartingRunner cannot.
@@ -1142,7 +1111,7 @@ fn report(manifest: &str, signature: &str) -> TrustReport {
 
 #[test]
 fn record_trust_moves_the_machine_record_once() {
-    let Some(keys) = anchors() else { return };
+    let keys = anchors();
     let mut fake = Fake::new(Some(keys));
     assert_eq!(
         record_trust(&mut fake, &report(MANIFEST_NEW, SIGNATURE_NEW)),
@@ -1169,7 +1138,7 @@ fn record_trust_moves_the_machine_record_once() {
 
 #[test]
 fn record_trust_refusals_write_nothing() {
-    let Some(keys) = anchors() else { return };
+    let keys = anchors();
     let mut fake = Fake::new(Some(keys));
     let tampered = SIGNATURE_NEW.replace("issued_at=1792108800", "issued_at=1792108801");
     assert_eq!(
@@ -1192,7 +1161,7 @@ fn record_trust_refusals_write_nothing() {
 /// in the same session is a rollback, and makes neither a folder nor a `Run`.
 #[test]
 fn staging_an_older_manifest_after_record_trust_is_a_rollback() {
-    let Some(keys) = anchors() else { return };
+    let keys = anchors();
     let mut fake = Fake::new(Some(keys));
     assert_eq!(
         record_trust(&mut fake, &report(MANIFEST_NEW, SIGNATURE_NEW)),

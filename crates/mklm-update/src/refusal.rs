@@ -93,17 +93,6 @@ pub enum UpdateRefusal {
     Internal { detail: String },
 }
 
-impl UpdateRefusal {
-    /// What the WP-0 skeleton's unimplemented functions return (design m5b G.2). Kept for the
-    /// WP-H skeleton files (`run.rs`, `run_flow.rs`, `gate.rs`) until integration.
-    #[allow(dead_code)]
-    pub(crate) fn skeleton() -> UpdateRefusal {
-        UpdateRefusal::Internal {
-            detail: "not implemented (m5b skeleton)".to_string(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
