@@ -405,7 +405,7 @@ fn sizes_and_deadlines() {
 
 // ---- The fake machine of H1 ----
 
-const BOOT: BootId = BootId(0x0b6d_3c2a_9e1f_4d5a_8c7b_6a5f_4e3d_2c1b);
+const BOOT: BootId = BootId::from_boot_counter(7);
 const CALLER: u32 = 8532;
 const STAGER: u32 = 9120;
 const RUNNER: u32 = 9344;
@@ -794,6 +794,9 @@ fn stages_and_hands_off() {
     assert_eq!(run.caller_session, Some(1));
     assert_eq!(run.stager, process(STAGER));
     assert_eq!(run.boot_id, BOOT);
+    // The boot as `StagerEnv::boot_id` gives it: the counter form (design m2 C.10), which the
+    // engine's legacy rule never applies to.
+    assert!(!run.boot_id.is_legacy());
     // The machine record moved to this manifest (design m5b D.4 step 9).
     assert_eq!(fake.trust.max_issued_at.get(KEY_ID), Some(&NEW_ISSUED_AT));
     // The lock from step 5 to the end; the order of the steps.

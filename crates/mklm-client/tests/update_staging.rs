@@ -165,7 +165,7 @@ impl StagerEnv for FakeMachine {
         identity(9120)
     }
     fn boot_id(&self) -> BootId {
-        BootId(0x0b6d_3c2a_9e1f_4d5a_8c7b_6a5f_4e3d_2c1b)
+        BootId::from_boot_counter(7)
     }
     fn now(&self) -> Timestamp {
         Timestamp(NOW * 1000)

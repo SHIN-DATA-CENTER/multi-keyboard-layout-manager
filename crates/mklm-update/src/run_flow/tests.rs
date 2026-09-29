@@ -16,7 +16,7 @@ use crate::run::{InstallerExit, classify_run};
 use crate::{DEFAULT_VALIDITY_DAYS, TRUSTED_COMMENT_PREFIX};
 
 const RUN: &str = "0.2.1-3f9a0c2b7d1e4a65";
-const BOOT: BootId = BootId(0x0b6d_3c2a_9e1f_4d5a_8c7b_6a5f_4e3d_2c1b);
+const BOOT: BootId = BootId::from_boot_counter(7);
 const NOW_UNIX: u64 = 1_792_108_800;
 const ISSUED_AT: u64 = 1_792_022_400;
 const OLD_ID: &str = "0.2.0+0123456789abcdef";

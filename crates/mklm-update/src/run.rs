@@ -708,10 +708,14 @@ mod tests {
     /// `from_json` wrappers are WP-H's).
     #[test]
     fn machine_record_shapes() {
-        let run = r#"{"schema":1,"run_id":"0.2.1-3f9a0c2b7d1e4a65","from_version":"0.2.0","to_version":"0.2.1","arch":"x64","phase":"installing","boot_id":"0b6d3c2a-9e1f-4d5a-8c7b-6a5f4e3d2c1b","started_at":1792022460000,"phase_at":1792022485000,"caller":{"pid":8532,"creation_time":134041234567890123},"caller_session":1,"stager":{"pid":9120,"creation_time":134041234600000000},"runner":{"pid":9344,"creation_time":134041234700000000},"installer":{"pid":9512,"creation_time":134041234800000000}}"#;
+        let run = r#"{"schema":1,"run_id":"0.2.1-3f9a0c2b7d1e4a65","from_version":"0.2.0","to_version":"0.2.1","arch":"x64","phase":"installing","boot_id":"00000007-0000-8000-8000-000000000000","started_at":1792022460000,"phase_at":1792022485000,"caller":{"pid":8532,"creation_time":134041234567890123},"caller_session":1,"stager":{"pid":9120,"creation_time":134041234600000000},"runner":{"pid":9344,"creation_time":134041234700000000},"installer":{"pid":9512,"creation_time":134041234800000000}}"#;
         let record: RunRecord = serde_json::from_str(run).unwrap();
         assert_eq!(record.phase, RunPhase::Installing);
         assert_eq!(record.run_id.as_str(), RUN);
+        // What H1 writes since the boot-ID fix: the counter form of `session::boot_id`, never a
+        // loader GUID (design m2 C.10).
+        assert_eq!(record.boot_id, BOOT);
+        assert!(!record.boot_id.is_legacy());
         assert_eq!(serde_json::to_string(&record).unwrap(), run);
         assert!(
             serde_json::from_str::<RunRecord>(
@@ -786,8 +790,8 @@ mod tests {
 
     // ---- WP-H: the rules ----
 
-    const BOOT: BootId = BootId(0x0b6d_3c2a_9e1f_4d5a_8c7b_6a5f_4e3d_2c1b);
-    const OTHER_BOOT: BootId = BootId(0x1111_2222_3333_4444_5555_6666_7777_8888);
+    const BOOT: BootId = BootId::from_boot_counter(7);
+    const OTHER_BOOT: BootId = BootId::from_boot_counter(8);
 
     fn process(pid: u32) -> ProcessIdentity {
         ProcessIdentity {
@@ -1057,7 +1061,7 @@ mod tests {
         let json = run.to_json();
         assert_eq!(
             json,
-            r#"{"schema":1,"run_id":"0.2.1-3f9a0c2b7d1e4a65","from_version":"0.2.0","to_version":"0.2.1","arch":"x64","phase":"installing","boot_id":"0b6d3c2a-9e1f-4d5a-8c7b-6a5f4e3d2c1b","started_at":1792022460000,"phase_at":1792022485000,"caller":{"pid":8532,"creation_time":134041234000008532},"caller_session":1,"stager":{"pid":9120,"creation_time":134041234000009120},"runner":{"pid":9344,"creation_time":134041234000009344},"installer":{"pid":9512,"creation_time":134041234000009512}}"#
+            r#"{"schema":1,"run_id":"0.2.1-3f9a0c2b7d1e4a65","from_version":"0.2.0","to_version":"0.2.1","arch":"x64","phase":"installing","boot_id":"00000007-0000-8000-8000-000000000000","started_at":1792022460000,"phase_at":1792022485000,"caller":{"pid":8532,"creation_time":134041234000008532},"caller_session":1,"stager":{"pid":9120,"creation_time":134041234000009120},"runner":{"pid":9344,"creation_time":134041234000009344},"installer":{"pid":9512,"creation_time":134041234000009512}}"#
         );
         assert_eq!(RunRecord::from_json(&json), Ok(run.clone()));
         for phase in [
