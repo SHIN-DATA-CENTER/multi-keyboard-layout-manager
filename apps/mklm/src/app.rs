@@ -617,7 +617,7 @@ impl Controller {
         self.window
             .set_show_hidden(state.settings.keyboards.show_hidden);
         let test = if state.key_test == vm::keytest::KeyTest::default() {
-            keytest::prompt(lang)
+            keytest::prompt(lang, state::remote_session(&state))
         } else {
             state.key_test.clone()
         };
@@ -1673,6 +1673,7 @@ fn wire_callbacks(window: &AppWindow) {
         dispatch(AppMsg::KeyTestPressed {
             text: text.to_string(),
             shift,
+            at: Instant::now(),
         });
     });
     window.on_quit_requested(|| dispatch(AppMsg::QuitRequested));

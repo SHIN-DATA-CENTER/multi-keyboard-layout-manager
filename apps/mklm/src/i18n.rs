@@ -1729,6 +1729,16 @@ pub fn key_test_prompt(lang: Lang) -> String {
     )
 }
 
+/// The key test's prompt in a Remote Desktop session: keys come from the client, so they check
+/// none of this PC's keyboards (docs/research/rdp-keyboard.md 6.3; design m3 B.6, B.9).
+pub fn key_test_remote_prompt(lang: Lang) -> String {
+    pick(
+        lang,
+        "リモート デスクトップで接続しています。ここで押したキーは接続元の PC から届くため、この PC のキーボードの確認にはなりません。この PC の前で、この PC につないだキーボードで押してください（Shift+2 で @ なら US、\" なら JIS）。",
+        "This is a Remote Desktop session. Keys pressed here come from the remote PC, so they check none of this PC's keyboards. Press them at this PC, on the keyboards attached to it (Shift+2: @ means US, \" means JIS).",
+    )
+}
+
 pub fn key_test_not_japanese(lang: Lang) -> String {
     pick(
         lang,

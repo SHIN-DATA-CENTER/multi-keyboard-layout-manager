@@ -302,7 +302,10 @@ pub fn revert_text(
     out
 }
 
-pub fn check_text(rows: &[CheckRow], migration: bool) -> String {
+/// The post-reboot check's table and the typing test (design m2 D.6, D.7). `remote`: this is a
+/// Remote Desktop session, whose keys come from the client and check none of the rows
+/// (docs/research/rdp-keyboard.md 6.3): the test is asked for at the PC instead.
+pub fn check_text(rows: &[CheckRow], migration: bool, remote: bool) -> String {
     let mut out = String::new();
     let mut table = crate::table::Table::new(&["Keyboard", "Expected", "Raw Input", "", "Layout"])
         .max_width(0, 32);
@@ -330,12 +333,20 @@ pub fn check_text(rows: &[CheckRow], migration: bool) -> String {
              keyboard reports 0x7/0x2 either way). The typing test decides."
         );
     }
+    if remote {
+        put!(out, "{REMOTE_CHECK_NOTE}");
+    }
     put!(
         out,
         "Type Shift+2 in any text box with each keyboard: \" means JIS, @ means US."
     );
     out
 }
+
+/// The typing test in a Remote Desktop session (design m2 D.6).
+const REMOTE_CHECK_NOTE: &str = "This is a Remote Desktop session: keys typed in it come from the \
+    remote PC, so they check none of the keyboards above. Do the typing test at this PC, on its own \
+    keyboards, before you keep the change.";
 
 #[cfg(test)]
 mod tests {
@@ -604,9 +615,29 @@ mod tests {
         assert_eq!(rows[0].name, "Keychron Receiver");
         assert_eq!(rows[0].expected, Some(KeyboardType::US));
         assert_eq!(rows[0].reported, Some(KeyboardType::US));
-        let text = check_text(&rows, false);
+        let text = check_text(&rows, false, false);
         assert!(text.contains("ok"), "{text}");
         assert!(text.contains("Shift+2"));
-        assert!(check_text(&rows, true).contains("Raw Input cannot show"));
+        assert!(!text.contains("Remote Desktop"), "{text}");
+        assert!(check_text(&rows, true, false).contains("Raw Input cannot show"));
+    }
+
+    /// INTERACTIONS-4: in a Remote Desktop session the keys come from the client
+    /// (docs/research/rdp-keyboard.md 6.3), so the typing test is asked for at the PC.
+    #[test]
+    fn the_post_reboot_check_in_a_remote_session_asks_for_the_test_at_the_pc() {
+        let snapshot = fixtures::dev_machine();
+        let rows = check_rows(&snapshot, &entry(OpState::PendingReboot));
+        let text = check_text(&rows, true, true);
+        assert!(
+            text.contains(
+                "This is a Remote Desktop session: keys typed in it come from the remote PC, so \
+                 they check none of the keyboards above. Do the typing test at this PC, on its own \
+                 keyboards, before you keep the change."
+            ),
+            "{text}"
+        );
+        assert!(text.contains("Raw Input cannot show"), "{text}");
+        assert!(text.contains("Shift+2"), "{text}");
     }
 }

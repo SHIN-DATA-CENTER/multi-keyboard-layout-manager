@@ -1097,7 +1097,7 @@ pub fn restore(args: &RestoreArgs) -> Result<i32> {
 }
 
 /// The post-reboot check of one entry (design D.7, D.6): the Raw Input table and the Shift+2
-/// test.
+/// test — at the PC when this is a Remote Desktop session.
 fn show_check(ui: &mut Ui, snapshot: Option<&SystemSnapshot>, entry: &JournalEntry) -> Result<()> {
     let migration = matches!(entry.kind, OpKind::Migrate { .. });
     let rows = match snapshot {
@@ -1107,7 +1107,8 @@ fn show_check(ui: &mut Ui, snapshot: Option<&SystemSnapshot>, entry: &JournalEnt
             Vec::new()
         }
     };
-    ui.say(&preview::check_text(&rows, migration))
+    let remote = snapshot.is_some_and(|snapshot| snapshot.os.remote_session);
+    ui.say(&preview::check_text(&rows, migration, remote))
 }
 
 /// `mklm-cli keep <op>` (design D.6).

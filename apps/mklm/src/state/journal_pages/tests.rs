@@ -155,8 +155,65 @@ fn key(state: &mut AppState, instance_id: &str, text: &str) -> Vec<Effect> {
         AppMsg::KeyTestPressed {
             text: text.into(),
             shift: true,
+            at: Instant::now(),
         },
     )
+}
+
+/// Design m3 B.9 (INTERACTIONS-4): the same GUI, moved to a Remote Desktop session after a
+/// Shift+2 on the Keychron at the console. Keys typed through Remote Desktop come without a Raw
+/// Input press of this PC's keyboards (docs/research/rdp-keyboard.md 6.3): they fill no row and get
+/// no verdict — the Keychron's row keeps what the Keychron typed — and the key test asks for the
+/// test at the PC. "このままにする" stays possible (the user decides, review U2).
+#[test]
+fn a_remote_desktop_key_fills_no_row_of_the_post_reboot_check() {
+    let mut state = AppState {
+        active_hkl: JAPANESE,
+        ..app()
+    };
+    let pending = journal(vec![restart_change(OpState::PendingReboot)]);
+    update(
+        &mut state,
+        read(pending.clone(), LATER_BOOT, keychron_jis()),
+    );
+    assert_eq!(state.page, Page::PostReboot);
+    key(&mut state, KEYCHRON, "\"");
+    assert_eq!(post_reboot_view(&state).rows[0].typed, "✓");
+    assert!(state.last_key.is_none(), "the press is used once");
+    // The Remote Desktop keyboard arrived: the next read says the session is remote.
+    let mut remote = keychron_jis();
+    remote.os.remote_session = true;
+    update(&mut state, read(pending, LATER_BOOT, remote));
+    assert_eq!(state.page, Page::PostReboot);
+    assert!(crate::state::remote_session(&state));
+    // Shift+2 from the client, whose session types US: no press of this PC came with it.
+    update(
+        &mut state,
+        AppMsg::KeyTestPressed {
+            text: "@".into(),
+            shift: true,
+            at: Instant::now(),
+        },
+    );
+    let view = post_reboot_view(&state);
+    assert_eq!(view.rows[0].typed, "✓");
+    assert!(view.can_keep);
+    assert_eq!(
+        (
+            state.key_test.last_text.as_str(),
+            state.key_test.verdict.as_str(),
+            state.key_test.device.as_str()
+        ),
+        ("@", "", "")
+    );
+    assert!(
+        state
+            .key_test
+            .prompt
+            .starts_with("リモート デスクトップで接続しています。"),
+        "{}",
+        state.key_test.prompt
+    );
 }
 
 #[test]

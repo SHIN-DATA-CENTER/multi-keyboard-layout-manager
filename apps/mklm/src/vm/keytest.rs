@@ -1,8 +1,13 @@
 //! The IME-free key test (plan 1.4, 3.3; design m3 B.6, B.9): what the FocusScope received, and
 //! the Shift+2 verdict ("@" = US, "\"" = JIS) judged against what the change should have done
-//! (review U2). The keyboard comes from the last Raw Input key press (winit `DeviceEvent::Key`
-//! arrives before the window's key event, M0 #8). The typed text is kept in memory only and
-//! never logged (plan 2.2).
+//! (review U2). The keyboard comes from the Raw Input key press just before (winit
+//! `DeviceEvent::Key` arrives before the window's key event, M0 #8), each press used once and only
+//! when recent (`state::key_source`). The typed text is kept in memory only and never logged
+//! (plan 2.2).
+//!
+//! In a Remote Desktop session the keys come from the client: Raw Input names no keyboard for them
+//! (docs/research/rdp-keyboard.md 6.3), so they check none of this PC's keyboards. The prompt
+//! says so and asks for the test at the PC (design m3 B.6).
 //!
 //! The verdict is only as good as its inputs, so it says when it cannot judge:
 //! - the active input method is not the Japanese layout (with English (US) active every keyboard
@@ -49,12 +54,19 @@ pub struct KeyContext<'a> {
     /// The UI thread's active input language (HKL, low 32 bits).
     pub active_hkl: u32,
     pub expected: Option<Expected<'a>>,
+    /// The GUI runs in a Remote Desktop session (`state::remote_session`).
+    pub remote: bool,
 }
 
-/// The prompt before any key.
-pub fn prompt(lang: Lang) -> KeyTest {
+/// The prompt before any key; in a Remote Desktop session, the note that keys typed there check
+/// none of this PC's keyboards.
+pub fn prompt(lang: Lang, remote: bool) -> KeyTest {
     KeyTest {
-        prompt: i18n::key_test_prompt(lang),
+        prompt: if remote {
+            i18n::key_test_remote_prompt(lang)
+        } else {
+            i18n::key_test_prompt(lang)
+        },
         last_text: "—".into(),
         ..KeyTest::default()
     }
@@ -136,7 +148,7 @@ pub fn key_pressed(
     } else {
         (String::new(), Tone::Neutral)
     };
-    let mut test = prompt(lang);
+    let mut test = prompt(lang, context.remote);
     test.last_text = shown;
     test.verdict = verdict;
     test.verdict_tone = tone;
@@ -193,6 +205,7 @@ mod tests {
             source_name: Some(name),
             active_hkl: hkl,
             expected,
+            remote: false,
         }
     }
 
@@ -263,6 +276,50 @@ mod tests {
         assert_eq!(
             (neutral.verdict.as_str(), neutral.verdict_tone),
             ("Shift+2 → @ : it types US", Tone::Neutral)
+        );
+    }
+
+    /// Remote Desktop (docs/research/rdp-keyboard.md 6.3): the key comes without a keyboard of this
+    /// PC, so Shift+2 gets no verdict, and the prompt asks for the test at the PC.
+    #[test]
+    fn a_remote_desktop_key_checks_no_keyboard() {
+        let targets = vec![KEYCHRON.to_string()];
+        let jis = Expected {
+            targets: &targets,
+            name: "Keychron Receiver",
+            table: &LayoutTable::Jis,
+        };
+        let remote = KeyContext {
+            active_hkl: JAPANESE,
+            expected: Some(jis),
+            remote: true,
+            ..KeyContext::default()
+        };
+        let test = key_pressed("@", true, &remote, Lang::Ja).unwrap();
+        assert_eq!(test.last_text, "@");
+        assert_eq!((test.verdict.as_str(), test.device.as_str()), ("", ""));
+        assert!(
+            test.prompt
+                .starts_with("リモート デスクトップで接続しています。"),
+            "{}",
+            test.prompt
+        );
+        assert!(
+            test.prompt
+                .contains("この PC の前で、この PC につないだキーボードで"),
+            "{}",
+            test.prompt
+        );
+        assert_eq!(prompt(Lang::Ja, true).prompt, test.prompt);
+        assert!(
+            prompt(Lang::En, true)
+                .prompt
+                .starts_with("This is a Remote Desktop session")
+        );
+        // At the console: the usual prompt.
+        assert_eq!(
+            prompt(Lang::Ja, false).prompt,
+            i18n::key_test_prompt(Lang::Ja)
         );
     }
 

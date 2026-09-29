@@ -425,26 +425,37 @@ fn check_row_for<'a>(state: &AppState, rows: &'a [CheckRow], source: &str) -> Op
 }
 
 /// What the key test on the post-reboot check is judged against (review U2): the row of the
-/// keyboard that sent the key, `(targets, name, table)`; `None` elsewhere.
-pub fn key_expectation(state: &AppState) -> Option<(Vec<String>, String, LayoutTable)> {
+/// keyboard that sent the key (`source`, from `state::key_source`), `(targets, name, table)`;
+/// `None` elsewhere and for a key no keyboard of this PC sent.
+pub fn key_expectation(
+    state: &AppState,
+    source: Option<&str>,
+) -> Option<(Vec<String>, String, LayoutTable)> {
     if state.page != Page::PostReboot || state.overlay != OverlayKind::None {
         return None;
     }
     let entry = post_reboot_entry(state)?;
-    let (source, _) = state.last_key.as_ref()?;
+    let source = source?;
     let rows = check_rows_of(state, entry);
     let row = check_row_for(state, &rows, source)?;
     let table = post_reboot::expected_table(row)?.clone();
     Some((
-        vec![row.instance_id.clone(), source.clone()],
+        vec![row.instance_id.clone(), source.to_string()],
         row.name.clone(),
         table,
     ))
 }
 
-/// A key in the post-reboot check's key test: fills the row's "typed" column. The first key the
-/// user types there also ends the on-top period (the user is acting on the page).
-pub fn key_typed(state: &mut AppState, text: &str, shift: bool) -> Vec<Effect> {
+/// A key in the post-reboot check's key test: fills the row of the keyboard that sent it
+/// (`source`: instance ID and scan code) in the "typed" column; a key without a source (Remote
+/// Desktop, the on-screen keyboard) fills none. The first key the user types there also ends the
+/// on-top period (the user is acting on the page).
+pub fn key_typed(
+    state: &mut AppState,
+    text: &str,
+    shift: bool,
+    source: Option<(&str, u32)>,
+) -> Vec<Effect> {
     if state.page != Page::PostReboot || state.overlay != OverlayKind::None {
         return Vec::new();
     }
@@ -452,11 +463,11 @@ pub fn key_typed(state: &mut AppState, text: &str, shift: bool) -> Vec<Effect> {
     let Some(entry) = post_reboot_entry(state) else {
         return effects;
     };
-    let Some((source, scancode)) = state.last_key.clone() else {
+    let Some((source, scancode)) = source else {
         return effects;
     };
     let rows = check_rows_of(state, entry);
-    let Some(row) = check_row_for(state, &rows, &source) else {
+    let Some(row) = check_row_for(state, &rows, source) else {
         return effects;
     };
     let Some(typed) = post_reboot::typed_for(

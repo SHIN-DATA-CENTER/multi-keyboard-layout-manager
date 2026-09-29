@@ -63,6 +63,22 @@ use crate::vm::status::{BannerTarget, NeedsApply, banner_target, needs_apply};
 /// milliseconds, and one read covers them all.
 pub const KEYBOARD_SETTLE: Duration = Duration::from_millis(750);
 
+/// How much older than the window's key event its Raw Input press may be (design m3 B.6). The
+/// press arrives just before the key event (M0 #8); an older one belongs to an earlier key, and the
+/// key under test came without a press MKLM could name — from a Remote Desktop client (Raw Input
+/// has no device name for it, docs/research/rdp-keyboard.md 6.3) or the on-screen keyboard.
+pub const KEY_SOURCE_MAX_AGE: Duration = Duration::from_secs(1);
+
+/// A Raw Input key press the key test has not used yet ([`AppState::last_key`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawKey {
+    /// The keyboard's instance ID.
+    pub instance_id: String,
+    /// The set 1 scan code.
+    pub scancode: u32,
+    pub at: Instant,
+}
+
 /// The restart, post-reboot, conflict, history and recovery pages (WP-U4, WP-U5).
 pub mod journal_pages;
 
@@ -366,8 +382,11 @@ pub struct AppState {
     pub identify: bool,
     /// The keyboard (instance ID) that typed last while identifying.
     pub highlighted: Option<String>,
-    /// The last Raw Input key press: keyboard (instance ID) and scan code (for the key test).
-    pub last_key: Option<(String, u32)>,
+    /// The last Raw Input key press the key test has not used yet. Each key of the key test takes
+    /// it, and only when it is at most [`KEY_SOURCE_MAX_AGE`] older: a key without a press of its
+    /// own (Remote Desktop, the on-screen keyboard) is judged for no keyboard, never for the one
+    /// that typed before it (design m3 B.6).
+    pub last_key: Option<RawKey>,
     /// Recent key and pointer input (the apply method's default, design m3 B.5).
     pub activity: InputActivity,
     pub key_test: KeyTest,
@@ -453,10 +472,12 @@ pub enum AppMsg {
     },
     /// Pointer input seen through Raw Input (at most one message every few seconds).
     PointerUsed(Instant),
-    /// A key in the IME-free key test (the FocusScope text; kept in memory only, plan 2.2).
+    /// A key in the IME-free key test (the FocusScope text; kept in memory only, plan 2.2), and
+    /// when it came.
     KeyTestPressed {
         text: String,
         shift: bool,
+        at: Instant,
     },
     ToggleIdentify,
     /// "キーボードを特定" from the tray menu (design m3 B.3, B.16): shows the window and starts
@@ -839,7 +860,7 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             vec![Effect::Render]
         }
         AppMsg::ActiveLayout(_) => Vec::new(),
-        AppMsg::KeyTestPressed { text, shift } => key_test_pressed(state, &text, shift),
+        AppMsg::KeyTestPressed { text, shift, at } => key_test_pressed(state, &text, shift, at),
         AppMsg::Refresh => vec![Effect::Read],
         AppMsg::KeyboardsChanged if state.keyboards_settling => Vec::new(),
         AppMsg::KeyboardsChanged => {
@@ -1807,35 +1828,54 @@ fn answer(state: &mut AppState, keep: bool) -> Vec<Effect> {
     vec![Effect::SendDecision(decision), Effect::Render]
 }
 
-/// A key in the key test, judged against the open question's expectation (review U2).
-fn key_test_pressed(state: &mut AppState, text: &str, shift: bool) -> Vec<Effect> {
-    let lang = state.lang.unwrap_or(Lang::Ja);
-    let source_name = state
-        .last_key
+/// True while the GUI runs in a Remote Desktop session (the last read): keys typed in it come from
+/// the client and check none of this PC's keyboards (docs/research/rdp-keyboard.md).
+pub fn remote_session(state: &AppState) -> bool {
+    state
+        .read
         .as_ref()
-        .map(|(id, _)| display_name(state, id));
+        .and_then(|read| read.snapshot.as_ref())
+        .is_some_and(|snapshot| snapshot.os.remote_session)
+}
+
+/// The keyboard that sent a key of the key test at `at`: the Raw Input press not used yet, if it
+/// is recent enough ([`KEY_SOURCE_MAX_AGE`]). Taken either way, so that the next key without a
+/// press of its own is not credited to this keyboard.
+fn key_source(state: &mut AppState, at: Instant) -> Option<RawKey> {
+    state
+        .last_key
+        .take()
+        .filter(|key| at.saturating_duration_since(key.at) <= KEY_SOURCE_MAX_AGE)
+}
+
+/// A key in the key test, judged against the open question's expectation (review U2).
+fn key_test_pressed(state: &mut AppState, text: &str, shift: bool, at: Instant) -> Vec<Effect> {
+    let lang = state.lang.unwrap_or(Lang::Ja);
+    let key = key_source(state, at);
+    let source = key
+        .as_ref()
+        .map(|key| (key.instance_id.as_str(), key.scancode));
+    let source_name = source.map(|(id, _)| display_name(state, id));
     // The open question's expectation; on the post-reboot check, the row of the keyboard that
     // typed (review U2).
     let expectation = session_view(state)
         .and_then(keytest::session_expectation)
-        .or_else(|| journal_pages::key_expectation(state));
+        .or_else(|| journal_pages::key_expectation(state, source.map(|(id, _)| id)));
     let expected = expectation.as_ref().map(|(targets, name, table)| Expected {
         targets,
         name,
         table,
     });
     let context = KeyContext {
-        source: state
-            .last_key
-            .as_ref()
-            .map(|(id, code)| (id.as_str(), *code)),
+        source,
         source_name: source_name.as_deref(),
         active_hkl: state.active_hkl,
         expected,
+        remote: remote_session(state),
     };
     let test = keytest::key_pressed(text, shift, &context, lang);
     // The post-reboot check's "typed" column.
-    let mut effects = journal_pages::key_typed(state, text, shift);
+    let mut effects = journal_pages::key_typed(state, text, shift, source);
     if let Some(test) = test {
         state.key_test = test;
         if !effects.contains(&Effect::Render) {
@@ -1933,7 +1973,11 @@ fn device_key(
         state.highlighted = Some(instance_id.clone());
         visible_change = true;
     }
-    state.last_key = Some((instance_id, scancode));
+    state.last_key = Some(RawKey {
+        instance_id,
+        scancode,
+        at,
+    });
     if save {
         effects.push(Effect::SaveSettings(Box::new(state.settings.clone())));
     }
@@ -2077,6 +2121,18 @@ mod tests {
             AppMsg::DeviceKey {
                 instance_id: instance_id.into(),
                 scancode,
+                at: Instant::now(),
+            },
+        )
+    }
+
+    /// Shift and a key in the key test now (the window's key event).
+    fn typed(state: &mut AppState, text: &str) -> Vec<Effect> {
+        update(
+            state,
+            AppMsg::KeyTestPressed {
+                text: text.into(),
+                shift: true,
                 at: Instant::now(),
             },
         )
@@ -2520,6 +2576,85 @@ mod tests {
         })
     }
 
+    /// Design m3 B.6 (INTERACTIONS-4): a key of the key test is credited only to the Raw Input
+    /// press just before it, and only once. A key without a press of its own (Remote Desktop, the
+    /// on-screen keyboard) gets no keyboard and no Shift+2 verdict, even right after a Shift+2 on a
+    /// keyboard of this PC; neither does a key whose press is older than `KEY_SOURCE_MAX_AGE`.
+    #[test]
+    fn a_key_without_its_own_raw_input_press_is_credited_to_no_keyboard() {
+        let mut state = AppState {
+            active_hkl: JAPANESE,
+            ..AppState::default()
+        };
+        key(&mut state, keytest::SCANCODE_DIGIT2);
+        typed(&mut state, "\"");
+        assert_eq!(
+            state.key_test.verdict,
+            "Shift+2 → \" : JIS 配列として動作しています"
+        );
+        assert!(
+            state
+                .key_test
+                .device
+                .starts_with("このキーを送ったキーボード: "),
+            "{}",
+            state.key_test.device
+        );
+        assert_eq!(state.last_key, None);
+        // The same key again without a press: nothing is credited to the Keychron.
+        typed(&mut state, "@");
+        assert_eq!(
+            (
+                state.key_test.last_text.as_str(),
+                state.key_test.verdict.as_str(),
+                state.key_test.device.as_str()
+            ),
+            ("@", "", "")
+        );
+        // A press older than the limit is not this key's.
+        let pressed = Instant::now();
+        let press = |state: &mut AppState| {
+            update(
+                state,
+                AppMsg::DeviceKey {
+                    instance_id: KEYCHRON.into(),
+                    scancode: keytest::SCANCODE_DIGIT2,
+                    at: pressed,
+                },
+            )
+        };
+        let key_at = |state: &mut AppState, at: Instant| {
+            update(
+                state,
+                AppMsg::KeyTestPressed {
+                    text: "@".into(),
+                    shift: true,
+                    at,
+                },
+            )
+        };
+        press(&mut state);
+        key_at(
+            &mut state,
+            pressed + KEY_SOURCE_MAX_AGE + Duration::from_millis(1),
+        );
+        assert_eq!(state.key_test.verdict, "");
+        assert_eq!(state.last_key, None);
+        // Within the limit it is.
+        press(&mut state);
+        key_at(&mut state, pressed + KEY_SOURCE_MAX_AGE);
+        assert_eq!(
+            state.key_test.verdict,
+            "Shift+2 → @ : US 配列として動作しています"
+        );
+        // Not in a remote session: the usual prompt.
+        assert!(!remote_session(&state));
+        assert_eq!(
+            state.key_test.prompt,
+            crate::i18n::key_test_prompt(Lang::Ja)
+        );
+    }
+
     #[test]
     fn a_change_from_the_page_to_the_result() {
         // T-APPLY-1 without the hardware: Keychron to JIS, a mouse user (switch now), the
@@ -2571,26 +2706,14 @@ mod tests {
         assert!(state.visible);
         // Shift+2 on the Keychron: judged against JIS (review U2).
         key(&mut state, keytest::SCANCODE_DIGIT2);
-        update(
-            &mut state,
-            AppMsg::KeyTestPressed {
-                text: "\"".into(),
-                shift: true,
-            },
-        );
+        typed(&mut state, "\"");
         assert_eq!(
             state.key_test.verdict,
             "Shift+2 → \" : ✓ 期待どおり JIS です"
         );
         // The built-in keyboard: which keyboard to use instead.
         key_from(&mut state, BUILT_IN, keytest::SCANCODE_DIGIT2);
-        update(
-            &mut state,
-            AppMsg::KeyTestPressed {
-                text: "\"".into(),
-                shift: true,
-            },
-        );
+        typed(&mut state, "\"");
         assert!(
             state
                 .key_test
