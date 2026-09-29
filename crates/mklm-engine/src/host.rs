@@ -41,11 +41,17 @@ pub trait Host {
     /// A new random operation ID.
     fn new_op_id(&mut self) -> Result<OpId, HostError>;
 
-    /// The current boot's ID (see [`BootId`]).
+    /// The current boot's ID (see [`BootId`]): the counter form of `KUSER_SHARED_DATA.BootId`.
     fn boot_id(&self) -> Result<BootId, HostError>;
 
-    /// Kernel boot time minus its bias, for the history's diagnostic field only.
+    /// Kernel boot time minus its bias, for the history's diagnostic field; also judges the boot
+    /// IDs 0.1.x recorded ([`mklm_core::CurrentBoot::boot_time`]).
     fn boot_time_hint(&self) -> Option<u64>;
+
+    /// The loader boot GUID 0.1.x recorded as the boot ID, only to judge such legacy ids
+    /// ([`mklm_core::CurrentBoot::legacy_guid`]); `None` when it cannot be read (the legacy rule
+    /// then takes the safe side). No default: every host must forward it.
+    fn legacy_boot_guid(&self) -> Option<BootId>;
 
     /// This process (the owner of the entries it writes).
     fn current_process(&self) -> Result<ProcessIdentity, HostError>;

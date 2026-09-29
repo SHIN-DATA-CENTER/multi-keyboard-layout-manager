@@ -627,6 +627,10 @@ impl Host for WinHost {
         session::boot_time_hint().ok()
     }
 
+    fn legacy_boot_guid(&self) -> Option<BootId> {
+        session::legacy_boot_guid().ok()
+    }
+
     fn current_process(&self) -> Result<ProcessIdentity, HostError> {
         proc_identity::current_process_identity()
             .map_err(|error| host_error("current process", error))
@@ -1293,7 +1297,10 @@ mod tests {
         assert_ne!(a, b);
         let boot = host.boot_id().expect("boot id");
         assert_eq!(host.boot_id(), Ok(boot));
+        assert!(boot.boot_counter().is_some(), "{}", boot.to_text());
         assert!(host.boot_time_hint().is_some());
+        let guid = host.legacy_boot_guid();
+        assert!(guid.is_some_and(BootId::is_legacy), "{guid:?}");
         let me = host.current_process().expect("current process");
         assert_eq!(me.pid, std::process::id());
         assert_eq!(host.liveness(&me), Liveness::Alive);

@@ -29,19 +29,20 @@ use std::time::Duration;
 
 use mklm_core::{
     ApplyOptions, ApplyPending, BASELINE_SCHEMA_VERSION, BaselineRecord, BootId, ConflictInfo,
-    ConflictPolicy, ContextValue, Countdown, DN_STARTED, Decision, DeviceOverrides, Event, Expect,
-    ExpectedKeyboard, ExpectedPlan, FailureReason, GlobalSettings, InputMethods, InvPs2Violation,
-    Journal, JournalEntry, JournalError, KeyboardDevice, KeyboardDriver, KeyboardType,
-    LayoutChoice, MAX_HISTORY, Observation, OpId, OpKind, OpState, OperationError, OperationPlan,
-    OperationResult, OsInfo, Outcome, PendingAction, PlanError, PlanStep, PlannedWrite,
-    ProcessIdentity, RESTORE_ON_UNINSTALL_VALUE, RecoveredOp, RecoveryContext, RecoveryDecision,
-    RegValue, ResolutionChoice, RestoreError, RestorePlan, RestoreScope, RestoreTo, RevertMode,
-    STORE_VERSION, STORE_VERSION_VALUE, SkipReason, SystemSnapshot, Timestamp, TransitionRecord,
-    Transport, UnreadableEntry, ValueKey, ValueOp, ValueRecord, WriteTarget, apply_method,
-    apply_pending_cleared, apply_pending_on_close, assess, check_cleanup, check_inv_ps2,
-    check_restore_record, decide_recovery_with_removed, is_unread_value, live_reset_bans, observe,
-    physical_device_members, plan_migration, plan_restore, plan_set_layout, render_recovery_assets,
-    state_after_resolution, structural_reset_bans, value_eq, value_names,
+    ConflictPolicy, ContextValue, Countdown, CurrentBoot, DN_STARTED, Decision, DeviceOverrides,
+    Event, Expect, ExpectedKeyboard, ExpectedPlan, FailureReason, GlobalSettings, InputMethods,
+    InvPs2Violation, Journal, JournalEntry, JournalError, KeyboardDevice, KeyboardDriver,
+    KeyboardType, LayoutChoice, MAX_HISTORY, Observation, OpId, OpKind, OpState, OperationError,
+    OperationPlan, OperationResult, OsInfo, Outcome, PendingAction, PlanError, PlanStep,
+    PlannedWrite, ProcessIdentity, RESTORE_ON_UNINSTALL_VALUE, RecoveredOp, RecoveryContext,
+    RecoveryDecision, RegValue, ResolutionChoice, RestoreError, RestorePlan, RestoreScope,
+    RestoreTo, RevertMode, STORE_VERSION, STORE_VERSION_VALUE, SkipReason, SystemSnapshot,
+    Timestamp, TransitionRecord, Transport, UnreadableEntry, ValueKey, ValueOp, ValueRecord,
+    WriteTarget, apply_method, apply_pending_cleared, apply_pending_on_close, assess,
+    check_cleanup, check_inv_ps2, check_restore_record, decide_recovery_with_removed,
+    is_unread_value, live_reset_bans, observe, physical_device_members, plan_migration,
+    plan_restore, plan_set_layout, render_recovery_assets, state_after_resolution,
+    structural_reset_bans, value_eq, value_names,
 };
 
 use crate::backend::{BackendError, JournalSlot, RegistryBackend};
@@ -1325,7 +1326,8 @@ where
         Ok(empty_result(None, Outcome::Confirmed, &[]))
     }
 
-    /// The parsed journal, without the lock (read-only; what `mklm-cli journal` shows).
+    /// The parsed journal as stored, without the lock (read-only; what `mklm-cli journal` shows).
+    /// Legacy (0.1.x) boot IDs are left as they are: only [`Self::open`] adopts them.
     pub fn read_journal(&self) -> Result<Journal, EngineError> {
         let dump = self.registry.read_journal()?;
         let mut journal = Journal::parse(&dump.ops, &dump.baselines);
@@ -1358,12 +1360,24 @@ where
     }
 
     /// D.1 steps 2-7.
+    ///
+    /// The boot IDs that 0.1.x recorded (the loader GUID) are judged first, in memory
+    /// (`mklm_core::Journal::adopt_legacy_boots`): those of this boot become this boot's counter
+    /// ID, every other one reads as an earlier boot. Every decision below compares with
+    /// `current.id` by equality; an adopted entry is stored in the new form only when this session
+    /// writes it for its own reasons.
     fn open<'s>(
         &mut self,
         sink: &'s mut dyn EventSink,
         gate: Gate,
     ) -> Result<Session<'s>, EngineError> {
-        let journal = self.read_journal()?;
+        let current = CurrentBoot {
+            id: self.host.boot_id()?,
+            boot_time: self.host.boot_time_hint(),
+            legacy_guid: self.host.legacy_boot_guid(),
+        };
+        let mut journal = self.read_journal()?;
+        journal.adopt_legacy_boots(&current);
         if let Some(bad) = journal.unreadable.first() {
             return Err(EngineError::JournalUnreadable(bad.error.clone()));
         }
@@ -1387,14 +1401,13 @@ where
             });
         }
         let inventory = self.devices.keyboards()?;
-        let boot = self.host.boot_id()?;
         let process = self.host.current_process()?;
         let mut s = Session {
             sink,
             journal,
             keyboards: inventory.keyboards,
             global: GlobalSettings::default(),
-            boot,
+            boot: current.id,
             process,
             warnings: Vec::new(),
             inv_ps2: None,
