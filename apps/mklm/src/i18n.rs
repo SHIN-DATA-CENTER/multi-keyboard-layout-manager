@@ -33,6 +33,9 @@ pub mod wizard;
 /// Updates (M5b, design m5b E).
 pub mod update;
 
+/// The PC's standard layout (design standard-layout B.12, B.13).
+pub mod standard;
+
 /// A language the GUI speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lang {
@@ -1409,6 +1412,24 @@ pub fn operation_refused(error: &OperationError, lang: Lang) -> String {
             lang,
             "MKLM の安全規則に反するため、この変更はできません。理由は技術的な詳細にあります。",
             "MKLM's safety rules do not allow this change; the technical details say why.",
+        ),
+        // Design standard-layout B.13 "拒否" (the standard page names the keyboards itself:
+        // `standard::refused`).
+        OperationError::UnknownStandard { .. } => standard::unknown_standard(lang),
+        OperationError::IncompleteValues { .. } => pick(
+            lang,
+            "配列を決める 2 つの値のうち片方しかないキーボードがあるため、PC の標準配列を変えられません。先にそのキーボードの［変更…］で配列を割り当ててください。",
+            "A keyboard stores only one of the two values that set a layout, so MKLM cannot change the PC's standard layout. First assign it a layout with its \"Change…\".",
+        ),
+        OperationError::Ps2WithoutTable { .. } => pick(
+            lang,
+            "配列を決めない種類の値を持つ PS/2 キーボードがあるため、PC の標準配列を変えられません。先にそのキーボードの［変更…］で JIS か US を割り当ててください（PC の再起動が必要です）。",
+            "A PS/2 keyboard stores values that do not set a layout, so MKLM cannot change the PC's standard layout. First assign it JIS or US with its \"Change…\" (a PC restart is needed).",
+        ),
+        OperationError::NotFollowingStandard { .. } => pick(
+            lang,
+            "このキーボードは今、標準配列に従っていません。",
+            "This keyboard does not follow the standard layout now.",
         ),
     }
 }

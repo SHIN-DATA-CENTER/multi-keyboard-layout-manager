@@ -41,6 +41,19 @@ pub fn operation(kind: &OpKind, name_of: &dyn Fn(&str) -> String, lang: Lang) ->
         }
         OpKind::RestoreBaseline { scope, .. } => restore_operation(scope, name_of, lang),
         OpKind::Cleanup { instance_id, .. } => super::cleanup_text(&name_of(instance_id), lang),
+        OpKind::SetStandard { from, to, .. } => standard_operation(*from, *to, lang),
+    }
+}
+
+/// A standard change (design standard-layout B.13): "PC の標準配列を JIS から US に".
+pub fn standard_operation(from: Layout, to: Layout, lang: Lang) -> String {
+    let name = |layout: Layout| match layout {
+        Layout::Jis => "JIS",
+        Layout::Us => "US",
+    };
+    match lang {
+        Lang::Ja => format!("PC の標準配列を {} から {} に", name(from), name(to)),
+        Lang::En => format!("Standard layout {} → {}", name(from), name(to)),
     }
 }
 

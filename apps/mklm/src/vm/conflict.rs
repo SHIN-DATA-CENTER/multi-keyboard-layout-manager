@@ -210,16 +210,22 @@ pub fn main_pair_name(
             .records
             .iter()
             .find(|record| matches!(record.target, WriteTarget::Global)),
+        // The standard itself, not the check-only records of the fixed-mode pair (design
+        // standard-layout B.2).
+        mklm_core::OpKind::SetStandard { .. } => entry.records.iter().find(|record| {
+            matches!(record.target, WriteTarget::Global) && !record.is_check_only()
+        }),
         mklm_core::OpKind::RestoreBaseline { .. } | mklm_core::OpKind::Cleanup { .. } => None,
     }
     .or_else(|| entry.records.first());
+    let set_standard = matches!(entry.kind, mklm_core::OpKind::SetStandard { .. });
     let Some(main) = main else {
         return text::pair_name(text::PairName::Unknown, lang);
     };
     let records: Vec<&ValueRecord> = entry
         .records
         .iter()
-        .filter(|record| record.target == main.target)
+        .filter(|record| record.target == main.target && !(set_standard && record.is_check_only()))
         .collect();
     let chosen: Vec<Option<RegValue>> = records.iter().map(|record| values(record)).collect();
     text::pair_name(pair(&main.target, &records, &chosen), lang)

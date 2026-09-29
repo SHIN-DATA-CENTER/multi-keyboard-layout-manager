@@ -213,6 +213,12 @@ pub struct OsInfo {
     /// being typed.
     #[serde(default)]
     pub client_keyboard_type: Option<KeyboardType>,
+    /// This PC's name (`GetComputerNameExW(ComputerNameDnsHostname)`), e.g. `DESKTOP-3TCSIET`.
+    /// Texts shown in a Remote Desktop session name both ends ("the PC you connect to (NAME)"),
+    /// because "this PC" is ambiguous there (design standard-layout UX-5). `None` when it cannot
+    /// be read; the texts then say "the PC you connect to" without a name.
+    #[serde(default)]
+    pub computer_name: Option<String>,
 }
 
 /// Everything MKLM reads from the system in one pass.

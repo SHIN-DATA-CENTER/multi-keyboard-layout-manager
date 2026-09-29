@@ -13,13 +13,21 @@
 //!
 //! 1. pins added or changed on i8042prt keyboards (both device values present afterwards);
 //! 2. the global key, when the fixed pair is present afterwards (added or kept);
-//! 3. every other keyboard (HID);
+//! 3. every other keyboard (HID), except those of phase 4b;
 //! 4. the global key, when the fixed pair is absent afterwards (removed or still absent);
+//!    4b. in a restore that stays in per-keyboard mode (the global pair absent before and after
+//!    it), the HID keyboards whose writes leave them without a table of their own: they follow
+//!    the standard afterwards, so the standard is put back first (design standard-layout B.6);
 //! 5. pins removed from i8042prt keyboards.
 //!
 //! If the end state satisfies INV-PS2, no intermediate state breaks it: pins only grow before the
 //! pair is removed (phase 4), and the pair is present whenever a pin is removed (phase 5). The plan
 //! is still replayed step by step and checked, like [`crate::check_plan`] does for new writes.
+//!
+//! "Before" the plan, the global pair is what the records of the pair expect ([`Expect`]; the
+//! current value for [`Expect::Any`] or without such a record), so that a pair written by someone
+//! else keeps the order the journal planned: a standard change is then still undone standard
+//! first, and the global step stops at the conflict before any pin is removed.
 //!
 //! For INV-PS2 a value only counts as a pin or as part of the global pair when it is a `REG_DWORD`:
 //! a [`RegValue::Other`] baseline (say, a `REG_SZ` "7") is restored byte for byte but is not
@@ -28,6 +36,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::allowlist::{DEVICE_VALUE_NAMES, GLOBAL_VALUE_NAMES, WriteTarget, unread_value_names};
+use crate::device::predict_type;
 use crate::journal::{
     BaselineRecord, RegValue, ValueKey, ValueRecord, is_ps2_value_name, same_target, value_eq,
 };
@@ -89,6 +98,11 @@ pub enum RestorePhase {
     GlobalWithPair,
     Other,
     GlobalWithoutPair,
+    /// A restore that stays in per-keyboard mode (no global pair before or after it): the HID
+    /// keyboards left without a table of their own by their writes (a pin removed, 7/0 put back).
+    /// They follow the standard afterwards, so they go after the global values; a standard change
+    /// is then undone standard first, pins last (design standard-layout B.6, SAFETY-1).
+    FollowStandard,
     RemovePins,
 }
 
@@ -371,6 +385,32 @@ pub fn plan_restore(
         }
     }
 
+    // Per-keyboard mode before and after the plan (design standard-layout B.6): no value of the
+    // global pair, before as the pair's records expect it, after with the restore values.
+    let expected_pair_value = |name: &str, current: Option<u32>| -> Option<u32> {
+        match records
+            .iter()
+            .position(|r| r.target == WriteTarget::Global && r.name.eq_ignore_ascii_case(name))
+        {
+            Some(index) => match expect(index) {
+                Expect::Value { value } => as_dword(&value),
+                Expect::Any => current,
+            },
+            None => current,
+        }
+    };
+    let pair_before = (
+        expected_pair_value(value_names::PS2_TYPE, global.override_keyboard_type),
+        expected_pair_value(value_names::PS2_SUBTYPE, global.override_keyboard_subtype),
+    );
+    let mut global_after = global.clone();
+    for step in steps.iter().filter(|s| s.target == WriteTarget::Global) {
+        apply_global(&mut global_after, &step.writes);
+    }
+    let stays_per_keyboard = pair_before == (None, None)
+        && global_after.override_keyboard_type.is_none()
+        && global_after.override_keyboard_subtype.is_none();
+
     for step in &mut steps {
         step.phase = match &step.target {
             WriteTarget::Global => {
@@ -389,14 +429,24 @@ pub fn plan_restore(
                     // A devnode that is gone: its names say which stack it was.
                     None => step.writes.iter().all(|w| is_ps2_value_name(&w.name)),
                 };
+                let mut after = known.map(|kb| kb.overrides.clone()).unwrap_or_default();
+                apply_device(&mut after, &step.writes);
+                let is_hid = match known {
+                    Some(kb) => kb.driver == KeyboardDriver::Kbdhid,
+                    None => !is_ps2,
+                };
                 if is_ps2 {
-                    let mut after = known.map(|kb| kb.overrides.clone()).unwrap_or_default();
-                    apply_device(&mut after, &step.writes);
                     if after.ps2_type().is_some() {
                         RestorePhase::AddPins
                     } else {
                         RestorePhase::RemovePins
                     }
+                } else if stays_per_keyboard
+                    && is_hid
+                    && predict_type(&KeyboardDriver::Kbdhid, &after, &global_after)
+                        .is_some_and(|ty| ty.per_keyboard_table().is_none())
+                {
+                    RestorePhase::FollowStandard
                 } else {
                     RestorePhase::Other
                 }
@@ -449,6 +499,7 @@ pub fn plan_restore(
 mod tests {
     use super::*;
     use crate::fixtures;
+    use crate::layout::{LayoutTable, effective_layout};
     use crate::model::value_names::*;
     use crate::test_support::*;
 
@@ -1184,5 +1235,287 @@ mod tests {
                 (RestorePhase::RemovePins, device(gone)),
             ]
         );
+    }
+
+    // --- Design standard-layout B.6: a standard change is undone standard first --------------
+
+    fn wireless_id() -> String {
+        fixtures::desktop_wireless().instance_id
+    }
+
+    fn vxe_id() -> String {
+        fixtures::desktop_vxe().instance_id
+    }
+
+    fn second_id() -> String {
+        fixtures::desktop_wireless_second().instance_id
+    }
+
+    /// The desktop PC after "standard JIS → US" wrote its records: the followers pinned to JIS,
+    /// the standard US, the fixed-mode pair absent (per-keyboard mode).
+    fn after_standard_change() -> (Vec<KeyboardDevice>, GlobalSettings) {
+        let mut keyboards = fixtures::desktop_pc().keyboards;
+        for kb in &mut keyboards {
+            if [wireless_id(), second_id(), vxe_id()].contains(&kb.instance_id) {
+                kb.overrides.keyboard_type_override = Some(7);
+                kb.overrides.keyboard_subtype_override = Some(2);
+            }
+        }
+        let global = GlobalSettings {
+            layer_driver_jpn: Some("kbd101.dll".into()),
+            override_keyboard_identifier: Some("PCAT_101KEY".into()),
+            ..fixtures::global_per_keyboard()
+        };
+        (keyboards, global)
+    }
+
+    /// The records of that change in forward order: pins, then the check-only records of the
+    /// global pair and the standard.
+    fn standard_change_records() -> Vec<ValueRecord> {
+        let mut records = Vec::new();
+        for id in [wireless_id(), second_id(), vxe_id()] {
+            records.push(record(device(&id), HID_TYPE, RegValue::Absent, dword(7)));
+            records.push(record(device(&id), HID_SUBTYPE, RegValue::Absent, dword(2)));
+        }
+        records.extend([
+            record(
+                WriteTarget::Global,
+                PS2_TYPE,
+                RegValue::Absent,
+                RegValue::Absent,
+            ),
+            record(
+                WriteTarget::Global,
+                PS2_SUBTYPE,
+                RegValue::Absent,
+                RegValue::Absent,
+            ),
+            record(
+                WriteTarget::Global,
+                LAYER_DRIVER_JPN,
+                sz("kbd106.dll"),
+                sz("kbd101.dll"),
+            ),
+            record(
+                WriteTarget::Global,
+                KEYBOARD_IDENTIFIER,
+                sz("PCAT_106KEY"),
+                sz("PCAT_101KEY"),
+            ),
+        ]);
+        records
+    }
+
+    /// The table each keyboard types with in a state (I8 of the crash tests), for the keyboards
+    /// MKLM can write.
+    fn tables(keyboards: &[KeyboardDevice], global: &GlobalSettings) -> Vec<Option<LayoutTable>> {
+        keyboards
+            .iter()
+            .map(|kb| {
+                let writable =
+                    matches!(kb.driver, KeyboardDriver::Kbdhid | KeyboardDriver::I8042prt);
+                writable
+                    .then(|| kb.predicted_type(global))
+                    .flatten()
+                    .map(|ty| effective_layout(global.mode(), &global.standard_layout(), ty).table)
+            })
+            .collect()
+    }
+
+    /// Replays `plan` like [`replay`] and asserts I8: no keyboard's table changes on the way.
+    fn replay_keeping_tables(
+        plan: &RestorePlan,
+        keyboards: &[KeyboardDevice],
+        global: &GlobalSettings,
+    ) {
+        replay(plan, keyboards, global);
+        let expected = tables(keyboards, global);
+        let mut keyboards = keyboards.to_vec();
+        let mut global = global.clone();
+        for (n, step) in plan.steps.iter().enumerate() {
+            match &step.target {
+                WriteTarget::Global => apply_global(&mut global, &step.writes),
+                WriteTarget::Device { instance_id } => {
+                    let i = find_keyboard(&keyboards, instance_id).unwrap();
+                    apply_device(&mut keyboards[i].overrides, &step.writes);
+                }
+            }
+            assert_eq!(
+                tables(&keyboards, &global),
+                expected,
+                "a table changed after step {n}: {step:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_standard_change_is_reverted_standard_first() {
+        let records = standard_change_records();
+        let (keyboards, global) = after_standard_change();
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Before,
+            &last_written(&records),
+            &keyboards,
+            &global,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            phases(&plan),
+            vec![
+                (RestorePhase::GlobalWithoutPair, WriteTarget::Global),
+                (RestorePhase::FollowStandard, device(&wireless_id())),
+                (RestorePhase::FollowStandard, device(&second_id())),
+                (RestorePhase::FollowStandard, device(&vxe_id())),
+            ]
+        );
+        replay_keeping_tables(&plan, &keyboards, &global);
+        // The old order (pins first) would have let the followers type US in between.
+        let mut early = keyboards.clone();
+        let i = find_keyboard(&early, &wireless_id()).unwrap();
+        early[i].overrides = DeviceOverrides::default();
+        assert_ne!(tables(&early, &global), tables(&keyboards, &global));
+    }
+
+    #[test]
+    fn a_rollback_of_a_standard_change_puts_the_standard_back_first() {
+        let records = standard_change_records();
+        let (keyboards, global) = after_standard_change();
+        // A rollback expects `intended` (nothing was confirmed).
+        let intended = |i: usize| Expect::Value {
+            value: records[i].intended.clone(),
+        };
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Before,
+            &intended,
+            &keyboards,
+            &global,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(plan.steps[0].target, WriteTarget::Global);
+        assert!(
+            plan.steps[1..]
+                .iter()
+                .all(|s| s.phase == RestorePhase::FollowStandard)
+        );
+        replay_keeping_tables(&plan, &keyboards, &global);
+        // The check-only records are part of the global step, first: a pair that appeared stops
+        // it before any pin is removed.
+        let global_step = &plan.steps[0];
+        assert_eq!(
+            global_step
+                .writes
+                .iter()
+                .map(|w| w.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![PS2_TYPE, PS2_SUBTYPE, LAYER_DRIVER_JPN, KEYBOARD_IDENTIFIER]
+        );
+    }
+
+    #[test]
+    fn the_order_follows_the_expected_pair_not_the_current_one() {
+        let records = standard_change_records();
+        let (keyboards, global) = after_standard_change();
+        // The Settings app switched the PC to fixed mode (English) after the change.
+        let fixed_now = GlobalSettings {
+            override_keyboard_type: Some(7),
+            override_keyboard_subtype: Some(0),
+            ..global
+        };
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Before,
+            &last_written(&records),
+            &keyboards,
+            &fixed_now,
+            &[],
+        )
+        .unwrap();
+        // Still the standard first: its compare-and-swap on the pair fails there, and no pin has
+        // been removed.
+        assert_eq!(plan.steps[0].target, WriteTarget::Global);
+        assert_eq!(plan.steps[0].phase, RestorePhase::GlobalWithoutPair);
+        assert_eq!(
+            plan.steps[0].writes[0].expect,
+            Expect::Value {
+                value: RegValue::Absent
+            }
+        );
+        assert!(
+            plan.steps[1..]
+                .iter()
+                .all(|s| s.phase == RestorePhase::FollowStandard)
+        );
+        // Without records of the pair, the current pair decides: fixed mode, the order of a
+        // restore towards fixed mode (the global values first, then the keyboards).
+        let without_guards: Vec<ValueRecord> = records
+            .iter()
+            .filter(|r| r.target != WriteTarget::Global || !is_ps2_value_name(&r.name))
+            .cloned()
+            .collect();
+        let plan = plan_restore(
+            &without_guards,
+            RestoreTo::Before,
+            &last_written(&without_guards),
+            &keyboards,
+            &fixed_now,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(plan.steps[0].phase, RestorePhase::GlobalWithPair);
+        assert!(
+            plan.steps[1..]
+                .iter()
+                .all(|s| s.phase == RestorePhase::Other)
+        );
+    }
+
+    #[test]
+    fn pins_added_by_a_restore_go_before_the_standard() {
+        // Undoing a restore to baseline that stayed in per-keyboard mode: it had deleted the
+        // Keychron's pin (US) and put the standard back to JIS. The revert adds the pin, which has a
+        // table of its own, before the standard goes back to US, so the keyboard never follows
+        // the standard in between.
+        let keychron = fixtures::desktop_keychron().instance_id;
+        let records = vec![
+            record(device(&keychron), HID_TYPE, dword(4), RegValue::Absent),
+            record(device(&keychron), HID_SUBTYPE, dword(0), RegValue::Absent),
+            record(
+                WriteTarget::Global,
+                LAYER_DRIVER_JPN,
+                sz("kbd101.dll"),
+                sz("kbd106.dll"),
+            ),
+            record(
+                WriteTarget::Global,
+                KEYBOARD_IDENTIFIER,
+                sz("PCAT_101KEY"),
+                sz("PCAT_106KEY"),
+            ),
+        ];
+        let mut keyboards = fixtures::desktop_pc().keyboards;
+        let i = find_keyboard(&keyboards, &keychron).unwrap();
+        keyboards[i].overrides = DeviceOverrides::default();
+        let global = fixtures::global_per_keyboard();
+        let plan = plan_restore(
+            &records,
+            RestoreTo::Before,
+            &last_written(&records),
+            &keyboards,
+            &global,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            phases(&plan),
+            vec![
+                (RestorePhase::Other, device(&keychron)),
+                (RestorePhase::GlobalWithoutPair, WriteTarget::Global),
+            ]
+        );
+        replay(&plan, &keyboards, &global);
     }
 }

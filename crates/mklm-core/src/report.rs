@@ -528,6 +528,13 @@ mod tests {
             },
             FailureReason::WriteError {
                 message: "x".into(),
+                target: None,
+            },
+            FailureReason::WriteError {
+                message: "x".into(),
+                target: Some(WriteTarget::Device {
+                    instance_id: keychron(),
+                }),
             },
             FailureReason::CallerDisconnected,
             FailureReason::Interrupted,

@@ -203,9 +203,9 @@ pub fn decide_recovery_with_removed(
 /// What kind of operation an entry is, as far as recovery cares.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntryKind {
-    /// `SetLayout`, `Migrate` and `Cleanup`: rolled back or forward. A cleanup has no `apply`, so
-    /// once every value is deleted it rolls forward to `AwaitingConfirm` without a countdown,
-    /// where the user keeps or reverts it (design m3 A.5).
+    /// `SetLayout`, `Migrate`, `SetStandard` and `Cleanup`: rolled back or forward. A cleanup has
+    /// no `apply`, so once every value is deleted it rolls forward to `AwaitingConfirm` without
+    /// a countdown, where the user keeps or reverts it (design m3 A.5).
     Change,
     /// Interactive restore-to-baseline: completed forward, never confirmed by recovery.
     InteractiveRestore,
@@ -217,9 +217,10 @@ fn entry_kind(entry: &JournalEntry) -> EntryKind {
     match entry.kind {
         OpKind::RestoreBaseline { silent: true, .. } => EntryKind::SilentRestore,
         OpKind::RestoreBaseline { silent: false, .. } => EntryKind::InteractiveRestore,
-        OpKind::SetLayout { .. } | OpKind::Migrate { .. } | OpKind::Cleanup { .. } => {
-            EntryKind::Change
-        }
+        OpKind::SetLayout { .. }
+        | OpKind::Migrate { .. }
+        | OpKind::Cleanup { .. }
+        | OpKind::SetStandard { .. } => EntryKind::Change,
     }
 }
 
@@ -716,6 +717,8 @@ mod tests {
     enum Kind {
         Set,
         Migrate,
+        /// Decided like a migration (design standard-layout B.6).
+        SetStandard,
         /// Decided like a set (design m3 A.5): rolled back or forward, never completed.
         Cleanup,
         InteractiveRestore,
@@ -749,7 +752,10 @@ mod tests {
         let elsewhere = has(Observation::Elsewhere);
         let all_intended_or_unchanged = !at_before && !elsewhere;
         let all_before_or_unchanged = !at_intended && !elsewhere;
-        let change = matches!(case.kind, Kind::Set | Kind::Migrate | Kind::Cleanup);
+        let change = matches!(
+            case.kind,
+            Kind::Set | Kind::Migrate | Kind::SetStandard | Kind::Cleanup
+        );
         let silent = case.kind == Kind::SilentRestore;
         let inv = case.inv_ps2_broken.then(violation);
         let conflict = |pick: &dyn Fn(Observation) -> bool| RecoveryDecision::Conflict {
@@ -868,6 +874,7 @@ mod tests {
         let kind = match case.kind {
             Kind::Set => set_kind(KEYCHRON),
             Kind::Migrate => migrate_kind(),
+            Kind::SetStandard => standard_kind(),
             Kind::Cleanup => cleanup_kind(PS2),
             Kind::InteractiveRestore => restore_kind(false),
             Kind::SilentRestore => restore_kind(true),
@@ -898,6 +905,7 @@ mod tests {
         let kinds = [
             Kind::Set,
             Kind::Migrate,
+            Kind::SetStandard,
             Kind::Cleanup,
             Kind::InteractiveRestore,
             Kind::SilentRestore,
@@ -938,7 +946,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(count, 11 * 16 * 2 * 4 * 2 * 5 * 2 * 2);
+        assert_eq!(count, 11 * 16 * 2 * 4 * 2 * 6 * 2 * 2);
     }
 
     /// Spot checks of the table in the words of the design (C.7).
@@ -1127,6 +1135,98 @@ mod tests {
                 records: vec![1],
                 inv_ps2: None
             }
+        );
+    }
+
+    /// Design standard-layout B.7, SAFETY-7: the check-only records of a standard change turn a
+    /// fixed-mode pair that appears into a conflict, through the existing rules.
+    #[test]
+    fn a_fixed_pair_that_appears_makes_a_standard_change_a_conflict() {
+        let records = vec![
+            record(device(KEYCHRON), HID_TYPE, RegValue::Absent, dword(7)),
+            record(
+                WriteTarget::Global,
+                PS2_TYPE,
+                RegValue::Absent,
+                RegValue::Absent,
+            ),
+            record(
+                WriteTarget::Global,
+                PS2_SUBTYPE,
+                RegValue::Absent,
+                RegValue::Absent,
+            ),
+            record(
+                WriteTarget::Global,
+                LAYER_DRIVER_JPN,
+                RegValue::Sz {
+                    value: "kbd106.dll".into(),
+                },
+                RegValue::Sz {
+                    value: "kbd101.dll".into(),
+                },
+            ),
+        ];
+        let written = |state| {
+            let mut e = entry(1, standard_kind(), state, records.clone());
+            e.apply = Some(PendingAction::RestartPc);
+            e
+        };
+        let intended: Vec<RegValue> = records.iter().map(|r| r.intended.clone()).collect();
+        let fixed_english = {
+            let mut values = intended.clone();
+            values[1] = dword(7);
+            values[2] = dword(0);
+            values
+        };
+        let later_boot = RecoveryContext {
+            current_boot: boot(2),
+            inv_ps2: None,
+        };
+        let same_boot = RecoveryContext {
+            current_boot: boot(1),
+            inv_ps2: None,
+        };
+        // Without the pair: the restart is observed, as for a migration.
+        assert_eq!(
+            decide_recovery(&written(OpState::PendingReboot), &intended, &later_boot),
+            RecoveryDecision::RebootObserved {
+                to: OpState::AwaitingConfirm
+            }
+        );
+        // With it (the Settings app's "English keyboard" after the change): a conflict on the
+        // check-only records, after the restart and for an entry found in flight.
+        assert_eq!(
+            decide_recovery(
+                &written(OpState::PendingReboot),
+                &fixed_english,
+                &later_boot
+            ),
+            RecoveryDecision::Conflict {
+                records: vec![1, 2],
+                inv_ps2: None
+            }
+        );
+        assert_eq!(
+            decide_recovery(&written(OpState::Planned), &fixed_english, &same_boot),
+            RecoveryDecision::Conflict {
+                records: vec![1, 2],
+                inv_ps2: None
+            }
+        );
+        assert_eq!(
+            decide_recovery(&written(OpState::Written), &fixed_english, &same_boot),
+            RecoveryDecision::Conflict {
+                records: vec![1, 2],
+                inv_ps2: None
+            }
+        );
+        // The check-only records alone never make an entry look written: nothing else written
+        // yet is "nothing written".
+        let nothing: Vec<RegValue> = records.iter().map(|r| r.before.clone()).collect();
+        assert_eq!(
+            decide_recovery(&written(OpState::Planned), &nothing, &same_boot),
+            RecoveryDecision::MarkNothingWritten
         );
     }
 

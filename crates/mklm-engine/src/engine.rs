@@ -437,6 +437,7 @@ fn snapshot(keyboards: Vec<KeyboardDevice>, global: GlobalSettings) -> SystemSna
             native_arch: String::new(),
             remote_session: false,
             client_keyboard_type: None,
+            computer_name: None,
         },
     }
 }
@@ -2048,6 +2049,7 @@ where
         let reason = match &kind {
             OpKind::SetLayout { .. } => "set-layout",
             OpKind::Migrate { .. } => "migrate",
+            OpKind::SetStandard { .. } => "set-standard",
             OpKind::RestoreBaseline { .. } => "restore-baseline",
             OpKind::Cleanup { .. } => "cleanup",
         };
@@ -2116,6 +2118,7 @@ where
                 // Visible but maybe not durable: close it rather than leave it in flight (C3).
                 entry.failure = Some(FailureReason::WriteError {
                     message: error.to_string(),
+                    target: None,
                 });
                 if self
                     .move_to(s, &mut entry, OpState::Failed, "journal-flush-failed")
@@ -2231,7 +2234,10 @@ where
                 self.roll_back(
                     s,
                     entry,
-                    FailureReason::WriteError { message },
+                    FailureReason::WriteError {
+                        message,
+                        target: None,
+                    },
                     "write-error",
                     &[],
                     false,

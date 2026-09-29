@@ -98,11 +98,15 @@ impl EngineError {
                 }
                 OperationError::NotFixedMode => (ErrorCode::NotFixedMode, None, None),
                 OperationError::Plan(plan) => (ErrorCode::PlanRejected, None, Some(plan.clone())),
+                // The standard change's refusals (design standard-layout B.4): the front ends plan
+                // with the same function first, so these rarely reach the helper.
                 OperationError::InconsistentGlobal
                 | OperationError::StandardNotAllowed { .. }
-                | OperationError::LayerDriverMissing { .. } => {
-                    (ErrorCode::PlanRejected, None, None)
-                }
+                | OperationError::LayerDriverMissing { .. }
+                | OperationError::UnknownStandard { .. }
+                | OperationError::NotFollowingStandard { .. }
+                | OperationError::IncompleteValues { .. }
+                | OperationError::Ps2WithoutTable { .. } => (ErrorCode::PlanRejected, None, None),
             },
             EngineError::Restore(error) => {
                 (ErrorCode::PlanRejected, None, restore_plan_error(error))
@@ -188,6 +192,35 @@ mod tests {
             (
                 OperationError::LayerDriverMissing {
                     dll: "kbd101.dll".into(),
+                }
+                .into(),
+                ErrorCode::PlanRejected,
+            ),
+            (
+                OperationError::UnknownStandard {
+                    layer_driver: Some("kbdnec.dll".into()),
+                    identifier: None,
+                }
+                .into(),
+                ErrorCode::PlanRejected,
+            ),
+            (
+                OperationError::NotFollowingStandard {
+                    instance_id: "x".into(),
+                }
+                .into(),
+                ErrorCode::PlanRejected,
+            ),
+            (
+                OperationError::IncompleteValues {
+                    instance_ids: vec!["x".into()],
+                }
+                .into(),
+                ErrorCode::PlanRejected,
+            ),
+            (
+                OperationError::Ps2WithoutTable {
+                    instance_ids: vec!["x".into()],
                 }
                 .into(),
                 ErrorCode::PlanRejected,

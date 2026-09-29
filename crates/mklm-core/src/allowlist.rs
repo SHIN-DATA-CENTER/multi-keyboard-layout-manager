@@ -232,7 +232,7 @@ pub enum AllowlistError {
 /// (plan 3.2: shown, never written). The reader already makes the latter virtual
 /// ([`crate::classify_keyboard_transport`]); checking it here keeps the rule in the core, so the
 /// GUI's read-only rows and what the engine may write never disagree.
-fn is_read_only_device(device: &KeyboardDevice) -> bool {
+pub(crate) fn is_read_only_device(device: &KeyboardDevice) -> bool {
     device.transport == Transport::Virtual || device.is_remote_desktop()
 }
 
@@ -370,9 +370,11 @@ fn check_string(name: &str, op: &ValueOp, allowed: &[&str]) -> Result<String, Al
     }
 }
 
-/// The standard layout as stored: an allowlisted `LayerDriver JPN` with its matching identifier.
-/// Never inferred from missing values.
-fn explicit_standard(global: &GlobalSettings) -> Option<Layout> {
+/// The standard layout as stored: an allowlisted `LayerDriver JPN` with its matching
+/// `OverrideKeyboardIdentifier` (case-insensitive). Never inferred from missing values:
+/// `kbd106n.dll`, `kbdnec.dll`, a mismatched identifier or missing values give `None` (design
+/// standard-layout B.4: MKLM does not change a standard it cannot name).
+pub fn stored_standard(global: &GlobalSettings) -> Option<Layout> {
     let layer_driver = global.layer_driver_jpn.as_deref()?;
     let identifier = global.override_keyboard_identifier.as_deref()?;
     [Layout::Jis, Layout::Us].into_iter().find(|layout| {
@@ -438,7 +440,7 @@ pub fn check_global_writes(
         return Ok(after);
     }
     let touches_standard = jpn_op.is_some() || identifier_op.is_some();
-    let standard = explicit_standard(&after);
+    let standard = stored_standard(&after);
     if touches_standard && standard.is_none() {
         return Err(AllowlistError::InconsistentGlobal {
             reason: format!(
@@ -477,7 +479,7 @@ pub fn check_global_writes(
 /// global values are inconsistent, so that the user decides.
 pub fn ps2_pin_layout(global: &GlobalSettings) -> Option<Layout> {
     let fixed = global.fixed_type()?;
-    let standard = explicit_standard(global)?;
+    let standard = stored_standard(global)?;
     (standard.fixed_mode_type() == fixed).then_some(standard)
 }
 
@@ -1450,5 +1452,42 @@ mod tests {
         // A devnode that is not listed: unknown, counted as read.
         assert!(!is_unread_value(&[], &at(&keychron), PS2_TYPE));
         assert_eq!(MACHINE_SETTING_NAMES, ["RestoreOnUninstall"]);
+    }
+
+    /// Design standard-layout B.4: the standard MKLM can change is one it would write itself.
+    #[test]
+    fn stored_standard_names_only_what_mklm_writes() {
+        let with = |layer_driver: Option<&str>, identifier: Option<&str>| GlobalSettings {
+            layer_driver_jpn: layer_driver.map(str::to_string),
+            override_keyboard_identifier: identifier.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(
+            stored_standard(&with(Some("kbd106.dll"), Some("PCAT_106KEY"))),
+            Some(Layout::Jis)
+        );
+        assert_eq!(
+            stored_standard(&with(Some("KBD101.DLL"), Some("pcat_101key"))),
+            Some(Layout::Us)
+        );
+        // The fixed pair does not matter; the standard is read from the two strings.
+        assert_eq!(
+            stored_standard(&fixtures::global_fixed_jis()),
+            Some(Layout::Jis)
+        );
+        for (layer_driver, identifier) in [
+            (Some("kbd106n.dll"), Some("PCAT_106KEY")),
+            (Some("kbdnec.dll"), Some("PCAT_106KEY")),
+            (Some("kbd106.dll"), Some("PCAT_101KEY")),
+            (Some("kbd101.dll"), None),
+            (None, Some("PCAT_101KEY")),
+            (None, None),
+        ] {
+            assert_eq!(
+                stored_standard(&with(layer_driver, identifier)),
+                None,
+                "{layer_driver:?} {identifier:?}"
+            );
+        }
     }
 }

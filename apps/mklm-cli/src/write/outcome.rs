@@ -94,6 +94,7 @@ mod tests {
         for error in [
             FailureReason::WriteError {
                 message: "denied".into(),
+                target: None,
             },
             FailureReason::Interrupted,
         ] {

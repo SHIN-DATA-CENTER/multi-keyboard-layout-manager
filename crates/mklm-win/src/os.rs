@@ -7,8 +7,9 @@ use mklm_core::{KeyboardType, OsInfo};
 use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::SystemInformation::{
-    IMAGE_FILE_MACHINE, IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
-    IMAGE_FILE_MACHINE_ARMNT, IMAGE_FILE_MACHINE_I386, IMAGE_FILE_MACHINE_UNKNOWN, OSVERSIONINFOW,
+    ComputerNameDnsHostname, GetComputerNameExW, IMAGE_FILE_MACHINE, IMAGE_FILE_MACHINE_AMD64,
+    IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_ARMNT, IMAGE_FILE_MACHINE_I386,
+    IMAGE_FILE_MACHINE_UNKNOWN, OSVERSIONINFOW,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardType;
@@ -34,7 +35,32 @@ pub fn read_os_info(issues: &mut Vec<ReadIssue>) -> Result<OsInfo, Error> {
         native_arch: native_arch(issues),
         remote_session,
         client_keyboard_type: remote_session.then(session_keyboard_type).flatten(),
+        computer_name: computer_name(),
     })
+}
+
+/// `OsInfo::computer_name`: the DNS host name (as Settings shows it), `None` when the call fails
+/// or the name is empty. Nothing depends on it but the wording of Remote Desktop texts.
+fn computer_name() -> Option<String> {
+    let mut size = 0u32;
+    // SAFETY: a null buffer with size 0 asks for the length (ERROR_MORE_DATA is expected).
+    let _ = unsafe { GetComputerNameExW(ComputerNameDnsHostname, None, &mut size) };
+    if size == 0 || size > 1024 {
+        return None;
+    }
+    let mut buffer = vec![0u16; size as usize];
+    // SAFETY: `buffer` holds `size` UTF-16 units, which the call may fill including the NUL.
+    unsafe {
+        GetComputerNameExW(
+            ComputerNameDnsHostname,
+            Some(windows::core::PWSTR(buffer.as_mut_ptr())),
+            &mut size,
+        )
+    }
+    .ok()?;
+    let name = String::from_utf16_lossy(buffer.get(..size as usize)?);
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// The keyboard type the Remote Desktop client reported (`OsInfo::client_keyboard_type`):
@@ -202,6 +228,12 @@ mod tests {
             "{}",
             program_files.display()
         );
+    }
+
+    #[test]
+    fn the_computer_name_is_read() {
+        let name = computer_name().expect("GetComputerNameExW");
+        assert!(!name.is_empty() && !name.contains('\0'), "{name:?}");
     }
 
     #[test]

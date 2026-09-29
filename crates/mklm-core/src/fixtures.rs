@@ -333,6 +333,261 @@ pub fn legacy_pc_boot(boot_time: u64) -> CurrentBoot {
     }
 }
 
+/// The Remote Desktop host of 2026-09-29 (`DESKTOP-3TCSIET`, design standard-layout 0.1).
+pub const DESKTOP_PC_NAME: &str = "DESKTOP-3TCSIET";
+
+/// The PS/2 node of the desktop PC: no hardware behind it (not started, problem code 24), pinned
+/// to US (4/0) by the migration `271b6909`.
+pub fn desktop_ps2() -> KeyboardDevice {
+    KeyboardDevice {
+        instance_id: r"ACPI\PNP0303\0".into(),
+        display_name: "標準 PS/2 キーボード".into(),
+        device_description: Some("標準 PS/2 キーボード".into()),
+        container_id: Some(INTERNAL_CONTAINER_ID.into()),
+        is_internal: true,
+        present: true,
+        driver: KeyboardDriver::I8042prt,
+        transport: Transport::Ps2,
+        vendor_id: None,
+        product_id: None,
+        usb_serial: None,
+        hardware_ids: ids(&[r"ACPI\VEN_PNP&DEV_0303", r"ACPI\PNP0303", "*PNP0303"]),
+        parent_chain: ids(&[
+            r"PCI\VEN_8086&DEV_7A84&SUBSYS_31181565&REV_11\3&11583659&0&F8",
+            r"ACPI\PNP0A08\0",
+            r"ACPI_HAL\PNP0C08\0",
+            r"ROOT\ACPI_HAL\0000",
+            r"HTREE\ROOT\0",
+        ]),
+        overrides: DeviceOverrides {
+            override_keyboard_type: Some(4),
+            override_keyboard_subtype: Some(0),
+            ..Default::default()
+        },
+        reported_type: None,
+        dev_node_status: Some(0x4180_2400),
+        problem_code: Some(24),
+    }
+}
+
+/// A USB HID keyboard collection of the desktop PC, as `mklm-cli status --json --all` read it in
+/// the RDP-born session 2 (Raw Input of that session lists none of the PC's keyboards, so no type
+/// is reported).
+fn desktop_hid(
+    instance_id: &str,
+    display_name: &str,
+    container_id: &str,
+    vid_pid: (u16, u16),
+    hardware_ids: &[&str],
+    parent_chain: &[&str],
+    overrides: DeviceOverrides,
+) -> KeyboardDevice {
+    KeyboardDevice {
+        instance_id: instance_id.into(),
+        display_name: display_name.into(),
+        device_description: Some("HID キーボード デバイス".into()),
+        container_id: Some(container_id.into()),
+        is_internal: false,
+        present: true,
+        driver: KeyboardDriver::Kbdhid,
+        transport: Transport::Usb,
+        vendor_id: Some(vid_pid.0),
+        product_id: Some(vid_pid.1),
+        usb_serial: None,
+        hardware_ids: ids(hardware_ids),
+        parent_chain: ids(parent_chain),
+        overrides,
+        reported_type: None,
+        dev_node_status: Some(0x0180_000A),
+        problem_code: Some(0),
+    }
+}
+
+fn us_pair() -> DeviceOverrides {
+    DeviceOverrides {
+        keyboard_type_override: Some(4),
+        keyboard_subtype_override: Some(0),
+        ..Default::default()
+    }
+}
+
+/// "USB Keyboard" (04D9:1818), assigned US.
+pub fn desktop_usb_keyboard() -> KeyboardDevice {
+    desktop_hid(
+        r"HID\VID_04D9&PID_1818&MI_00\7&183DDD3D&0&0000",
+        "USB Keyboard",
+        "{15A651F8-BAA8-11F1-B5A1-806E6F6E6963}",
+        (0x04D9, 0x1818),
+        &[
+            r"HID\VID_04D9&PID_1818&REV_0101&MI_00",
+            r"HID\VID_04D9&PID_1818&MI_00",
+            r"HID\VID_04D9&UP:0001_U:0006",
+            "HID_DEVICE_SYSTEM_KEYBOARD",
+            "HID_DEVICE_UP:0001_U:0006",
+            "HID_DEVICE",
+        ],
+        &[
+            r"USB\VID_04D9&PID_1818&MI_00\6&246ECAD8&0&0000",
+            r"USB\VID_04D9&PID_1818\5&361281AE&0&6",
+        ],
+        us_pair(),
+    )
+}
+
+/// The first keyboard collection (`MI_00`) of the "2.4G Wireless Device" (1D57:FA60); no values,
+/// so it follows the standard.
+pub fn desktop_wireless() -> KeyboardDevice {
+    desktop_hid(
+        r"HID\VID_1D57&PID_FA60&MI_00\7&14A99BDA&0&0000",
+        "2.4G Wireless Device",
+        "{15A651F5-BAA8-11F1-B5A1-806E6F6E6963}",
+        (0x1D57, 0xFA60),
+        &[
+            r"HID\VID_1D57&PID_FA60&REV_0114&MI_00",
+            r"HID\VID_1D57&PID_FA60&MI_00",
+            r"HID\VID_1D57&UP:0001_U:0006",
+            "HID_DEVICE_SYSTEM_KEYBOARD",
+            "HID_DEVICE_UP:0001_U:0006",
+            "HID_DEVICE",
+        ],
+        &[
+            r"USB\VID_1D57&PID_FA60&MI_00\6&A08016F&0&0000",
+            r"USB\VID_1D57&PID_FA60\5&361281AE&0&5",
+        ],
+        DeviceOverrides::default(),
+    )
+}
+
+/// The second keyboard collection (`MI_03`) of the same receiver: same container, no values.
+pub fn desktop_wireless_second() -> KeyboardDevice {
+    desktop_hid(
+        r"HID\VID_1D57&PID_FA60&MI_03\7&3A907B5E&0&0000",
+        "2.4G Wireless Device",
+        "{15A651F5-BAA8-11F1-B5A1-806E6F6E6963}",
+        (0x1D57, 0xFA60),
+        &[
+            r"HID\VID_1D57&PID_FA60&REV_0114&MI_03",
+            r"HID\VID_1D57&PID_FA60&MI_03",
+            r"HID\VID_1D57&UP:0001_U:0006",
+            "HID_DEVICE_SYSTEM_KEYBOARD",
+            "HID_DEVICE_UP:0001_U:0006",
+            "HID_DEVICE",
+        ],
+        &[
+            r"USB\VID_1D57&PID_FA60&MI_03\6&A08016F&0&0003",
+            r"USB\VID_1D57&PID_FA60\5&361281AE&0&5",
+        ],
+        DeviceOverrides::default(),
+    )
+}
+
+/// The Keychron receiver on the desktop PC (another USB port than on the M0 machine, hence
+/// another instance ID), assigned US.
+pub fn desktop_keychron() -> KeyboardDevice {
+    KeyboardDevice {
+        usb_serial: Some("B76E483E3F08D96E".into()),
+        ..desktop_hid(
+            r"HID\VID_3434&PID_D027&MI_00&COL01\7&5211D3A&0&0000",
+            "Keychron Receiver",
+            "{F0D991EA-A583-5B9C-800D-48846AC6E633}",
+            (0x3434, 0xD027),
+            &[
+                r"HID\VID_3434&PID_D027&REV_0116&MI_00&Col01",
+                r"HID\VID_3434&PID_D027&MI_00&Col01",
+                r"HID\VID_3434&UP:0001_U:0006",
+                "HID_DEVICE_SYSTEM_KEYBOARD",
+                "HID_DEVICE_UP:0001_U:0006",
+                "HID_DEVICE",
+            ],
+            &[
+                r"USB\VID_3434&PID_D027&MI_00\6&295E03CA&0&0000",
+                r"USB\VID_3434&PID_D027\B76E483E3F08D96E",
+            ],
+            us_pair(),
+        )
+    }
+}
+
+/// "VXE Mouse 1K Dongle" (3554:F58E): the keyboard collection of a mouse dongle, no values.
+pub fn desktop_vxe() -> KeyboardDevice {
+    desktop_hid(
+        r"HID\VID_3554&PID_F58E&MI_00\8&18DB8B6B&0&0000",
+        "VXE Mouse 1K Dongle",
+        "{15A651FA-BAA8-11F1-B5A1-806E6F6E6963}",
+        (0x3554, 0xF58E),
+        &[
+            r"HID\VID_3554&PID_F58E&REV_0110&MI_00",
+            r"HID\VID_3554&PID_F58E&MI_00",
+            r"HID\VID_3554&UP:0001_U:0006",
+            "HID_DEVICE_SYSTEM_KEYBOARD",
+            "HID_DEVICE_UP:0001_U:0006",
+            "HID_DEVICE",
+        ],
+        &[
+            r"USB\VID_3554&PID_F58E&MI_00\7&25CF5594&0&0000",
+            r"USB\VID_3554&PID_F58E\6&2287062C&0&3",
+        ],
+        DeviceOverrides::default(),
+    )
+}
+
+/// The Remote Desktop keyboard of the desktop PC's session 2 (RDP-born, 23:14).
+pub fn desktop_rdp_keyboard() -> KeyboardDevice {
+    KeyboardDevice {
+        instance_id: r"TERMINPUT_BUS\UMB\2&2C22BCC9&0&SESSION2KEYBOARD0".into(),
+        ..rdp_keyboard()
+    }
+}
+
+/// The desktop PC of the RDP work (design standard-layout 0.1), as `mklm-cli status --json --all`
+/// read it in its RDP-born session 2 on 2026-09-30 after `271b6909` was kept: per-keyboard mode,
+/// JIS standard; the PS/2 node, USB Keyboard and Keychron Receiver at US (4/0); the two
+/// collections of the 2.4G Wireless Device and the VXE dongle follow the standard; the Remote
+/// Desktop keyboard of session 2. No keyboard is disconnected. Raw Input of that session lists
+/// none of the PC's keyboards, so every `reported_type` is `None`.
+pub fn desktop_pc() -> SystemSnapshot {
+    SystemSnapshot {
+        keyboards: vec![
+            desktop_ps2(),
+            desktop_usb_keyboard(),
+            desktop_wireless(),
+            desktop_wireless_second(),
+            desktop_keychron(),
+            desktop_vxe(),
+            desktop_rdp_keyboard(),
+        ],
+        global: global_per_keyboard(),
+        input: InputMethods {
+            user_preload: ids(&["00000411"]),
+            sign_in_preload: ids(&["00000411"]),
+            loaded_layouts: vec![0x0411_0411],
+        },
+        os: OsInfo {
+            build: 26200,
+            ubr: Some(9457),
+            native_arch: "x64".into(),
+            remote_session: true,
+            client_keyboard_type: Some(KeyboardType::JIS),
+            computer_name: Some(DESKTOP_PC_NAME.into()),
+        },
+    }
+}
+
+/// [`desktop_pc`] seen from a console session: the same values, and Raw Input reports the stored
+/// types of the connected, started HID keyboards (the PS/2 node has no hardware).
+pub fn desktop_pc_console() -> SystemSnapshot {
+    let mut snapshot = desktop_pc();
+    snapshot.keyboards.retain(|kb| !kb.is_remote_desktop());
+    for kb in &mut snapshot.keyboards {
+        if kb.driver == KeyboardDriver::Kbdhid {
+            kb.reported_type = kb.predicted_type(&snapshot.global);
+        }
+    }
+    snapshot.os.remote_session = false;
+    snapshot.os.client_keyboard_type = None;
+    snapshot
+}
+
 /// The development machine as verified at the end of M0.
 pub fn dev_machine() -> SystemSnapshot {
     SystemSnapshot {
@@ -345,6 +600,7 @@ pub fn dev_machine() -> SystemSnapshot {
             native_arch: "x64".into(),
             remote_session: false,
             client_keyboard_type: None,
+            computer_name: None,
         },
     }
 }
@@ -358,7 +614,12 @@ mod tests {
     /// The derived fields in the fixtures agree with the parsers.
     #[test]
     fn fixtures_are_self_consistent() {
-        for kb in dev_machine().keyboards.into_iter().chain([rdp_keyboard()]) {
+        for kb in dev_machine()
+            .keyboards
+            .into_iter()
+            .chain([rdp_keyboard()])
+            .chain(desktop_pc().keyboards)
+        {
             assert_eq!(
                 classify_transport(&kb.instance_id, &kb.parent_chain, &kb.driver),
                 kb.transport,

@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::allowlist::{
     AllowlistError, CheckedPlan, PlanError, PlannedWrite, WriteTarget, check_plan,
-    device_layout_writes, ps2_pin_layout, standard_layout_writes,
+    device_layout_writes, is_read_only_device, ps2_pin_layout, standard_layout_writes,
+    stored_standard,
 };
 use crate::device::device_apply_action;
-use crate::journal::{LayoutChoice, RegValue, value_eq};
+use crate::journal::{LayoutChoice, RegValue, ValueKey, value_eq};
 use crate::layout::PendingAction;
 use crate::model::{
     GlobalMode, GlobalSettings, KeyboardDevice, KeyboardDriver, Layout, Transport, value_names,
@@ -40,6 +41,31 @@ pub enum OperationError {
     /// by the engine through `Host::system32_file_exists` before `check_plan` (design review S8).
     #[error("{dll} is not in System32")]
     LayerDriverMissing { dll: String },
+    /// Design standard-layout B.4: the stored standard is not one MKLM writes
+    /// ([`crate::stored_standard`] is `None`: values missing, `kbd106n.dll`, `kbdnec.dll`, or an
+    /// identifier that does not match), so MKLM cannot tell what the keyboards that follow it
+    /// type now. The stored values, for the technical details.
+    #[error(
+        "the standard layout's values are not in a form MKLM knows (LayerDriver JPN {layer_driver:?}, \
+         OverrideKeyboardIdentifier {identifier:?})"
+    )]
+    UnknownStandard {
+        layer_driver: Option<String>,
+        identifier: Option<String>,
+    },
+    /// Design standard-layout B.3: a physical keyboard given to follow the new standard has no
+    /// collection that follows the standard now (assigned, PS/2, Remote Desktop, or one MKLM
+    /// cannot write).
+    #[error("{instance_id}: does not follow the standard now")]
+    NotFollowingStandard { instance_id: String },
+    /// Design standard-layout B.3 (6): a writable kbdhid or i8042prt keyboard stores only one of
+    /// the two values of its pair, so what it types now is unknown.
+    #[error("only one of the two values that set a layout is stored for: {}", instance_ids.join(", "))]
+    IncompleteValues { instance_ids: Vec<String> },
+    /// Design standard-layout B.3 (7): an i8042prt keyboard is pinned to a type without a table of
+    /// its own (7/0, 0x51/0, …), so it would change with the standard.
+    #[error("PS/2 keyboards pinned to a type that sets no layout: {}", instance_ids.join(", "))]
+    Ps2WithoutTable { instance_ids: Vec<String> },
     #[error(transparent)]
     Plan(#[from] PlanError),
 }
@@ -358,12 +384,258 @@ pub fn apply_method(
         .unwrap_or(PendingAction::ResetKeyboard)
 }
 
+/// A kbdhid keyboard that is not read-only, stores both values of its pair or neither, and whose
+/// stored values give it no table of its own (0x51/0 without values, 7/0, any unknown type): it
+/// types with the PC's standard layout (design standard-layout B.3). A lone value
+/// (`IncompletePair`) is no follower: [`set_standard_writes`] refuses it. Connected or not.
+pub fn follows_standard(kb: &KeyboardDevice, global: &GlobalSettings) -> bool {
+    kb.driver == KeyboardDriver::Kbdhid
+        && !is_read_only_device(kb)
+        && kb.overrides.keyboard_type_override.is_some()
+            == kb.overrides.keyboard_subtype_override.is_some()
+        && kb
+            .predicted_type(global)
+            .is_some_and(|ty| ty.per_keyboard_table().is_none())
+}
+
+/// A keyboard MKLM writes values to: served by kbdhid or i8042prt, not virtual, not the Remote
+/// Desktop keyboard (the devnodes of [`crate::check_device_writes`]).
+fn assignable(kb: &KeyboardDevice) -> bool {
+    matches!(kb.driver, KeyboardDriver::Kbdhid | KeyboardDriver::I8042prt)
+        && !is_read_only_device(kb)
+}
+
+/// True when only one value of the pair the keyboard's driver reads is stored.
+fn lone_value(kb: &KeyboardDevice) -> bool {
+    let o = &kb.overrides;
+    match kb.driver {
+        KeyboardDriver::Kbdhid => {
+            o.keyboard_type_override.is_some() != o.keyboard_subtype_override.is_some()
+        }
+        KeyboardDriver::I8042prt => {
+            o.override_keyboard_type.is_some() != o.override_keyboard_subtype.is_some()
+        }
+        KeyboardDriver::Other(_) => false,
+    }
+}
+
+/// Device and global writes of "change the PC's standard layout" in per-keyboard mode (design
+/// standard-layout B.2, B.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandardChange {
+    /// The stored standard ([`crate::stored_standard`]).
+    pub from: Layout,
+    pub to: Layout,
+    /// One pin to `from` per follower that is not left to follow, in inventory order.
+    pub device_writes: DeviceWrites,
+    /// The standard's values that differ from the stored ones (none when `to == from`).
+    pub global_writes: Vec<PlannedWrite>,
+    /// The followers pinned to `from`, and those left to follow `to` (instance IDs, inventory
+    /// order).
+    pub pinned: Vec<String>,
+    pub following: Vec<String>,
+    /// Keyboards MKLM cannot pin (read-only kbdhid, other drivers; never the Remote Desktop
+    /// keyboard, which the texts treat on its own), with whether their stored values make them
+    /// follow the standard: `Some(true)` / `Some(false)`, `None` for another driver, whose type is
+    /// unknown (design standard-layout B.3 (8)).
+    pub not_assignable: Vec<(String, Option<bool>)>,
+}
+
+impl StandardChange {
+    /// True when nothing is to be written (`to` is the stored standard).
+    pub fn is_empty(&self) -> bool {
+        self.device_writes.is_empty() && self.global_writes.is_empty()
+    }
+}
+
+/// Plans the writes of a standard change (design standard-layout B.4). Refusals, in this order,
+/// write nothing: fixed mode ([`OperationError::MigrationRequired`]), a stored standard MKLM does
+/// not know ([`OperationError::UnknownStandard`]); then, unless `to` is the stored standard (an
+/// empty change): a lone value on a writable keyboard ([`OperationError::IncompleteValues`]), a
+/// PS/2 keyboard pinned to a type without a table ([`OperationError::Ps2WithoutTable`]), a
+/// `follow` keyboard that does not exist ([`OperationError::UnknownKeyboard`]) or has no follower
+/// among the collections of its physical device ([`OperationError::NotFollowingStandard`]).
+/// `check_plan` then refuses a PS/2 keyboard without a pin ([`crate::plan_set_standard`]).
+///
+/// Every follower ([`follows_standard`]), connected or not, hidden or not, is pinned to `from`,
+/// except the followers of the physical keyboards in `follow` ([`physical_device_members`]),
+/// which get nothing written and follow `to` after the restart.
+pub fn set_standard_writes(
+    keyboards: &[KeyboardDevice],
+    global: &GlobalSettings,
+    to: Layout,
+    follow: &[String],
+) -> Result<StandardChange, OperationError> {
+    if global.mode() == GlobalMode::Fixed {
+        return Err(OperationError::MigrationRequired {
+            fixed: ps2_pin_layout(global),
+        });
+    }
+    let from = stored_standard(global).ok_or_else(|| OperationError::UnknownStandard {
+        layer_driver: global.layer_driver_jpn.clone(),
+        identifier: global.override_keyboard_identifier.clone(),
+    })?;
+    let not_assignable: Vec<(String, Option<bool>)> = keyboards
+        .iter()
+        .filter(|kb| !kb.is_remote_desktop() && !assignable(kb))
+        .map(|kb| {
+            (
+                kb.instance_id.clone(),
+                kb.predicted_type(global)
+                    .map(|ty| ty.per_keyboard_table().is_none()),
+            )
+        })
+        .collect();
+    let mut change = StandardChange {
+        from,
+        to,
+        device_writes: Vec::new(),
+        global_writes: Vec::new(),
+        pinned: Vec::new(),
+        following: Vec::new(),
+        not_assignable,
+    };
+    if to == from {
+        return Ok(change);
+    }
+
+    let ids = |pick: &dyn Fn(&KeyboardDevice) -> bool| -> Vec<String> {
+        keyboards
+            .iter()
+            .filter(|kb| pick(kb))
+            .map(|kb| kb.instance_id.clone())
+            .collect()
+    };
+    let incomplete = ids(&|kb| assignable(kb) && lone_value(kb));
+    if !incomplete.is_empty() {
+        return Err(OperationError::IncompleteValues {
+            instance_ids: incomplete,
+        });
+    }
+    let ps2_without_table = ids(&|kb| {
+        kb.driver == KeyboardDriver::I8042prt
+            && assignable(kb)
+            && kb
+                .overrides
+                .ps2_type()
+                .is_some_and(|ty| ty.per_keyboard_table().is_none())
+    });
+    if !ps2_without_table.is_empty() {
+        return Err(OperationError::Ps2WithoutTable {
+            instance_ids: ps2_without_table,
+        });
+    }
+
+    let mut left_to_follow: Vec<String> = Vec::new();
+    for requested in follow {
+        let members = physical_device_members(keyboards, requested)?;
+        let followers: Vec<&KeyboardDevice> = members
+            .into_iter()
+            .filter(|kb| follows_standard(kb, global))
+            .collect();
+        if followers.is_empty() {
+            let instance_id = keyboards
+                .iter()
+                .find(|kb| kb.instance_id.eq_ignore_ascii_case(requested))
+                .map_or_else(|| requested.clone(), |kb| kb.instance_id.clone());
+            return Err(OperationError::NotFollowingStandard { instance_id });
+        }
+        for kb in followers {
+            if !left_to_follow
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(&kb.instance_id))
+            {
+                left_to_follow.push(kb.instance_id.clone());
+            }
+        }
+    }
+
+    for kb in keyboards.iter().filter(|kb| follows_standard(kb, global)) {
+        if left_to_follow
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(&kb.instance_id))
+        {
+            change.following.push(kb.instance_id.clone());
+            continue;
+        }
+        let writes = device_layout_writes(&kb.driver, Some(from)).ok_or_else(|| {
+            OperationError::StandardNotAllowed {
+                instance_id: kb.instance_id.clone(),
+            }
+        })?;
+        change.device_writes.push((kb.instance_id.clone(), writes));
+        change.pinned.push(kb.instance_id.clone());
+    }
+
+    let stored = |name: &str| match name {
+        value_names::LAYER_DRIVER_JPN => global.layer_driver_jpn.as_deref(),
+        value_names::KEYBOARD_IDENTIFIER => global.override_keyboard_identifier.as_deref(),
+        _ => None,
+    };
+    for write in standard_layout_writes(to) {
+        let current = stored(&write.name).map_or(RegValue::Absent, |value| RegValue::Sz {
+            value: value.to_string(),
+        });
+        if !value_eq(&write.name, &current, &RegValue::from(&write.op)) {
+            change.global_writes.push(write);
+        }
+    }
+    Ok(change)
+}
+
+/// A standard change as checked ([`crate::check_plan`]: allowlist, INV-PS2, write order) with
+/// what it does to whom. `plan.apply` is always [`PendingAction::RestartPc`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandardPlan {
+    pub plan: OperationPlan,
+    pub change: StandardChange,
+}
+
+/// Plans a standard change (design standard-layout B.4): [`set_standard_writes`], then
+/// [`crate::check_plan`], which orders the pins (the other keyboards) before the global values
+/// and refuses a PS/2 keyboard without a pin (`PlanError::InvPs2`). The preview (CLI, GUI) and
+/// the engine call this one function (design review S6).
+pub fn plan_set_standard(
+    keyboards: &[KeyboardDevice],
+    global: &GlobalSettings,
+    to: Layout,
+    follow: &[String],
+) -> Result<StandardPlan, OperationError> {
+    let change = set_standard_writes(keyboards, global, to, follow)?;
+    let checked = check_plan(
+        keyboards,
+        global,
+        &change.device_writes,
+        &change.global_writes,
+    )?;
+    Ok(StandardPlan {
+        plan: OperationPlan {
+            instance_ids: written_devices(&checked),
+            checked,
+            apply: PendingAction::RestartPc,
+            only_usable_keyboard: false,
+        },
+        change,
+    })
+}
+
+/// The global values a standard change records without writing them (`before` = `intended` =
+/// `Absent`): the fixed-mode pair, so that a pair written later by anyone else (the Settings
+/// app's "English keyboard", say) is a conflict when writing, after the restart, on keep and on
+/// revert (design standard-layout B.2, SAFETY-7). No baseline is captured for them.
+pub fn standard_guards() -> [ValueKey; 2] {
+    [value_names::PS2_TYPE, value_names::PS2_SUBTYPE].map(|name| ValueKey {
+        target: WriteTarget::Global,
+        name: name.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::allowlist::PlanStep;
     use crate::fixtures;
-    use crate::model::DeviceOverrides;
+    use crate::model::{DeviceOverrides, KeyboardType, SystemSnapshot};
     use crate::safety::InvPs2Violation;
     use value_names::*;
 
@@ -1042,5 +1314,488 @@ mod tests {
                 ids(&targets)
             );
         }
+    }
+
+    // --- Design standard-layout B.3, B.4: changing the standard in per-keyboard mode ----------
+
+    fn desktop() -> (Vec<KeyboardDevice>, GlobalSettings) {
+        let snapshot = fixtures::desktop_pc();
+        (snapshot.keyboards, snapshot.global)
+    }
+
+    fn device(id: &str) -> WriteTarget {
+        WriteTarget::Device {
+            instance_id: id.to_string(),
+        }
+    }
+
+    /// A phantom of the 2.4G receiver on another port: no values, not connected.
+    fn wireless_phantom() -> KeyboardDevice {
+        KeyboardDevice {
+            instance_id: r"HID\VID_1D57&PID_FA60&MI_00\7&99999999&0&0000".into(),
+            container_id: Some("{15A651F6-BAA8-11F1-B5A1-806E6F6E6963}".into()),
+            present: false,
+            reported_type: None,
+            dev_node_status: None,
+            problem_code: None,
+            ..fixtures::desktop_wireless()
+        }
+    }
+
+    /// A read-only kbdhid keyboard (a VM's virtual keyboard) and a keyboard of another driver
+    /// (Hyper-V's basic session keyboard): MKLM writes neither.
+    fn read_only_hid() -> KeyboardDevice {
+        KeyboardDevice {
+            instance_id: r"HID\VMBUS&KEYBOARD\1".into(),
+            display_name: "Virtual keyboard".into(),
+            transport: Transport::Virtual,
+            container_id: None,
+            ..fixtures::desktop_vxe()
+        }
+    }
+
+    fn hyperkbd() -> KeyboardDevice {
+        KeyboardDevice {
+            instance_id: r"VMBUS\{F912AD6D-2B17-48EA-BD65-F927A61C7684}\1".into(),
+            display_name: "Microsoft Hyper-V Virtual Keyboard".into(),
+            driver: KeyboardDriver::Other("hyperkbd".into()),
+            transport: Transport::Virtual,
+            container_id: None,
+            ..fixtures::desktop_vxe()
+        }
+    }
+
+    #[test]
+    fn set_standard_pins_every_follower_by_default() {
+        let (keyboards, global) = desktop();
+        let plan = plan_set_standard(&keyboards, &global, Layout::Us, &[]).unwrap();
+        let wireless = fixtures::desktop_wireless().instance_id;
+        let second = fixtures::desktop_wireless_second().instance_id;
+        let vxe = fixtures::desktop_vxe().instance_id;
+        assert_eq!(plan.change.from, Layout::Jis);
+        assert_eq!(plan.change.to, Layout::Us);
+        assert_eq!(
+            plan.change.pinned,
+            vec![wireless.clone(), second.clone(), vxe.clone()]
+        );
+        assert!(plan.change.following.is_empty());
+        assert!(plan.change.not_assignable.is_empty());
+        // Pins (JIS, the standard now) first, then the standard; nothing on the PS/2 node, the
+        // assigned keyboards or the Remote Desktop keyboard.
+        assert_eq!(
+            plan.plan.checked.steps,
+            vec![
+                PlanStep {
+                    target: device(&wireless),
+                    writes: pair(7, 2, HID)
+                },
+                PlanStep {
+                    target: device(&second),
+                    writes: pair(7, 2, HID)
+                },
+                PlanStep {
+                    target: device(&vxe),
+                    writes: pair(7, 2, HID)
+                },
+                PlanStep {
+                    target: WriteTarget::Global,
+                    writes: vec![
+                        PlannedWrite::set_string(LAYER_DRIVER_JPN, "kbd101.dll"),
+                        PlannedWrite::set_string(KEYBOARD_IDENTIFIER, "PCAT_101KEY"),
+                    ]
+                },
+            ]
+        );
+        assert_eq!(plan.plan.instance_ids, vec![wireless, second, vxe]);
+        assert_eq!(plan.plan.apply, PendingAction::RestartPc);
+        assert!(!plan.plan.only_usable_keyboard);
+        // What each keyboard types after the plan: the same table as now, except for nobody.
+        let before = crate::assess(&fixtures::desktop_pc());
+        let after = crate::assess(&SystemSnapshot {
+            keyboards: plan.plan.checked.keyboards.clone(),
+            global: plan.plan.checked.global.clone(),
+            ..fixtures::desktop_pc()
+        });
+        for (b, a) in before.keyboards.iter().zip(&after.keyboards) {
+            assert_eq!(
+                b.after_restart.as_ref().map(|l| &l.table),
+                a.after_restart.as_ref().map(|l| &l.table),
+                "{}",
+                b.instance_id
+            );
+        }
+        // Back to JIS from a US standard: the followers are pinned to US (4/0).
+        let us = GlobalSettings {
+            layer_driver_jpn: Some("kbd101.dll".into()),
+            override_keyboard_identifier: Some("PCAT_101KEY".into()),
+            ..global
+        };
+        let plan = plan_set_standard(&keyboards, &us, Layout::Jis, &[]).unwrap();
+        assert_eq!(plan.change.from, Layout::Us);
+        assert_eq!(plan.plan.checked.steps[0].writes, pair(4, 0, HID));
+        assert_eq!(
+            plan.plan.checked.steps.last().unwrap().writes,
+            vec![
+                PlannedWrite::set_string(LAYER_DRIVER_JPN, "kbd106.dll"),
+                PlannedWrite::set_string(KEYBOARD_IDENTIFIER, "PCAT_106KEY"),
+            ]
+        );
+    }
+
+    #[test]
+    fn set_standard_follow_leaves_the_device() {
+        let (keyboards, global) = desktop();
+        let wireless = fixtures::desktop_wireless().instance_id;
+        let second = fixtures::desktop_wireless_second().instance_id;
+        let vxe = fixtures::desktop_vxe().instance_id;
+        // Either collection names the physical keyboard, in any case.
+        for requested in [second.to_ascii_lowercase(), wireless.clone()] {
+            let plan =
+                plan_set_standard(&keyboards, &global, Layout::Us, &[requested.clone()]).unwrap();
+            assert_eq!(plan.change.pinned, vec![vxe.clone()], "{requested}");
+            assert_eq!(
+                plan.change.following,
+                vec![wireless.clone(), second.clone()]
+            );
+            assert_eq!(plan.plan.instance_ids, vec![vxe.clone()]);
+        }
+        // Every follower left to follow: only the standard is written.
+        let plan = plan_set_standard(
+            &keyboards,
+            &global,
+            Layout::Us,
+            &[wireless.clone(), vxe.clone(), wireless.clone()],
+        )
+        .unwrap();
+        assert!(plan.change.pinned.is_empty());
+        assert_eq!(plan.change.following, vec![wireless, second, vxe]);
+        assert_eq!(plan.plan.checked.steps.len(), 1);
+        assert_eq!(plan.plan.checked.steps[0].target, WriteTarget::Global);
+    }
+
+    #[test]
+    fn set_standard_to_the_same_layout_writes_nothing() {
+        let (keyboards, global) = desktop();
+        let plan = plan_set_standard(&keyboards, &global, Layout::Jis, &[]).unwrap();
+        assert!(plan.change.is_empty());
+        assert!(plan.change.pinned.is_empty() && plan.change.following.is_empty());
+        assert!(plan.plan.checked.steps.is_empty());
+        // Another spelling of the same standard is the same standard.
+        let shouting = GlobalSettings {
+            layer_driver_jpn: Some("KBD106.DLL".into()),
+            override_keyboard_identifier: Some("pcat_106key".into()),
+            ..global
+        };
+        assert!(
+            set_standard_writes(&keyboards, &shouting, Layout::Jis, &[])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn set_standard_pins_phantoms_and_replaces_7_0() {
+        let (mut keyboards, global) = desktop();
+        keyboards.push(wireless_phantom());
+        // A follower that stores 7/0 (a type MKLM never writes): pinned to JIS, 7/2.
+        let seven_zero = KeyboardDevice {
+            overrides: DeviceOverrides {
+                keyboard_type_override: Some(7),
+                keyboard_subtype_override: Some(0),
+                ..Default::default()
+            },
+            ..fixtures::desktop_vxe()
+        };
+        let vxe = seven_zero.instance_id.clone();
+        let index = keyboards
+            .iter()
+            .position(|kb| kb.instance_id == vxe)
+            .unwrap();
+        keyboards[index] = seven_zero;
+        let plan = plan_set_standard(&keyboards, &global, Layout::Us, &[]).unwrap();
+        assert!(plan.change.pinned.contains(&wireless_phantom().instance_id));
+        assert!(plan.change.pinned.contains(&vxe));
+        let after = plan
+            .plan
+            .checked
+            .keyboards
+            .iter()
+            .find(|kb| kb.instance_id == vxe)
+            .unwrap();
+        assert_eq!(after.overrides.hid_type(), Some(KeyboardType::JIS));
+        // Left to follow, the phantom is written nothing.
+        let plan = plan_set_standard(
+            &keyboards,
+            &global,
+            Layout::Us,
+            &[wireless_phantom().instance_id],
+        )
+        .unwrap();
+        assert_eq!(plan.change.following, vec![wireless_phantom().instance_id]);
+        assert!(
+            !plan
+                .plan
+                .instance_ids
+                .contains(&wireless_phantom().instance_id)
+        );
+    }
+
+    #[test]
+    fn set_standard_lists_keyboards_it_cannot_pin() {
+        let (mut keyboards, global) = desktop();
+        let assigned_read_only = KeyboardDevice {
+            instance_id: r"HID\VMBUS&KEYBOARD\2".into(),
+            overrides: DeviceOverrides {
+                keyboard_type_override: Some(4),
+                keyboard_subtype_override: Some(0),
+                ..Default::default()
+            },
+            ..read_only_hid()
+        };
+        keyboards.extend([read_only_hid(), hyperkbd(), assigned_read_only.clone()]);
+        let plan = plan_set_standard(&keyboards, &global, Layout::Us, &[]).unwrap();
+        assert_eq!(
+            plan.change.not_assignable,
+            vec![
+                (read_only_hid().instance_id, Some(true)),
+                (hyperkbd().instance_id, None),
+                (assigned_read_only.instance_id, Some(false)),
+            ]
+        );
+        // Neither is pinned, and the Remote Desktop keyboard is not listed.
+        assert!(!plan.change.pinned.contains(&read_only_hid().instance_id));
+        assert!(
+            plan.change
+                .not_assignable
+                .iter()
+                .all(|(id, _)| !id.starts_with("TERMINPUT_BUS"))
+        );
+    }
+
+    #[test]
+    fn follows_standard_table() {
+        let global = fixtures::global_per_keyboard();
+        let hid = |ty: Option<u32>, subtype: Option<u32>| KeyboardDevice {
+            overrides: DeviceOverrides {
+                keyboard_type_override: ty,
+                keyboard_subtype_override: subtype,
+                ..Default::default()
+            },
+            ..fixtures::desktop_vxe()
+        };
+        let cases = [
+            (hid(None, None), true),
+            (hid(Some(0x51), Some(0)), true),
+            (hid(Some(7), Some(0)), true),
+            (hid(Some(8), Some(3)), true),
+            (hid(Some(4), Some(0)), false),
+            (hid(Some(7), Some(2)), false),
+            (hid(Some(7), Some(0xD02)), false),
+            // A lone value: no follower (the operation refuses it).
+            (hid(Some(7), None), false),
+            (hid(None, Some(0)), false),
+            (fixtures::desktop_ps2(), false),
+            (
+                KeyboardDevice {
+                    overrides: DeviceOverrides::default(),
+                    ..fixtures::desktop_ps2()
+                },
+                false,
+            ),
+            (fixtures::desktop_rdp_keyboard(), false),
+            (read_only_hid(), false),
+            (hyperkbd(), false),
+            (wireless_phantom(), true),
+        ];
+        for (kb, follows) in cases {
+            assert_eq!(
+                follows_standard(&kb, &global),
+                follows,
+                "{} {:?}",
+                kb.instance_id,
+                kb.overrides
+            );
+        }
+    }
+
+    #[test]
+    fn set_standard_refusals() {
+        let (keyboards, global) = desktop();
+        // Fixed mode: the standard is every keyboard's layout; a migration chooses it.
+        let fixed = GlobalSettings {
+            override_keyboard_type: Some(7),
+            override_keyboard_subtype: Some(2),
+            ..global.clone()
+        };
+        assert_eq!(
+            plan_set_standard(&keyboards, &fixed, Layout::Us, &[]),
+            Err(OperationError::MigrationRequired {
+                fixed: Some(Layout::Jis)
+            })
+        );
+        // A lone global value is fixed mode too.
+        let lone = GlobalSettings {
+            override_keyboard_type: Some(7),
+            ..global.clone()
+        };
+        assert!(matches!(
+            plan_set_standard(&keyboards, &lone, Layout::Us, &[]),
+            Err(OperationError::MigrationRequired { fixed: None })
+        ));
+        // A standard MKLM does not write: kbdnec, a mismatched identifier, no values.
+        for (layer_driver, identifier) in [
+            (Some("kbdnec.dll"), Some("PCAT_106KEY")),
+            (Some("kbd106n.dll"), Some("PCAT_106KEY")),
+            (Some("kbd106.dll"), Some("PCAT_101KEY")),
+            (None, None),
+        ] {
+            let odd = GlobalSettings {
+                layer_driver_jpn: layer_driver.map(str::to_string),
+                override_keyboard_identifier: identifier.map(str::to_string),
+                ..global.clone()
+            };
+            assert_eq!(
+                plan_set_standard(&keyboards, &odd, Layout::Us, &[]),
+                Err(OperationError::UnknownStandard {
+                    layer_driver: layer_driver.map(str::to_string),
+                    identifier: identifier.map(str::to_string),
+                }),
+                "{layer_driver:?} {identifier:?}"
+            );
+        }
+
+        // One value of a pair, on a kbdhid phantom or a PS/2 keyboard.
+        let lone_hid = KeyboardDevice {
+            overrides: DeviceOverrides {
+                keyboard_type_override: Some(4),
+                ..Default::default()
+            },
+            ..wireless_phantom()
+        };
+        let lone_ps2 = KeyboardDevice {
+            instance_id: r"ACPI\PNP0303\1".into(),
+            present: false,
+            overrides: DeviceOverrides {
+                override_keyboard_subtype: Some(2),
+                ..Default::default()
+            },
+            ..fixtures::desktop_ps2()
+        };
+        let mut with_lone = keyboards.clone();
+        with_lone.extend([lone_hid.clone(), lone_ps2.clone()]);
+        assert_eq!(
+            plan_set_standard(&with_lone, &global, Layout::Us, &[]),
+            Err(OperationError::IncompleteValues {
+                instance_ids: vec![lone_hid.instance_id.clone(), lone_ps2.instance_id.clone()]
+            })
+        );
+        // A lone value on a read-only keyboard is not refused (never written).
+        let mut read_only_lone = keyboards.clone();
+        read_only_lone.push(KeyboardDevice {
+            overrides: DeviceOverrides {
+                keyboard_type_override: Some(4),
+                ..Default::default()
+            },
+            ..read_only_hid()
+        });
+        assert!(plan_set_standard(&read_only_lone, &global, Layout::Us, &[]).is_ok());
+
+        // A PS/2 keyboard pinned to a type without a table (7/0), connected or a phantom.
+        for present in [true, false] {
+            let ps2_7_0 = KeyboardDevice {
+                present,
+                overrides: DeviceOverrides {
+                    override_keyboard_type: Some(7),
+                    override_keyboard_subtype: Some(0),
+                    ..Default::default()
+                },
+                ..fixtures::desktop_ps2()
+            };
+            let mut with = keyboards.clone();
+            with[0] = ps2_7_0.clone();
+            assert_eq!(
+                plan_set_standard(&with, &global, Layout::Us, &[]),
+                Err(OperationError::Ps2WithoutTable {
+                    instance_ids: vec![ps2_7_0.instance_id.clone()]
+                })
+            );
+            // The lone value comes first.
+            let mut both = with.clone();
+            both.push(lone_hid.clone());
+            assert!(matches!(
+                plan_set_standard(&both, &global, Layout::Us, &[]),
+                Err(OperationError::IncompleteValues { .. })
+            ));
+        }
+
+        // `--follow` of a keyboard without a follower: assigned, PS/2, Remote Desktop, another
+        // driver's keyboard.
+        let mut with_hyperkbd = keyboards.clone();
+        with_hyperkbd.push(hyperkbd());
+        for kb in [
+            fixtures::desktop_keychron(),
+            fixtures::desktop_ps2(),
+            fixtures::desktop_rdp_keyboard(),
+            hyperkbd(),
+        ] {
+            assert_eq!(
+                plan_set_standard(
+                    &with_hyperkbd,
+                    &global,
+                    Layout::Us,
+                    &[kb.instance_id.to_ascii_lowercase()]
+                ),
+                Err(OperationError::NotFollowingStandard {
+                    instance_id: kb.instance_id.clone()
+                }),
+                "{}",
+                kb.instance_id
+            );
+        }
+        assert_eq!(
+            plan_set_standard(&keyboards, &global, Layout::Us, &[r"HID\NOPE\1".into()]),
+            Err(OperationError::UnknownKeyboard {
+                instance_id: r"HID\NOPE\1".into()
+            })
+        );
+        // A PS/2 keyboard without a pin: INV-PS2 (check_plan).
+        let mut unpinned = keyboards.clone();
+        unpinned[0].overrides = DeviceOverrides::default();
+        assert_eq!(
+            plan_set_standard(&unpinned, &global, Layout::Us, &[]),
+            Err(OperationError::Plan(PlanError::InvPs2(InvPs2Violation {
+                keyboards: vec![fixtures::desktop_ps2().instance_id]
+            })))
+        );
+        // The same standard writes nothing, so a lone value does not stop it.
+        let mut lone_hid_only = keyboards.clone();
+        lone_hid_only.push(lone_hid);
+        assert!(
+            plan_set_standard(&lone_hid_only, &global, Layout::Jis, &[])
+                .unwrap()
+                .change
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn standard_guards_are_the_global_pair() {
+        let guards = standard_guards();
+        assert_eq!(
+            guards.iter().map(ValueKey::canonical).collect::<Vec<_>>(),
+            vec![
+                "global|OverrideKeyboardType".to_string(),
+                "global|OverrideKeyboardSubtype".to_string()
+            ]
+        );
+        // The names the global allowlist knows, never written by a standard change.
+        let (keyboards, global) = desktop();
+        let change = set_standard_writes(&keyboards, &global, Layout::Us, &[]).unwrap();
+        assert!(
+            change
+                .global_writes
+                .iter()
+                .all(|w| guards.iter().all(|g| g.name != w.name))
+        );
     }
 }

@@ -478,6 +478,18 @@ mod tests {
             serde_json::from_value::<SystemSnapshot>(old).unwrap(),
             snapshot
         );
+
+        // The PC's name (design standard-layout UX-5): added later too.
+        let mut named = snapshot.clone();
+        named.os.computer_name = Some("DESKTOP-3TCSIET".into());
+        let value = serde_json::to_value(&named).unwrap();
+        assert_eq!(value["os"]["computer_name"], "DESKTOP-3TCSIET");
+        let mut old = value;
+        old["os"].as_object_mut().unwrap().remove("computer_name");
+        assert_eq!(
+            serde_json::from_value::<SystemSnapshot>(old).unwrap(),
+            snapshot
+        );
     }
 
     #[test]

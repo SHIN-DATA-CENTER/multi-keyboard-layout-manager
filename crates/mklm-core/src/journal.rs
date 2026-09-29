@@ -490,6 +490,15 @@ impl ValueRecord {
     pub fn is_boot_time(&self) -> bool {
         is_boot_time_value(&self.target, &self.name)
     }
+
+    /// A check-only record (design standard-layout B.2, the global pair of a standard change):
+    /// `before` and `intended` are the same value, so MKLM never writes it and captures no
+    /// baseline for it. The compare-and-swap before the writes, recovery's observation, the
+    /// confirmation and every restore still compare it, so a value that appears there is a
+    /// conflict.
+    pub fn is_check_only(&self) -> bool {
+        value_eq(&self.name, &self.before, &self.intended)
+    }
 }
 
 /// Layout choice for one keyboard, as the user makes it (plan 3.4).
@@ -525,8 +534,12 @@ pub enum RestoreScope {
 
 /// What an operation was started for. Reverting is not an operation of its own: it is a state
 /// transition of the operation it reverts.
+///
+/// On the wire (the journal, `journal --json`) [`OpKind::SetStandard`] is written as a
+/// `"migrate"` with the mark `"set_standard": {"from": …}` ([`OpKindWire`]), so that 0.1.x and
+/// 0.2.0 keep reading the entry (design standard-layout B.8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(from = "OpKindWire", into = "OpKindWire")]
 pub enum OpKind {
     /// Assign a layout to one physical keyboard (all its kbdhid collections, plan 3.4).
     SetLayout {
@@ -568,20 +581,182 @@ pub enum OpKind {
         /// The value names deleted, in the order written.
         names: Vec<String>,
     },
+    /// Per-keyboard mode: change the PC's standard layout from `from` to `to` (design
+    /// standard-layout B). The keyboards that followed the standard are pinned to `from` first,
+    /// except those the user left to follow `to`. Always takes effect at a PC restart. Written as
+    /// a marked `migrate` in schema 1 ([`OpKindWire`]).
+    SetStandard {
+        from: Layout,
+        to: Layout,
+        /// `(instance ID, choice)`: a pinned devnode with `from`'s choice (`Jis` / `Us`), a
+        /// devnode left to follow the new standard with [`LayoutChoice::Standard`].
+        keyboards: Vec<(String, LayoutChoice)>,
+    },
 }
 
 impl OpKind {
     /// The [`JournalEntry`] schema an entry of this kind is written in: 2 for
     /// [`OpKind::Cleanup`] (which older builds must refuse as newer), else 1 (so that older
-    /// builds keep reading them). See [`JOURNAL_SCHEMA_VERSION`].
+    /// builds keep reading them; a [`OpKind::SetStandard`] reads as a migration there). See
+    /// [`JOURNAL_SCHEMA_VERSION`].
     pub fn schema_version(&self) -> u32 {
         match self {
             OpKind::Cleanup { .. } => JOURNAL_SCHEMA_VERSION,
-            OpKind::SetLayout { .. } | OpKind::Migrate { .. } | OpKind::RestoreBaseline { .. } => {
-                JOURNAL_SCHEMA_V1
-            }
+            OpKind::SetLayout { .. }
+            | OpKind::Migrate { .. }
+            | OpKind::RestoreBaseline { .. }
+            | OpKind::SetStandard { .. } => JOURNAL_SCHEMA_V1,
         }
     }
+}
+
+/// The mark that tells a standard change from a migration on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct SetStandardMark {
+    from: Layout,
+}
+
+/// [`OpKind`] as stored: the four kinds of 0.1.x / 0.2.0 unchanged (field for field, so that
+/// entries written back stay byte for byte the same), and a standard change as a `migrate`
+/// carrying [`SetStandardMark`]. Older builds ignore the mark (`OpKind` never had
+/// `deny_unknown_fields`) and read the entry as the migration it resembles: `standard` is the new
+/// standard, `assignments` the pins and the devnodes left to follow (design standard-layout B.8).
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum OpKindWire {
+    SetLayout {
+        requested: String,
+        instance_ids: Vec<String>,
+        layout: LayoutChoice,
+    },
+    Migrate {
+        standard: Layout,
+        assignments: Vec<(String, LayoutChoice)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        set_standard: Option<SetStandardMark>,
+    },
+    RestoreBaseline {
+        scope: RestoreScope,
+        silent: bool,
+        #[serde(default)]
+        supersedes: Vec<OpId>,
+    },
+    Cleanup {
+        instance_id: String,
+        names: Vec<String>,
+    },
+}
+
+impl From<OpKindWire> for OpKind {
+    fn from(wire: OpKindWire) -> Self {
+        match wire {
+            OpKindWire::SetLayout {
+                requested,
+                instance_ids,
+                layout,
+            } => OpKind::SetLayout {
+                requested,
+                instance_ids,
+                layout,
+            },
+            OpKindWire::Migrate {
+                standard,
+                assignments,
+                set_standard: Some(SetStandardMark { from }),
+            } => OpKind::SetStandard {
+                from,
+                to: standard,
+                keyboards: assignments,
+            },
+            OpKindWire::Migrate {
+                standard,
+                assignments,
+                set_standard: None,
+            } => OpKind::Migrate {
+                standard,
+                assignments,
+            },
+            OpKindWire::RestoreBaseline {
+                scope,
+                silent,
+                supersedes,
+            } => OpKind::RestoreBaseline {
+                scope,
+                silent,
+                supersedes,
+            },
+            OpKindWire::Cleanup { instance_id, names } => OpKind::Cleanup { instance_id, names },
+        }
+    }
+}
+
+impl From<OpKind> for OpKindWire {
+    fn from(kind: OpKind) -> Self {
+        match kind {
+            OpKind::SetLayout {
+                requested,
+                instance_ids,
+                layout,
+            } => OpKindWire::SetLayout {
+                requested,
+                instance_ids,
+                layout,
+            },
+            OpKind::Migrate {
+                standard,
+                assignments,
+            } => OpKindWire::Migrate {
+                standard,
+                assignments,
+                set_standard: None,
+            },
+            OpKind::SetStandard {
+                from,
+                to,
+                keyboards,
+            } => OpKindWire::Migrate {
+                standard: to,
+                assignments: keyboards,
+                set_standard: Some(SetStandardMark { from }),
+            },
+            OpKind::RestoreBaseline {
+                scope,
+                silent,
+                supersedes,
+            } => OpKindWire::RestoreBaseline {
+                scope,
+                silent,
+                supersedes,
+            },
+            OpKind::Cleanup { instance_id, names } => OpKindWire::Cleanup { instance_id, names },
+        }
+    }
+}
+
+/// The `from` of a standard change whose mark an older build dropped when it wrote the entry
+/// back (design standard-layout B.8): a `migrate` whose records of the global type/subtype pair
+/// are missing or check-only (`before` = `intended` = `Absent`), and that records the global
+/// `LayerDriver JPN`; `from` is that record's `before` (`kbd106.dll` → JIS, `kbd101.dll` → US).
+/// A real migration always starts from fixed mode, so it always records the deletion of the
+/// pair. `None` when the records do not say so.
+fn derived_standard_change(records: &[ValueRecord]) -> Option<Layout> {
+    let pair_records_are_checks = records
+        .iter()
+        .filter(|r| r.target == WriteTarget::Global && is_ps2_value_name(&r.name))
+        .all(|r| r.is_check_only() && r.before == RegValue::Absent);
+    if !pair_records_are_checks {
+        return None;
+    }
+    let layer_driver = records.iter().find(|r| {
+        r.target == WriteTarget::Global
+            && r.name.eq_ignore_ascii_case(value_names::LAYER_DRIVER_JPN)
+    })?;
+    let RegValue::Sz { value } = &layer_driver.before else {
+        return None;
+    };
+    [Layout::Jis, Layout::Us]
+        .into_iter()
+        .find(|layout| value.eq_ignore_ascii_case(layout.layer_driver()))
 }
 
 /// State of an operation (plan 2.3).
@@ -720,8 +895,14 @@ pub struct Countdown {
 pub enum FailureReason {
     /// A value changed between planning and writing (compare-and-swap before the first write).
     ConcurrentChange { name: String },
-    /// A registry or device call failed; written values were rolled back.
-    WriteError { message: String },
+    /// A registry or device call failed; written values were rolled back. `target`: the key of
+    /// the record that failed, when known (design standard-layout UX-16: the front ends name the
+    /// keyboard). Older builds ignore it.
+    WriteError {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<WriteTarget>,
+    },
     /// The caller disconnected before the change could be confirmed.
     CallerDisconnected,
     /// The writer stopped (killed, crashed, power loss) with some values written; recovery rolled
@@ -946,7 +1127,22 @@ impl JournalEntry {
     /// documents (C.10).
     pub fn from_json(json: &str) -> Result<Self, JournalError> {
         check_schema(json, JOURNAL_SCHEMA_VERSION)?;
-        serde_json::from_str(json).map_err(malformed)
+        let mut entry: JournalEntry = serde_json::from_str(json).map_err(malformed)?;
+        // A standard change an older build wrote back without its mark (design standard-layout
+        // B.8): the records still say what it is. The next write puts the mark back.
+        if let OpKind::Migrate {
+            standard,
+            assignments,
+        } = &entry.kind
+            && let Some(from) = derived_standard_change(&entry.records)
+        {
+            entry.kind = OpKind::SetStandard {
+                from,
+                to: *standard,
+                keyboards: assignments.clone(),
+            };
+        }
+        Ok(entry)
     }
 }
 
@@ -2328,5 +2524,332 @@ mod tests {
         assert_eq!(journal.prunable(32), expected);
         assert!(journal.prunable(100).is_empty());
         assert_eq!(journal.prunable(0).len(), 37);
+    }
+
+    // --- Design standard-layout B.8: a standard change on the wire -------------------------
+
+    const WIRELESS: &str = r"HID\VID_1D57&PID_FA60&MI_00\7&14A99BDA&0&0000";
+    const VXE: &str = r"HID\VID_3554&PID_F58E&MI_00\8&18DB8B6B&0&0000";
+    const USB_KEYBOARD: &str = r"HID\VID_04D9&PID_1818&MI_00\7&183DDD3D&0&0000";
+    const KEYCHRON_DESKTOP: &str = r"HID\VID_3434&PID_D027&MI_00&COL01\7&5211D3A&0&0000";
+    const PS2_DESKTOP: &str = r"ACPI\PNP0303\0";
+
+    /// "Standard JIS → US" on the desktop PC: the 2.4G receiver pinned to JIS, the VXE dongle
+    /// left to follow; records in forward order (pins, the check-only pair, the standard).
+    fn standard_change() -> JournalEntry {
+        let kind = OpKind::SetStandard {
+            from: Layout::Jis,
+            to: Layout::Us,
+            keyboards: vec![
+                (WIRELESS.into(), LayoutChoice::Jis),
+                (VXE.into(), LayoutChoice::Standard),
+            ],
+        };
+        let mut guard_type = record(
+            WriteTarget::Global,
+            PS2_TYPE,
+            RegValue::Absent,
+            RegValue::Absent,
+        );
+        // The baseline MKLM recorded when it first changed the pair (the migration from fixed
+        // English): the check-only record copies it and captures none of its own.
+        guard_type.baseline = dword(7);
+        let mut guard_subtype = record(
+            WriteTarget::Global,
+            PS2_SUBTYPE,
+            RegValue::Absent,
+            RegValue::Absent,
+        );
+        guard_subtype.baseline = dword(0);
+        let mut e = entry(
+            7,
+            kind,
+            OpState::PendingReboot,
+            vec![
+                record(device(WIRELESS), HID_TYPE, RegValue::Absent, dword(7)),
+                record(device(WIRELESS), HID_SUBTYPE, RegValue::Absent, dword(2)),
+                guard_type,
+                guard_subtype,
+                record(
+                    WriteTarget::Global,
+                    LAYER_DRIVER_JPN,
+                    sz("kbd106.dll"),
+                    sz("kbd101.dll"),
+                ),
+                record(
+                    WriteTarget::Global,
+                    KEYBOARD_IDENTIFIER,
+                    sz("PCAT_106KEY"),
+                    sz("PCAT_101KEY"),
+                ),
+            ],
+        );
+        for r in &mut e.records {
+            r.last_written = Some(r.intended.clone());
+        }
+        e.apply = Some(PendingAction::RestartPc);
+        e
+    }
+
+    /// The shape of `271b6909` (2026-09-29 16:35:41, design standard-layout 0.1): a migration
+    /// from fixed English to per-keyboard mode with a JIS standard, the USB Keyboard and the
+    /// Keychron assigned US and the PS/2 node pinned to US.
+    fn standard_changing_migration() -> JournalEntry {
+        let kind = OpKind::Migrate {
+            standard: Layout::Jis,
+            assignments: vec![
+                (USB_KEYBOARD.into(), LayoutChoice::Us),
+                (KEYCHRON_DESKTOP.into(), LayoutChoice::Us),
+            ],
+        };
+        let mut e = entry(
+            3,
+            kind,
+            OpState::Confirmed,
+            vec![
+                record(device(PS2_DESKTOP), PS2_TYPE, RegValue::Absent, dword(4)),
+                record(device(PS2_DESKTOP), PS2_SUBTYPE, RegValue::Absent, dword(0)),
+                record(device(USB_KEYBOARD), HID_TYPE, RegValue::Absent, dword(4)),
+                record(
+                    device(USB_KEYBOARD),
+                    HID_SUBTYPE,
+                    RegValue::Absent,
+                    dword(0),
+                ),
+                record(
+                    device(KEYCHRON_DESKTOP),
+                    HID_TYPE,
+                    RegValue::Absent,
+                    dword(4),
+                ),
+                record(
+                    device(KEYCHRON_DESKTOP),
+                    HID_SUBTYPE,
+                    RegValue::Absent,
+                    dword(0),
+                ),
+                record(WriteTarget::Global, PS2_TYPE, dword(7), RegValue::Absent),
+                record(WriteTarget::Global, PS2_SUBTYPE, dword(0), RegValue::Absent),
+                record(
+                    WriteTarget::Global,
+                    LAYER_DRIVER_JPN,
+                    sz("kbd101.dll"),
+                    sz("kbd106.dll"),
+                ),
+                record(
+                    WriteTarget::Global,
+                    KEYBOARD_IDENTIFIER,
+                    sz("PCAT_101KEY"),
+                    sz("PCAT_106KEY"),
+                ),
+            ],
+        );
+        for r in &mut e.records {
+            r.last_written = Some(r.intended.clone());
+        }
+        e
+    }
+
+    #[test]
+    fn set_standard_is_written_as_a_migration_with_a_mark() {
+        let e = standard_change();
+        assert_eq!(e.kind.schema_version(), JOURNAL_SCHEMA_V1);
+        let json = e.to_json().unwrap();
+        assert!(json.starts_with("{\"schema_version\":1,"), "{json}");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["kind"],
+            serde_json::json!({
+                "kind": "migrate",
+                "standard": "us",
+                "assignments": [[WIRELESS, "jis"], [VXE, "standard"]],
+                "set_standard": { "from": "jis" },
+            })
+        );
+        // The check-only records: the global pair, absent before and after, first in the
+        // global step.
+        assert_eq!(value["records"][2]["name"], PS2_TYPE);
+        assert_eq!(
+            value["records"][2]["before"],
+            serde_json::json!({"kind": "absent"})
+        );
+        assert_eq!(
+            value["records"][2]["intended"],
+            serde_json::json!({"kind": "absent"})
+        );
+        assert!(e.records[2].is_check_only() && e.records[3].is_check_only());
+        assert!(!e.records[4].is_check_only());
+        assert_eq!(JournalEntry::from_json(&json).unwrap(), e);
+        // A migration is written without the mark, as before.
+        let migration = entry(1, migrate_kind(), OpState::Confirmed, Vec::new());
+        assert!(!migration.to_json().unwrap().contains("set_standard"));
+    }
+
+    /// The types of 0.2.0 (and 0.1.x, the same), as that build reads the journal and results.
+    mod v0_2_0 {
+        use serde::Deserialize;
+
+        use crate::journal::{LayoutChoice, OpId, RestoreScope};
+        use crate::model::Layout;
+
+        #[derive(Debug, PartialEq, Eq, Deserialize)]
+        #[serde(tag = "kind", rename_all = "kebab-case")]
+        pub enum OpKind {
+            SetLayout {
+                requested: String,
+                instance_ids: Vec<String>,
+                layout: LayoutChoice,
+            },
+            Migrate {
+                standard: Layout,
+                assignments: Vec<(String, LayoutChoice)>,
+            },
+            RestoreBaseline {
+                scope: RestoreScope,
+                silent: bool,
+                #[serde(default)]
+                supersedes: Vec<OpId>,
+            },
+            Cleanup {
+                instance_id: String,
+                names: Vec<String>,
+            },
+        }
+
+        #[derive(Debug, PartialEq, Eq, Deserialize)]
+        #[serde(tag = "kind", rename_all = "kebab-case")]
+        pub enum FailureReason {
+            ConcurrentChange { name: String },
+            WriteError { message: String },
+            CallerDisconnected,
+            Interrupted,
+            LiveResetUnconfirmed,
+            CountdownExpired,
+            KeyboardDidNotReturn,
+            NothingWritten,
+            ConflictKeptCurrent,
+            Superseded { by: OpId },
+        }
+    }
+
+    #[test]
+    fn a_0_2_0_build_reads_set_standard() {
+        let mut e = standard_change();
+        e.failure = Some(FailureReason::WriteError {
+            message: "access denied".into(),
+            target: Some(device(WIRELESS)),
+        });
+        let value: serde_json::Value = serde_json::from_str(&e.to_json().unwrap()).unwrap();
+        // The mark and the target are unknown fields there, and ignored.
+        let old: v0_2_0::OpKind = serde_json::from_value(value["kind"].clone()).unwrap();
+        assert_eq!(
+            old,
+            v0_2_0::OpKind::Migrate {
+                standard: Layout::Us,
+                assignments: vec![
+                    (WIRELESS.into(), LayoutChoice::Jis),
+                    (VXE.into(), LayoutChoice::Standard),
+                ],
+            }
+        );
+        let failure: v0_2_0::FailureReason =
+            serde_json::from_value(value["failure"].clone()).unwrap();
+        assert_eq!(
+            failure,
+            v0_2_0::FailureReason::WriteError {
+                message: "access denied".into()
+            }
+        );
+        // Its schema check passes too: the entry is readable, so writes and updates go on.
+        assert_eq!(
+            check_schema(&e.to_json().unwrap(), JOURNAL_SCHEMA_V1),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn a_mark_dropped_by_an_older_build_is_derived_again() {
+        let e = standard_change();
+        // What 0.2.0 writes back after a transition: the same entry without the mark.
+        let mut value: serde_json::Value = serde_json::from_str(&e.to_json().unwrap()).unwrap();
+        value["kind"]
+            .as_object_mut()
+            .unwrap()
+            .remove("set_standard");
+        let rewritten = value.to_string();
+        let read = JournalEntry::from_json(&rewritten).unwrap();
+        assert_eq!(read.kind, e.kind);
+        // Written again by this build: the mark is back.
+        assert!(
+            read.to_json()
+                .unwrap()
+                .contains("\"set_standard\":{\"from\":\"jis\"}")
+        );
+        // Without the check-only records (an entry some tool trimmed): still a standard change.
+        let mut trimmed = value.clone();
+        trimmed["records"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|r| r["name"] != PS2_TYPE && r["name"] != PS2_SUBTYPE);
+        assert_eq!(
+            JournalEntry::from_json(&trimmed.to_string()).unwrap().kind,
+            e.kind
+        );
+        // An unknown layer driver before: left a migration.
+        let mut odd = value;
+        odd["records"][4]["before"] = serde_json::json!({"kind": "sz", "value": "kbdnec.dll"});
+        assert!(matches!(
+            JournalEntry::from_json(&odd.to_string()).unwrap().kind,
+            OpKind::Migrate { .. }
+        ));
+    }
+
+    #[test]
+    fn a_real_migration_stays_a_migration() {
+        // Every migration starts from fixed mode, so it records the pair's deletion.
+        let e = standard_changing_migration();
+        let read = JournalEntry::from_json(&e.to_json().unwrap()).unwrap();
+        assert_eq!(read, e);
+        assert!(matches!(read.kind, OpKind::Migrate { .. }));
+        for (ops, baselines) in [
+            crate::fixtures::schema_1_journal(),
+            crate::fixtures::legacy_guid_journal(),
+        ] {
+            let journal = Journal::parse(&ops, &baselines);
+            assert!(journal.unreadable.is_empty());
+            assert!(
+                journal
+                    .entries
+                    .iter()
+                    .all(|e| !matches!(e.kind, OpKind::SetStandard { .. })),
+                "{:?}",
+                journal.entries.iter().map(|e| &e.kind).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn a_write_error_without_a_target_reads() {
+        let json = r#"{"kind":"write-error","message":"access denied"}"#;
+        let failure: FailureReason = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            failure,
+            FailureReason::WriteError {
+                message: "access denied".into(),
+                target: None
+            }
+        );
+        // Written back without the field.
+        assert_eq!(serde_json::to_string(&failure).unwrap(), json);
+        let with = FailureReason::WriteError {
+            message: "access denied".into(),
+            target: Some(WriteTarget::Global),
+        };
+        let text = serde_json::to_string(&with).unwrap();
+        assert_eq!(
+            text,
+            r#"{"kind":"write-error","message":"access denied","target":{"kind":"global"}}"#
+        );
+        assert_eq!(serde_json::from_str::<FailureReason>(&text).unwrap(), with);
     }
 }

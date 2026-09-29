@@ -126,6 +126,39 @@ pub fn kind_text(kind: &OpKind) -> String {
             "delete values the driver does not read from {instance_id}: {}",
             names.join(", ")
         ),
+        OpKind::SetStandard {
+            from,
+            to,
+            keyboards,
+        } => {
+            let mut text = format!(
+                "set the PC's standard layout to {} (was {})",
+                layout_name(*to),
+                layout_name(*from)
+            );
+            let pinned: Vec<&str> = keyboards
+                .iter()
+                .filter(|(_, choice)| *choice != LayoutChoice::Standard)
+                .map(|(id, _)| id.as_str())
+                .collect();
+            let following: Vec<&str> = keyboards
+                .iter()
+                .filter(|(_, choice)| *choice == LayoutChoice::Standard)
+                .map(|(id, _)| id.as_str())
+                .collect();
+            if !pinned.is_empty() {
+                let _ = write!(
+                    text,
+                    "; {} assigned to {}",
+                    layout_name(*from),
+                    pinned.join(", ")
+                );
+            }
+            if !following.is_empty() {
+                let _ = write!(text, "; {} follow the standard", following.join(", "));
+            }
+            text
+        }
     }
 }
 
@@ -137,9 +170,17 @@ pub fn failure_text(failure: &FailureReason, phase: ResetPhase) -> String {
         FailureReason::ConcurrentChange { name } => {
             format!("{name} changed between planning and writing; nothing was written")
         }
-        FailureReason::WriteError { message } => {
-            format!("a write failed ({message}); the values were put back")
-        }
+        FailureReason::WriteError {
+            message,
+            target: None,
+        } => format!("a write failed ({message}); the values were put back"),
+        FailureReason::WriteError {
+            message,
+            target: Some(target),
+        } => format!(
+            "writing to {} failed ({message}); the values were put back",
+            key_text(target)
+        ),
         FailureReason::CallerDisconnected => "the command ended before the change was kept".into(),
         FailureReason::Interrupted => {
             "the writer stopped halfway; recovery put the values back".into()

@@ -193,7 +193,7 @@ pub fn restart_waits(journal: &Journal, boot: BootId) -> RestartWaits {
                 OpKind::SetLayout { instance_ids, .. } => {
                     waits.keyboards.extend(instance_ids.iter().cloned());
                 }
-                OpKind::Migrate { .. } => waits.all = true,
+                OpKind::Migrate { .. } | OpKind::SetStandard { .. } => waits.all = true,
                 OpKind::RestoreBaseline { .. } | OpKind::Cleanup { .. } => {}
             }
         }

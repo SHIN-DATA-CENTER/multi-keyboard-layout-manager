@@ -571,6 +571,7 @@ fn vocabulary(op: &OpId) -> Vec<(String, String)> {
             },
             WriteError => FailureReason::WriteError {
                 message: "Access is denied. (0x80070005)".to_string(),
+                target: None,
             },
             CallerDisconnected => FailureReason::CallerDisconnected,
             Interrupted => FailureReason::Interrupted,

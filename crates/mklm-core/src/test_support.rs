@@ -78,6 +78,15 @@ pub fn migrate_kind() -> OpKind {
     }
 }
 
+/// A standard change JIS → US (design standard-layout B), without keyboards.
+pub fn standard_kind() -> OpKind {
+    OpKind::SetStandard {
+        from: Layout::Jis,
+        to: Layout::Us,
+        keyboards: Vec::new(),
+    }
+}
+
 /// A cleanup of the HID pair on `instance_id` (an i8042prt keyboard, design m3 A.5).
 pub fn cleanup_kind(instance_id: &str) -> OpKind {
     OpKind::Cleanup {
