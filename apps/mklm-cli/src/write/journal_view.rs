@@ -8,8 +8,8 @@ use std::fmt::Write as _;
 
 use mklm_client::describe::reset_phase;
 use mklm_core::{
-    Attention, BaselineRecord, BootId, Journal, JournalEntry, Liveness, ProcessIdentity, Timestamp,
-    attention,
+    Attention, BaselineRecord, BootId, Journal, JournalEntry, Liveness, PendingAction,
+    ProcessIdentity, Timestamp, attention,
 };
 use serde::Serialize;
 
@@ -146,8 +146,14 @@ fn entry_text(
     {
         put!(out, "      Attention: {text}");
     }
+    // What to do only while the entry is open; a closed one says how it applied, which asks for
+    // nothing (what is still not in effect has its own lines: `Attention`, `Not in effect yet`).
     if let Some(apply) = entry.apply {
-        put!(out, "      Takes effect: {}", pending_name_long(apply));
+        if entry.state.is_open() {
+            put!(out, "      Takes effect: {}", pending_name_long(apply));
+        } else {
+            put!(out, "      Applied by: {}", applied_by(apply));
+        }
     }
     if let Some(failure) = &entry.failure {
         put!(
@@ -166,6 +172,15 @@ fn entry_text(
     }
     for line in records_text(entry, current).lines() {
         put!(out, "    {line}");
+    }
+}
+
+/// How a closed entry's values applied, in words that ask for nothing.
+fn applied_by(action: PendingAction) -> &'static str {
+    match action {
+        PendingAction::ResetKeyboard => "a keyboard reset",
+        PendingAction::Reconnect => "reconnecting the keyboard",
+        PendingAction::RestartPc => "a PC restart",
     }
 }
 
@@ -520,6 +535,48 @@ mod tests {
         );
         assert_eq!(json["entries"][0]["updated_at"], 1_790_516_010_637_u64);
         assert_eq!(json["baselines"][0]["captured_at"], 1_790_515_162_813_u64);
+    }
+
+    /// CLEAN-RUN-4 (after MT-1 on the desktop PC): a closed entry that applied at a restart no
+    /// longer reads as an instruction to restart; an open one still does.
+    #[test]
+    fn only_an_open_entry_says_what_to_do_for_it_to_take_effect() {
+        let dead = |_: &ProcessIdentity| Liveness::Dead;
+        let text_of = |state: OpState| {
+            let mut entry = entry();
+            entry.state = state;
+            entry.apply = Some(PendingAction::RestartPc);
+            let journal = Journal {
+                entries: vec![entry],
+                ..Journal::default()
+            };
+            journal_text(&journal, Some(BootId(2)), &dead, None, &utc_timestamp_text)
+        };
+        for closed in [
+            OpState::Reverted,
+            OpState::Confirmed,
+            OpState::Failed,
+            OpState::RevertedPendingReboot,
+        ] {
+            let text = text_of(closed);
+            assert!(text.contains("      Applied by: a PC restart\n"), "{text}");
+            assert!(!text.contains("Takes effect"), "{text}");
+            assert!(!text.contains("restart the PC"), "{text}");
+        }
+        let text = text_of(OpState::Reverted);
+        assert!(text.contains("(reverted)"), "{text}");
+        assert!(!text.contains("Attention"), "{text}");
+        let text = text_of(OpState::PendingReboot);
+        assert!(
+            text.contains("      Takes effect: restart the PC (Restart, not Shut down)\n"),
+            "{text}"
+        );
+        assert!(!text.contains("Applied by"), "{text}");
+        assert_eq!(applied_by(PendingAction::ResetKeyboard), "a keyboard reset");
+        assert_eq!(
+            applied_by(PendingAction::Reconnect),
+            "reconnecting the keyboard"
+        );
     }
 
     /// The journal 0.1.0 left on the desktop PC of the boot-ID bug, adopted as `read_journal`
