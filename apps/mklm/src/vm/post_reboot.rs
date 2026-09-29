@@ -320,6 +320,29 @@ mod tests {
         assert!(same_boot.not_restarted && !same_boot.can_keep);
     }
 
+    /// The reported bug: the migration 0.1.0 wrote under a loader GUID that never changed. Read
+    /// as `mklm_client::journal::read_journal` adopts it, the page offers Keep after the restart,
+    /// and not in the boot of the writes.
+    #[test]
+    fn a_legacy_migration_is_judged_by_its_boot_time() {
+        let (ops, baselines) = fixtures::legacy_guid_journal();
+        let check = |boot_time| {
+            let current = fixtures::legacy_pc_boot(boot_time);
+            let mut journal = mklm_core::Journal::parse(&ops, &baselines);
+            journal.adopt_legacy_boots(&current);
+            let entries = mklm_client::gate::post_reboot_entries(&journal);
+            assert_eq!(entries.len(), 1);
+            let entry = entries[0];
+            assert_eq!(entry.op_id.as_str(), fixtures::LEGACY_PENDING_OP);
+            post_reboot(entry, &[], &[], current.id, &name_of, Lang::Ja)
+        };
+        let after = check(fixtures::LEGACY_PC_BOOT_TIME_AFTER_RESTART);
+        assert!(!after.not_restarted && after.can_keep, "{after:?}");
+        assert!(!after.snapshot_text().contains("not restarted"));
+        let before = check(fixtures::LEGACY_PC_BOOT_TIME_OF_WRITES);
+        assert!(before.not_restarted && !before.can_keep, "{before:?}");
+    }
+
     #[test]
     fn a_migration_lists_every_keyboard_and_reverts_with_a_restart() {
         let mut snapshot = fixtures::dev_machine();
