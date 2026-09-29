@@ -19,6 +19,7 @@ use std::os::windows::io::OwnedHandle;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
+use mklm_core::ProcessIdentity;
 use windows::Win32::Foundation::{
     ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_PATH_NOT_FOUND, ERROR_SHARING_VIOLATION,
     ERROR_SUCCESS, WIN32_ERROR,
@@ -36,7 +37,7 @@ use windows::core::{PCWSTR, PWSTR};
 
 use crate::elevation::file_build_id;
 use crate::error::{Error, win32_code};
-use crate::proc_identity::{file_nt_path, processes_with_images};
+use crate::proc_identity::{file_nt_path, image_file_names, processes_with_images};
 use crate::protected_dir::{
     DataDir, ProtectedDir, create_private_directory, is_plain_file_name, open, verify_level,
 };
@@ -472,9 +473,16 @@ fn rm_error(function: &'static str, status: WIN32_ERROR) -> Error {
 }
 
 /// Who holds `paths` open (Restart Manager: `RmStartSession`, `RmRegisterResources`, `RmGetList`,
-/// `RmEndSession`): (PID, session ID, application name) each (RED-TEAM-3). Best effort; the
-/// callers treat an error as "unknown". Whether `RmGetList` reports plain open handles (not only
-/// loaded images) is unverified (design m5b I.16).
+/// `RmEndSession`): (PID, session ID, executable file name) each (RED-TEAM-3). Best effort; the
+/// callers treat an error as "unknown". `RmGetList` reports plain open handles too (design m5b
+/// I.16, L).
+///
+/// The name is the image file name from the kernel's process table
+/// ([`image_file_names`], matched by PID and the start time Restart Manager
+/// reports), never Restart Manager's `strAppName`: that is the holder's own `FileDescription` or
+/// window title, which the holder (the user who blocks the update) chooses. Empty when the process
+/// is gone. The file name itself is whatever its creator named the file: the PID identifies the
+/// process (M5b security review, finding 2).
 pub fn file_holders(paths: &[PathBuf]) -> Result<Vec<(u32, u32, String)>, Error> {
     if paths.is_empty() {
         return Ok(Vec::new());
@@ -520,13 +528,24 @@ pub fn file_holders(paths: &[PathBuf]) -> Result<Vec<(u32, u32, String)>, Error>
             return Err(rm_error("RmGetList", status));
         }
         infos.truncate(count as usize);
+        let processes: Vec<ProcessIdentity> = infos
+            .iter()
+            .map(|info| ProcessIdentity {
+                pid: info.Process.dwProcessId,
+                creation_time: (u64::from(info.Process.ProcessStartTime.dwHighDateTime) << 32)
+                    | u64::from(info.Process.ProcessStartTime.dwLowDateTime),
+            })
+            .collect();
+        let names = image_file_names(&processes).unwrap_or_else(|_| vec![None; processes.len()]);
         return Ok(infos
             .iter()
-            .map(|info| {
+            .zip(names)
+            .map(|(info, name)| {
+                let name: Vec<u16> = name.unwrap_or_default().encode_utf16().collect();
                 (
                     info.Process.dwProcessId,
                     info.TSSessionId,
-                    holder_name(&info.strAppName),
+                    holder_name(&name),
                 )
             })
             .collect());
@@ -753,7 +772,7 @@ mod tests {
     }
 
     /// Restart Manager on a file this test holds open (design m5b I.16: whether it reports plain
-    /// handles is recorded, not required).
+    /// handles is recorded, not required; this machine reports them, L).
     #[test]
     fn holders_of_a_file() {
         let scratch = Scratch::new();
@@ -769,6 +788,22 @@ mod tests {
             assert!(*pid != 0 && name.len() <= HOLDER_NAME_MAX);
         }
         eprintln!("holders of an open handle: {holders:?}");
+        // M5b security review, finding 2: this process is named by its executable's file name
+        // (Restart Manager's `strAppName` was the name without `.exe`, or a FileDescription).
+        let exe = std::env::current_exe().expect("test executable");
+        let file_name = exe
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name");
+        for (_, _, name) in holders
+            .iter()
+            .filter(|(pid, _, _)| *pid == std::process::id())
+        {
+            assert!(
+                name.eq_ignore_ascii_case(file_name),
+                "{name} vs {file_name}"
+            );
+        }
         drop(held);
         assert_eq!(file_holders(&[]), Ok(Vec::new()));
     }

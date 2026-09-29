@@ -24,7 +24,7 @@ use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
 use windows::Win32::System::Console::GetConsoleWindow;
-use windows::Win32::System::Environment::GetCommandLineW;
+use windows::Win32::System::Environment::{GetCommandLineW, SetEnvironmentVariableW};
 use windows::Win32::System::SystemInformation::{GetSystemDirectoryW, GetSystemWindowsDirectoryW};
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
@@ -327,28 +327,49 @@ pub const RUNNER_ENVIRONMENT_NAMES: [&str; 10] = [
     "windir",
 ];
 
-/// SystemRoot, windir, SystemDrive, ComSpec, PATH (System32; Windows; System32\Wbem),
-/// ProgramData, ProgramFiles, ProgramW6432 from the system, and TEMP = TMP = `temp_dir`
-/// (design m5b D.9.4). Nothing from this process's environment.
+/// Sets `SystemRoot` and `windir` to the Windows folder (`GetSystemWindowsDirectoryW`) and
+/// `SystemDrive` to its drive (`X:`) in this process's own environment (design m5b D.9.4). The
+/// elevated entry points call it first thing in `main`: the helper in every mode, and the CLI
+/// (its `--in-process` fallback runs the engine elevated).
 ///
-/// The Windows folder comes from `GetSystemWindowsDirectoryW`, System32 from
-/// `GetSystemDirectoryW`, the others from `SHGetKnownFolderPath`; `temp_dir` must be absolute.
-pub fn runner_environment(temp_dir: &Path) -> Result<CleanEnvironment, Error> {
-    let text = |path: &Path| -> Result<String, Error> {
-        path.to_str()
-            .map(str::to_string)
-            .ok_or_else(|| Error::UnexpectedData {
-                path: path.display().to_string(),
-            })
-    };
-    if !temp_dir.is_absolute() {
-        return Err(Error::Insecure {
-            path: temp_dir.display().to_string(),
-            reason: "TEMP must be an absolute path".to_string(),
-        });
+/// `SHGetKnownFolderPath(FOLDERID_ProgramData)` expands the `%SystemDrive%` of
+/// `HKLM\…\ProfileList\ProgramData` from the calling process's environment, and a UAC-elevated
+/// process's environment carries the values the unelevated user sets in `HKCU\Environment`: with
+/// a forged `SystemDrive`, the helper would put its lock file, logs and update folders under a
+/// folder of the user's choosing. The shell caches a known folder's path after the first lookup in
+/// a process, so this must run before any known-folder call (a later pin changes nothing).
+/// Registry values of type `REG_EXPAND_SZ` that name `%SystemRoot%` (COM servers, for one) are
+/// expanded with the same environment.
+pub fn pin_system_environment() -> Result<(), Error> {
+    let (windows, drive) = system_roots()?;
+    for (name, value) in [
+        ("SystemDrive", drive.as_str()),
+        ("SystemRoot", windows.as_str()),
+        ("windir", windows.as_str()),
+    ] {
+        let name = to_wide(name);
+        let value = to_wide(value);
+        // SAFETY: both strings are NUL-terminated and outlive the call. The call changes this
+        // process's environment block only, under the process's own lock (so, as
+        // `std::env::set_var` on Windows, it is safe with other threads).
+        unsafe { SetEnvironmentVariableW(PCWSTR(name.as_ptr()), PCWSTR(value.as_ptr())) }
+            .map_err(|error| win32("SetEnvironmentVariableW", &error))?;
     }
-    let windows = text(&windows_directory()?)?;
-    let system32 = text(&system_directory()?)?;
+    Ok(())
+}
+
+/// A path as UTF-8 text; [`Error::UnexpectedData`] when it is not valid Unicode.
+fn path_text(path: &Path) -> Result<String, Error> {
+    path.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| Error::UnexpectedData {
+            path: path.display().to_string(),
+        })
+}
+
+/// The Windows folder (`GetSystemWindowsDirectoryW`) and its drive, `X:`.
+fn system_roots() -> Result<(String, String), Error> {
+    let windows = path_text(&windows_directory()?)?;
     let drive = windows
         .get(..2)
         .filter(|drive| drive.as_bytes()[0].is_ascii_alphabetic() && drive.ends_with(':'))
@@ -356,7 +377,27 @@ pub fn runner_environment(temp_dir: &Path) -> Result<CleanEnvironment, Error> {
             path: windows.clone(),
         })?
         .to_string();
-    let temp = text(temp_dir)?;
+    Ok((windows, drive))
+}
+
+/// SystemRoot, windir, SystemDrive, ComSpec, PATH (System32; Windows; System32\Wbem),
+/// ProgramData, ProgramFiles, ProgramW6432 from the system, and TEMP = TMP = `temp_dir`
+/// (design m5b D.9.4). Nothing from this process's environment.
+///
+/// The Windows folder comes from `GetSystemWindowsDirectoryW`, System32 from
+/// `GetSystemDirectoryW`, the others from `SHGetKnownFolderPath` (whose `ProgramData` depends on
+/// this process's `SystemDrive`: the helper has pinned it, [`pin_system_environment`]);
+/// `temp_dir` must be absolute.
+pub fn runner_environment(temp_dir: &Path) -> Result<CleanEnvironment, Error> {
+    if !temp_dir.is_absolute() {
+        return Err(Error::Insecure {
+            path: temp_dir.display().to_string(),
+            reason: "TEMP must be an absolute path".to_string(),
+        });
+    }
+    let (windows, drive) = system_roots()?;
+    let system32 = path_text(&system_directory()?)?;
+    let temp = path_text(temp_dir)?;
     let vars = vec![
         ("ComSpec".to_string(), format!(r"{system32}\cmd.exe")),
         (
@@ -365,15 +406,15 @@ pub fn runner_environment(temp_dir: &Path) -> Result<CleanEnvironment, Error> {
         ),
         (
             "ProgramData".to_string(),
-            text(&known_folder(&FOLDERID_ProgramData)?)?,
+            path_text(&known_folder(&FOLDERID_ProgramData)?)?,
         ),
         (
             "ProgramFiles".to_string(),
-            text(&known_folder(&FOLDERID_ProgramFiles)?)?,
+            path_text(&known_folder(&FOLDERID_ProgramFiles)?)?,
         ),
         (
             "ProgramW6432".to_string(),
-            text(&known_folder(&FOLDERID_ProgramFilesX64)?)?,
+            path_text(&known_folder(&FOLDERID_ProgramFilesX64)?)?,
         ),
         ("SystemDrive".to_string(), drive),
         ("SystemRoot".to_string(), windows.clone()),
@@ -1085,6 +1126,120 @@ mod tests {
             vars: vec![("A=B".to_string(), "c".to_string())],
         };
         assert!(spawn_clean(&cmd, "/d /c exit 0", &bad, false).is_err());
+    }
+
+    /// Environment variable that turns [`forged_system_drive_child`] into the child of
+    /// [`a_forged_system_drive_does_not_move_program_data`]: `<mode>|<expected>|<fake drive>`.
+    const FORGED_DRIVE_CHILD: &str = "MKLM_WIN_TEST_FORGED_DRIVE_CHILD";
+
+    /// Runs [`forged_system_drive_child`] in a new process of this test executable whose
+    /// `SystemDrive` (and, with `forge_roots`, `SystemRoot` and `windir`) is `fake`, as the user can
+    /// set them for a UAC-elevated process in `HKCU\Environment`. Its success and its output.
+    fn run_forged_child(
+        mode: &str,
+        expected: &Path,
+        fake: &Path,
+        forge_roots: bool,
+    ) -> (bool, String) {
+        let exe = std::env::current_exe().expect("test executable");
+        let mut command = std::process::Command::new(exe);
+        command
+            .args([
+                "--exact",
+                "elevation::tests::forged_system_drive_child",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(
+                FORGED_DRIVE_CHILD,
+                format!("{mode}|{}|{}", expected.display(), fake.display()),
+            )
+            .env("SystemDrive", fake)
+            .stdin(std::process::Stdio::null());
+        if forge_roots {
+            command.env("SystemRoot", fake).env("windir", fake);
+        }
+        let output = command.output().expect("run the child");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output.status.success(), text)
+    }
+
+    /// M5b security review, finding 1 (design m5b D.9.4): a forged `SystemDrive` moves
+    /// `%ProgramData%` to a folder the user chose, which the protected directories then refuse
+    /// (its owner and DACL); pinned first thing, `%ProgramData%` and the runner's environment are
+    /// the machine's own again.
+    #[test]
+    fn a_forged_system_drive_does_not_move_program_data() {
+        let expected = crate::protected_dir::program_data_dir().expect("ProgramData");
+        let fake = std::env::temp_dir().join(format!(
+            "mklm-forged-drive-{}",
+            crate::session::new_uuid().expect("uuid")
+        ));
+        std::fs::create_dir_all(fake.join("ProgramData")).expect("the fake ProgramData");
+        let unpinned = run_forged_child("unpinned", &expected, &fake, false);
+        let pinned = run_forged_child("pinned", &expected, &fake, true);
+        let _ = std::fs::remove_dir_all(&fake);
+        assert!(unpinned.0, "the unpinned child failed:\n{}", unpinned.1);
+        assert!(pinned.0, "the pinned child failed:\n{}", pinned.1);
+    }
+
+    /// The child side of [`a_forged_system_drive_does_not_move_program_data`]; does nothing in a
+    /// normal test run.
+    #[test]
+    fn forged_system_drive_child() {
+        use crate::protected_dir::{DataDir, program_data_dir, verify_protected_dir};
+
+        let Ok(spec) = std::env::var(FORGED_DRIVE_CHILD) else {
+            return;
+        };
+        let mut parts = spec.splitn(3, '|');
+        let mode = parts.next().expect("mode").to_string();
+        let expected = PathBuf::from(parts.next().expect("expected"));
+        let fake = PathBuf::from(parts.next().expect("fake drive"));
+        if mode == "pinned" {
+            // Before any known-folder call: the shell caches the first answer.
+            pin_system_environment().expect("pin");
+            let (windows, drive) = system_roots().expect("the system's roots");
+            for (name, value) in [
+                ("SystemDrive", &drive),
+                ("SystemRoot", &windows),
+                ("windir", &windows),
+            ] {
+                assert_eq!(std::env::var(name).ok().as_ref(), Some(value), "{name}");
+            }
+            assert_eq!(program_data_dir().expect("ProgramData"), expected);
+            let env = runner_environment(&expected.join("tmp")).expect("environment");
+            let value = |name: &str| {
+                env.vars
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, value)| value.clone())
+            };
+            assert_eq!(
+                value("ProgramData").map(PathBuf::from),
+                Some(expected.clone())
+            );
+            assert_eq!(value("SystemDrive"), Some(drive));
+        } else {
+            // What the pin prevents: the known folder follows this process's SystemDrive ...
+            assert_eq!(
+                program_data_dir().expect("ProgramData"),
+                fake.join("ProgramData"),
+                "SHGetKnownFolderPath no longer expands %SystemDrive% from the environment"
+            );
+            // ... and, as a second line, the protected directories refuse a %ProgramData% that the
+            // user owns or may rename things in.
+            match verify_protected_dir(DataDir::Base) {
+                Err(Error::Insecure { path, .. }) => {
+                    assert_eq!(PathBuf::from(path), fake.join("ProgramData"));
+                }
+                other => panic!("a user's %ProgramData% was accepted: {other:?}"),
+            }
+        }
     }
 
     #[test]

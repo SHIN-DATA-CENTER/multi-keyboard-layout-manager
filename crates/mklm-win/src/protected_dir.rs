@@ -1,8 +1,14 @@
 //! Protected directories under `%ProgramData%\SHIN DATA CENTER\MKLM` and the write lock file
 //! (M2, plan 2.2, design sections A.3 and D.1).
 //!
-//! `%ProgramData%` comes from `SHGetKnownFolderPath(FOLDERID_ProgramData)`, never from the
-//! environment. Each level from `SHIN DATA CENTER` down is opened with
+//! `%ProgramData%` comes from `SHGetKnownFolderPath(FOLDERID_ProgramData)`, not from the
+//! `ProgramData` variable. That API expands `%SystemDrive%` from this process's environment,
+//! which a UAC-elevated process gets partly from `HKCU\Environment`, so the elevated entry points
+//! first call `elevation::pin_system_environment` (design m5b D.9.4). `%ProgramData%` itself must
+//! be a directory, not a reparse point, owned by SYSTEM, Administrators or TrustedInstaller, and
+//! no one else may hold `DELETE`, `FILE_DELETE_CHILD`, `WRITE_DAC` or `WRITE_OWNER` on it (Users
+//! may create folders in it, as Windows sets it up). Each level from `SHIN DATA CENTER` down is
+//! opened with
 //! `FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT`, kept open while in use, and
 //! validated through that handle: not a reparse point, owner Administrators or SYSTEM, protected
 //! DACL, and no ACE that grants any write-type right (`FILE_WRITE_DATA`, `FILE_APPEND_DATA`,
@@ -63,7 +69,8 @@ use windows::core::PCWSTR;
 
 use crate::error::{Error, win32_code};
 use crate::security::{
-    AclPolicy, DIRECTORY_POLICY, LOCK_FILE_POLICY, LocalSd, check_descriptor, file_security,
+    AclPolicy, DIRECTORY_POLICY, LOCK_FILE_POLICY, LocalSd, PROGRAM_DATA_POLICY, check_descriptor,
+    file_security,
 };
 use crate::session::new_uuid;
 use crate::sys::{own, raw, wide_os, win32};
@@ -134,7 +141,8 @@ impl DataDir {
     }
 }
 
-/// `%ProgramData%` from the known-folder API.
+/// `%ProgramData%` from the known-folder API, which expands `%SystemDrive%` from this process's
+/// environment: elevated callers pin it first (`elevation::pin_system_environment`).
 pub fn program_data_dir() -> Result<PathBuf, Error> {
     // SAFETY: FOLDERID_ProgramData is a static GUID; no token (the current user's view, which is
     // the same for this machine-wide folder). The returned string is freed below.
@@ -256,7 +264,7 @@ impl ProtectedDir {
 
 /// Creates (when missing) and validates `which` and every level above it up to
 /// `SHIN DATA CENTER`, quarantining levels that fail validation (module docs).
-/// `%ProgramData%` itself is only checked for not being a reparse point.
+/// `%ProgramData%` itself is never created or moved; it is checked as the module docs say.
 pub fn ensure_protected_dir(which: DataDir) -> Result<ProtectedDir, Error> {
     let mut path = program_data_dir()?;
     let mut handles = vec![open_program_data(&path)?];
@@ -330,12 +338,14 @@ pub(crate) fn verify_level(path: &Path) -> Result<OwnedHandle, Error> {
     Ok(handle)
 }
 
-/// Opens `%ProgramData%` (following nothing) and checks that it is a plain directory.
+/// Opens `%ProgramData%` (following nothing) and checks that it is a plain directory that only
+/// SYSTEM, Administrators and TrustedInstaller own and may rename things in
+/// ([`PROGRAM_DATA_POLICY`]; design m5b D.9.4).
 fn open_program_data(path: &Path) -> Result<OwnedHandle, Error> {
     let share = FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0);
     let handle = open(
         path,
-        FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0,
+        READ_CONTROL.0 | FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0,
         share,
         None,
         OPEN_EXISTING,
@@ -351,6 +361,11 @@ fn open_program_data(path: &Path) -> Result<OwnedHandle, Error> {
             reason: "%ProgramData% is a reparse point or not a directory".to_string(),
         });
     }
+    let sd = file_security(raw(&handle))?;
+    check_descriptor(sd.as_ptr(), PROGRAM_DATA_POLICY).map_err(|reason| Error::Insecure {
+        path: path.display().to_string(),
+        reason: format!("%ProgramData%: {reason}"),
+    })?;
     Ok(handle)
 }
 
@@ -827,6 +842,20 @@ mod tests {
         assert!(path.is_absolute(), "{}", path.display());
         assert!(path.is_dir(), "{}", path.display());
         assert!(open_program_data(&path).is_ok());
+    }
+
+    /// A folder the user made (what a forged `%SystemDrive%` points `%ProgramData%` at) is not a
+    /// `%ProgramData%` to build on (design m5b D.9.4; M5b security review, finding 1).
+    #[test]
+    fn a_user_folder_is_not_program_data() {
+        let scratch = Scratch::new();
+        match open_program_data(&scratch.0) {
+            Err(Error::Insecure { path, reason }) => {
+                assert_eq!(path, scratch.0.display().to_string());
+                assert!(reason.starts_with("%ProgramData%: "), "{reason}");
+            }
+            other => panic!("a user's folder was accepted as %ProgramData%: {other:?}"),
+        }
     }
 
     /// The `Recovery` folder the helper made on this machine verifies unelevated, read only (the

@@ -302,8 +302,9 @@ impl InstallState {
 pub struct FileHolder {
     pub pid: u32,
     pub session_id: u32,
-    /// Executable file name (Restart Manager's `strAppName` or the image's file name), at most
-    /// 260 characters, control characters removed.
+    /// Executable file name: the image's file name from the system's process table (never a name
+    /// the process gives itself, such as Restart Manager's `strAppName`), or the installed
+    /// program's; empty when unknown. At most 260 characters, control characters removed.
     pub name: String,
 }
 

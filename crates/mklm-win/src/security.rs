@@ -62,6 +62,10 @@ const FILE_WRITE_RIGHTS: u32 = FILE_WRITE_DATA.0
 /// Rights that change a registry key: set a value, create a subkey or a link.
 const KEY_WRITE_RIGHTS: u32 = KEY_SET_VALUE.0 | KEY_CREATE_SUB_KEY.0 | KEY_CREATE_LINK.0;
 
+/// `NT SERVICE\TrustedInstaller`.
+const TRUSTED_INSTALLER_SID: &str =
+    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+
 /// What a securable object must look like to be trusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AclPolicy {
@@ -69,12 +73,30 @@ pub(crate) struct AclPolicy {
     forbidden: u32,
     /// The DACL must not inherit entries from the parent (`SE_DACL_PROTECTED`).
     require_protected: bool,
+    /// TrustedInstaller counts as trusted too (as owner and in ACEs): Windows' own folders.
+    trusted_installer: bool,
 }
 
 /// Directories under `%ProgramData%\SHIN DATA CENTER` (design D.9, G.1).
 pub(crate) const DIRECTORY_POLICY: AclPolicy = AclPolicy {
     forbidden: OBJECT_WRITE_RIGHTS | FILE_WRITE_RIGHTS,
     require_protected: true,
+    trusted_installer: false,
+};
+
+/// `%ProgramData%` itself, the parent of `SHIN DATA CENTER` (design m5b D.9.4). Users may create
+/// folders and files in it (Windows grants that), but no one else may rename or delete it or what
+/// is in it (`DELETE`, `FILE_DELETE_CHILD`) or change its DACL or owner: a validated
+/// `SHIN DATA CENTER` could otherwise be renamed away by its parent's rights.
+pub(crate) const PROGRAM_DATA_POLICY: AclPolicy = AclPolicy {
+    forbidden: DELETE.0
+        | WRITE_DAC.0
+        | WRITE_OWNER.0
+        | ACCESS_SYSTEM_SECURITY
+        | GENERIC_ALL.0
+        | FILE_DELETE_CHILD.0,
+    require_protected: false,
+    trusted_installer: true,
 };
 
 /// The lock file: nobody else may even read it, because a handle with read access is enough to
@@ -82,12 +104,14 @@ pub(crate) const DIRECTORY_POLICY: AclPolicy = AclPolicy {
 pub(crate) const LOCK_FILE_POLICY: AclPolicy = AclPolicy {
     forbidden: OBJECT_WRITE_RIGHTS | FILE_WRITE_RIGHTS | FILE_READ_DATA.0 | GENERIC_READ.0,
     require_protected: true,
+    trusted_installer: false,
 };
 
 /// Journal keys under `HKLM\SOFTWARE\SHIN DATA CENTER` (design C.1: owner and write access only).
 pub(crate) const KEY_POLICY: AclPolicy = AclPolicy {
     forbidden: OBJECT_WRITE_RIGHTS | KEY_WRITE_RIGHTS,
     require_protected: false,
+    trusted_installer: false,
 };
 
 /// A security descriptor that Windows allocated with `LocalAlloc` (from SDDL or
@@ -215,14 +239,19 @@ pub(crate) fn key_security(key: HKEY) -> Result<KeySd, Error> {
     })
 }
 
-/// Checks that `sd` is owned by SYSTEM or Administrators, has a DACL (protected when `policy`
-/// says so), and that no ACE grants any right of `policy.forbidden` to another SID. Denying ACEs
-/// never hurt; allowing ACEs of a type this check does not understand fail it. Inherit-only ACEs
-/// for CREATOR OWNER / CREATOR GROUP are templates for children, which only the trusted SIDs can
-/// create, so they are accepted.
+/// Checks that `sd` is owned by SYSTEM or Administrators (or TrustedInstaller, when `policy` says
+/// so), has a DACL (protected when `policy` says so), and that no ACE grants any right of
+/// `policy.forbidden` to another SID. Denying ACEs never hurt; allowing ACEs of a type this check
+/// does not understand fail it. Inherit-only ACEs for CREATOR OWNER / CREATOR GROUP are templates
+/// for children, which only the trusted SIDs can create, so they are accepted.
 ///
 /// Returns the reason in words on failure.
 pub(crate) fn check_descriptor(sd: PSECURITY_DESCRIPTOR, policy: AclPolicy) -> Result<(), String> {
+    let trusted = |sid: PSID| {
+        is_trusted(sid)
+            || (policy.trusted_installer
+                && sid_to_string(sid).is_ok_and(|text| text == TRUSTED_INSTALLER_SID))
+    };
     let mut owner = PSID(ptr::null_mut());
     let mut defaulted = BOOL(0);
     // SAFETY: `sd` is a valid descriptor for the duration of this function; both out pointers are
@@ -232,7 +261,7 @@ pub(crate) fn check_descriptor(sd: PSECURITY_DESCRIPTOR, policy: AclPolicy) -> R
     if owner.is_invalid() {
         return Err("it has no owner".to_string());
     }
-    if !is_trusted(owner) {
+    if !trusted(owner) {
         return Err(format!("it is owned by {}", sid_text(owner)));
     }
 
@@ -289,7 +318,7 @@ pub(crate) fn check_descriptor(sd: PSECURITY_DESCRIPTOR, policy: AclPolicy) -> R
                 PSID((&raw mut (*allowed).SidStart).cast()),
             )
         };
-        if mask & policy.forbidden == 0 || is_trusted(sid) {
+        if mask & policy.forbidden == 0 || trusted(sid) {
             continue;
         }
         if u32::from(header.AceFlags) & INHERIT_ONLY_ACE.0 != 0 && is_creator(sid) {
@@ -420,6 +449,42 @@ mod tests {
         );
         // CREATOR OWNER that applies to the object itself is not a template.
         assert!(check("O:BAD:P(A;;FA;;;BA)(A;;FA;;;CO)", DIRECTORY_POLICY).is_err());
+    }
+
+    /// `%ProgramData%` as Windows sets it up passes; whatever would let someone else rename a
+    /// validated `SHIN DATA CENTER` (or `%ProgramData%` itself) does not (design m5b D.9.4; M5b
+    /// security review, finding 1).
+    #[test]
+    fn program_data_as_windows_sets_it_up() {
+        // C:\ProgramData on Windows 11 (Get-Acl): Users may add files and folders (0x116).
+        const WINDOWS: &str = "O:SYG:SYD:PAI(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)\
+                               (A;OICI;0x1200a9;;;BU)(A;CI;DCLCRPCR;;;BU)";
+        assert_eq!(check(WINDOWS, PROGRAM_DATA_POLICY), Ok(()));
+        // The MKLM folders are stricter, on purpose.
+        assert!(check(WINDOWS, DIRECTORY_POLICY).is_err());
+        // An unprotected DACL is fine for it; TrustedInstaller may own it, but not MKLM's folders.
+        assert_eq!(
+            check("O:BAD:(A;;FA;;;BA)(A;CI;0x116;;;BU)", PROGRAM_DATA_POLICY),
+            Ok(())
+        );
+        let installer = format!("O:{TRUSTED_INSTALLER_SID}D:(A;;FA;;;{TRUSTED_INSTALLER_SID})");
+        assert_eq!(check(&installer, PROGRAM_DATA_POLICY), Ok(()));
+        assert!(check(&format!("{installer}(A;;FA;;;SY)"), KEY_POLICY).is_err());
+        for sddl in [
+            // Owned by a user, as a folder the user made for a forged %SystemDrive% is.
+            "O:BUD:(A;;FA;;;BA)",
+            "O:SYD:(A;;FA;;;SY)(A;;FA;;;BU)",
+            // FILE_DELETE_CHILD: renames SHIN DATA CENTER away.
+            "O:SYD:(A;;FA;;;SY)(A;CI;0x40;;;BU)",
+            // DELETE: renames %ProgramData% itself.
+            "O:SYD:(A;;FA;;;SY)(A;;SD;;;AU)",
+            "O:SYD:(A;;FA;;;SY)(A;;WD;;;WD)",
+            "O:SYD:(A;;FA;;;SY)(A;;WO;;;BU)",
+            "O:SYD:(A;;FA;;;SY)(A;;GA;;;BU)",
+            "O:SYD:NO_ACCESS_CONTROL",
+        ] {
+            assert!(check(sddl, PROGRAM_DATA_POLICY).is_err(), "{sddl}");
+        }
     }
 
     #[test]

@@ -5,10 +5,10 @@
 | 対象 | マイルストーン M5 の後半（M5b）: アップデーターとリリースの署名（計画 4.2〜4.4、6 章の M5） |
 | 根拠 | 承認済みプラン 2.1〜2.2、4.2〜4.4、5 章（4.x は MSI 向けに書かれている。インストーラーは 2026-09-28 のユーザーの決定で NSIS）。M2 設計（`docs/design/m2-engine.md`）の D.9、E、G.1、I.18。M3 設計（`docs/design/m3-gui.md`）の A.4、B.5、B.17、D、E、F。M5a の実機テスト（`docs/research/m5-install-tests.md`）。main の 37989f8 のコード |
 | ユーザーの決定（M5b の依頼） | 完全な自動更新（ダウンロード、署名の検証、サイレント インストール）。minisign で署名した `latest.json`。**秘密鍵はメンテナーがオフラインで保管し、GitHub の secrets には置かない**。公開鍵を 2 本（通常用とバックアップ用）埋め込み、鍵 ID、失効（`revoked_keys`）、`issued_at`（巻き戻しの防止）、`expires`（凍結の検知）を持つ。確認とダウンロードは自動、インストールは利用者がボタンを押したときだけ。UAC の事前説明あり（未署名のため）。当面バイナリは署名しない。インストーラーは NSIS 3.12（WiX は使わない）。「まず使えるもの」を優先するが、更新の経路は安全に直結するので、検証の正しさは譲らない |
-| 状態 | 設計。**レビュー第 1 回（47 件）と第 2 回（20 件: 第 1 回の対応の検証 17 件、新しい攻撃の検討 3 件）を反映した版**（対応は M 章の 2 つの表）。**2026-09-29 のユーザーの決定（J 章の J-1〜J-9）を反映した**（有効期限の既定 180 日、署名は普段のアカウント、など）。骨組み（G.2 の WP-0）は次の段階 |
+| 状態 | 設計。**レビュー第 1 回（47 件）と第 2 回（20 件: 第 1 回の対応の検証 17 件、新しい攻撃の検討 3 件）を反映した版**（対応は M 章の 2 つの表）。**2026-09-29 のユーザーの決定（J 章の J-1〜J-9）を反映した**（有効期限の既定 180 日、署名は普段のアカウント、など）。実装（WP-0、WP-U、WP-H、WP-C）は `m5b/updater` に統合済み（実装での変更点は K 章の 20 以降）。**実装のセキュリティ レビュー（3 件。M.3）を反映した** |
 | 読み手 | M5b を分担して実装する人（G 章、H 章）とレビューする人。指摘に使えるよう、すべての節に番号を付けた |
 
-識別子、コード、コマンドは英語のまま書く。「計画」は承認済みプラン、「m2 D.9」「m3 F.5」は M2 / M3 設計の節を指す。H1 と H2 は D 章で定義する helper の 2 つのプロセスを指す。「未確認」と書いたものは L 章にまとめた。レビューの指摘は「（SECURITY-1）」のように ID で引く。
+識別子、コード、コマンドは英語のまま書く。「計画」は承認済みプラン、「m2 D.9」「m3 F.5」は M2 / M3 設計の節を指す。H1 と H2 は D 章で定義する helper の 2 つのプロセスを指す。「未確認」と書いたものは L 章にまとめた。レビューの指摘は「（SECURITY-1）」のように ID で引く（実装のレビューの指摘は、M.1 の ID と区別して「M.3 の SECURITY-1」と書く）。
 
 ---
 
@@ -835,7 +835,7 @@ mklm-update-runner.exe --run-update <run-id>
 
 **手順**（`mklm_update::run_flow::run_update` が `RunnerEnv` の上で行う。環境の実装は `apps/mklm-helper/src/run_update.rs`。OPS-UX-TEST-10）
 
-1. 準備: `restrict_dll_search()`（失敗は致命的）。`CoInitializeEx(COINIT_MULTITHREADED)` と、**ほかのどの COM の呼び出しより前に** `CoInitializeSecurity`（認証の水準は既定、なりすましの水準は `RPC_C_IMP_LEVEL_IDENTIFY`、`EOAC_NO_CUSTOM_MARSHAL | EOAC_DISABLE_AAA`。SECURITY-8）。`session_end::shut_down_first()`（`SetProcessShutdownParameters(0x3FF, SHUTDOWN_NORETRY)`。RELIABILITY-3）。作業フォルダーを System32 に。コマンドラインの検証（`exit 2`）、昇格の確認（`exit 4`）、OS の版（`exit 5`）。
+1. 準備: `restrict_dll_search()` と `elevation::pin_system_environment()`（どちらも失敗は致命的。helper の `main` がすべてのモードで最初に呼ぶ。D.9.4）。`CoInitializeEx(COINIT_MULTITHREADED)` と、**ほかのどの COM の呼び出しより前に** `CoInitializeSecurity`（認証の水準は既定、なりすましの水準は `RPC_C_IMP_LEVEL_IDENTIFY`、`EOAC_NO_CUSTOM_MARSHAL | EOAC_DISABLE_AAA`。SECURITY-8）。`session_end::shut_down_first()`（`SetProcessShutdownParameters(0x3FF, SHUTDOWN_NORETRY)`。RELIABILITY-3）。作業フォルダーを System32 に。コマンドラインの検証（`exit 2`）、昇格の確認（`exit 4`）、OS の版（`exit 5`）。
 2. 自分の実行ファイルのパス（NT 形式）が `%ProgramData%\SHIN DATA CENTER\MKLM\Updates\<run-id>\mklm-update-runner.exe` であること。`verify_protected_dir(Updates)` と `RunDir::open(<run-id>)` で各階層を確かめて固定する。違えば `exit 7`（記録は書かない）。
 3. `Run` を読む: あって、`run_id` が一致し、`phase == staged` で、`runner` がまだないこと。違えば `exit 7`（記録は書かない。誰が起動したか分からないため）。
 4. インストーラーを `open_locked`（`FILE_SHARE_READ` だけ、通常のファイルでリパースポイントでないこと）で開く。**このハンドルはインストーラーのプロセスを作るまで閉じない**（書き込み、名前の変更、削除を止めておく。`CreateProcessW` は読み取りと実行の共有でイメージを開くので、このハンドルと両立する — 未確認、F.6 で確かめる）。ハッシュはまだ計算しない。
@@ -895,7 +895,7 @@ mklm-update-runner.exe --run-update <run-id>
    - GUI の側の `quit-if-idle` の決まりは E.4.1。GUI は終了する前に、自分の HKCU の RunOnce に `--after-update` を登録する（昇格していなければ。RELIABILITY-7）。
    - **ほかの利用者の GUI について正直に書くと**（RELIABILITY-7、OPS-UX-TEST-21）: ユーザーの切り替えで別の利用者の画面に戻るのはサインインではなく再接続なので、Run キーも RunOnce も動かない。終わらせた GUI は、**その利用者が MKLM を開き直すか、サインアウトしてサインインし直すまで戻らない**（その間、その利用者のトレイのアイコンと通知が消える）。次のサインインでは、RunOnce で結果と「別のユーザーの更新のために MKLM が終了していました」が出る（E.5）。H2 はほかの利用者のセッションに GUI を起動しない（その利用者のトークンを持たない。タスク スケジューラーで起動し直す案は採らなかった。I.11、J-2 の決定 (a)）。
 3. **すべてのプロセス**: 実行ファイルが `$INSTDIR` の `mklm.exe`、`mklm-cli.exe`、`mklm-helper.exe` のどれかであるプロセスを `proc_identity::processes_with_images` で探し、なくなるまで待つ。GUI と CLI は 30 秒、helper は最大 75 秒（何もしていない helper は 60 秒で終わる。m2 E.7）。残れば `NotInstalled(ProgramsStillRunning { programs, holders })`（`holders` は残ったプロセスの PID、セッション ID、実行ファイルの名前。RED-TEAM-3）。
-4. **ファイルが使われていないこと**（SECURITY-10）: 3 つの exe のそれぞれを `DELETE` の権利と、読み取り、書き込み、削除のすべての共有で開けること（`update_dir::files_in_use`）。ほかのプロセスが削除の共有なしで開いていれば開けない（NSIS の名前の変更も同じ理由で失敗する）。ウイルス対策ソフトの一時的な読み取りを見込み、最大 10 秒、250 ms ごとに試す。開けなければ、開いているプロセスを Restart Manager（`RmStartSession`、`RmRegisterResources`、`RmGetList`。`update_dir::file_holders`）で調べ、`NotInstalled(FilesInUse { programs, holders })` にする（調べられなければ `holders` は空。未確認。I.16）。
+4. **ファイルが使われていないこと**（SECURITY-10）: 3 つの exe のそれぞれを `DELETE` の権利と、読み取り、書き込み、削除のすべての共有で開けること（`update_dir::files_in_use`）。ほかのプロセスが削除の共有なしで開いていれば開けない（NSIS の名前の変更も同じ理由で失敗する）。ウイルス対策ソフトの一時的な読み取りを見込み、最大 10 秒、250 ms ごとに試す。開けなければ、開いているプロセスを Restart Manager（`RmStartSession`、`RmRegisterResources`、`RmGetList`。`update_dir::file_holders`）で調べ、`NotInstalled(FilesInUse { programs, holders })` にする（調べられなければ `holders` は空。I.16）。`holders` の名前は、Restart Manager の `strAppName`（相手のプロセスの `FileDescription` か窓の題で、相手が自由に決められる）ではなく、システムのプロセスの表のイメージのファイル名（`proc_identity::image_file_names`。PID と Restart Manager の開始時刻で照らす）。ファイル名そのものは、ファイルを作った人が付けた名前なので、相手は PID で特定する（M.3 の SECURITY-2）。
    - 標準ユーザーは Program Files のファイルを読めるので、**ほかの利用者は、ファイルを削除の共有なしで開いたままにするだけで、すべての更新（と手でのインストール。NSIS の終了コード 26）を止め続けられる**。そのプロセスが動いている限り、何度試しても入らず、自動で抜ける方法はない（RED-TEAM-3。レビュー第 1 回の後の版は「遅らせる」と書いていたが、実際には期限のない妨害である）。半端に入ることはない（D.9.2）。
    - 管理者ができること: 結果の「技術的な詳細」と `update --status` に出る `holders`（PID、セッション ID、実行ファイルの名前）で相手を見つけ、タスク マネージャーの「ユーザー」タブ（セッションと利用者の対応）でそのプロセスを止めてから、もう一度［今すぐ更新］を押す。PC を再起動した直後、ほかの利用者がサインインする前に更新する方法もある（`docs/recovery.md` に書く。WP-H）。`holders` には利用者の SID を入れない（`LastResult` は Users が読めるため。セッション ID と名前は標準ユーザーもほかの手段で見られる）。
 5. インストーラーの `CloseMklm` が、念のためにもう一度確かめる（0.1）。ここで拒否された場合は D.9.1 の終了コードで分かる。
@@ -1018,8 +1018,10 @@ SectionEnd
   | `SystemDrive` | その先頭の `X:` |
   | `ComSpec` | `<System32>\cmd.exe` |
   | `PATH` | `<System32>;<Windows>;<System32>\Wbem` |
-  | `ProgramData`、`ProgramFiles`、`ProgramW6432` | 既知のフォルダー（`FOLDERID_ProgramData`、`FOLDERID_ProgramFiles`、`FOLDERID_ProgramFilesX64`） |
+  | `ProgramData`、`ProgramFiles`、`ProgramW6432` | 既知のフォルダー（`FOLDERID_ProgramData`、`FOLDERID_ProgramFiles`、`FOLDERID_ProgramFilesX64`。`ProgramData` は下の固定の後に引く） |
   | `TEMP`、`TMP` | `<run dir>\tmp`（`PRIVATE_DIR_SDDL`。D.5） |
+  - **helper 自身の環境の固定**（M.3 の SECURITY-1）: `SHGetKnownFolderPath(FOLDERID_ProgramData)` は、`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\ProgramData`（`%SystemDrive%\ProgramData`）の `%SystemDrive%` を**呼んだプロセスの環境から**展開する（`ProgramData`、`ALLUSERSPROFILE` の変数は使わない。`FOLDERID_ProgramFiles` と `FOLDERID_ProgramFilesX64` は影響を受けない。L 章）。UAC で起動した H1 の環境には `HKCU\Environment` の値が入るので、利用者は H1（とすべての helper）のロック ファイル、`logs\update.log`、`Updates\<run-id>` を自分のフォルダーの下に置かせ、上の表の `ProgramData` にもその値を入れさせられた（H2 は本物の `%ProgramData%` を見るので、更新は `HandOffFailed` で止まり、ロックも別のファイルになる）。そこで helper の `main` は、すべてのモード（パイプのセッション、`--uninstall-restore`、`--run-update`）で `restrict_dll_search` の直後に `elevation::pin_system_environment()`（自分の `SystemRoot`、`windir` を `GetSystemWindowsDirectoryW` に、`SystemDrive` をその先頭の `X:` にする。失敗は終了コード 1）を呼ぶ。既知のフォルダーの答えはプロセスの中で最初の問い合わせの後に固定される（キャッシュ）ので、どの既知のフォルダーの問い合わせよりも前に呼ぶ。CLI も `main` の最初に呼ぶ（`--in-process` のエンジンが昇格したまま `%ProgramData%` を使うため。失敗すると `--in-process` は動かない）。`%SystemRoot%` を含む `REG_EXPAND_SZ` の値（COM のサーバーの登録など）も同じ環境で展開されるので、同じ固定で守られる。
+  - さらに二重の守りとして、`protected_dir` は `%ProgramData%` 自体も確かめる: ディレクトリでリパースポイントでないことに加え、所有者が SYSTEM、Administrators、TrustedInstaller のどれかで、ほかの SID に `DELETE`、`FILE_DELETE_CHILD`、`WRITE_DAC`、`WRITE_OWNER`、`GENERIC_ALL` を与える ACE がないこと（`security::PROGRAM_DATA_POLICY`。Windows の既定の Users へのフォルダーとファイルの作成は許す）。`SHIN DATA CENTER` 以下の検証が「名前の変更には親の `FILE_DELETE_CHILD` が要る」ことに頼っているため。利用者が作ったフォルダーを `%ProgramData%` として使わない。
   - 理由: UAC で起動した H1 の環境には、非昇格の利用者が書き換えられる `HKCU\Environment` の値（`TEMP`、`TMP`、`PATH`、`__COMPAT_LAYER` など）が入る。NSIS は `$TEMP` を `TMP` / `TEMP` から決め、そこに `$PLUGINSDIR` を作って `System.dll` などのプラグインを読み込む（`.onInit` の `x64.nsh` の判定も System プラグインを使う）。NSIS 3.11 の修正（CVE-2025-43715）は `$PLUGINSDIR` 自体の作り方を直したが、その親のフォルダーを利用者が持っていれば、削除の権利で差し替える競争の余地が残る（悪用できるかは未確認）。環境を最小にすれば、`$PLUGINSDIR` は保護された実行のフォルダーの中にでき、`CloseMklm` が昇格したまま起動する `mklm.exe --quit` も利用者の `PATH` や互換モードの影響を受けない。
   - ブロックの組み立て（名前の大文字小文字を区別しない順に並べ、`名前=値\0` を続けて最後に `\0`）は純粋な関数 `elevation::environment_block` にし、単体テストを付ける（F.2）。
   - NSIS やプラグインが、上にない環境変数を必要とするかは未確認（L 章）。F.6 のリハーサルと煙の試験で確かめる（煙の試験の 2 は、`System.Diagnostics.ProcessStartInfo` の `EnvironmentVariables` を空にしてから同じ変数だけを入れ、`UseShellExecute = false` で実行する）。
@@ -1448,7 +1450,8 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
   - `elevation::environment_block`: 並び順（大文字小文字を区別しない）、`名前=値\0` の連結と最後の `\0`、空の値、`=` を含む名前の拒否。`runner_environment` が決めた変数だけを持ち、`__COMPAT_LAYER` や利用者の `PATH` を持たないこと（SECURITY-6）。
   - `instance::parse_instance_pipe_name`: 正しい名前（`S-1-5-21-…`、`S-1-12-1-…`）、`/`、`..`、`\`、NUL、ASCII 以外、桁の多すぎる数、余分な部分 → `None`。`pipe::check_pipe_path` が `/`、`.`、`..` だけの名前、ASCII 以外、制御文字を拒否すること（SECURITY-7）。
   - `instance::instance_pipe_candidates`（純粋。FIX-VERIFICATION-5）: GUI のプロセスと `process_users` の結果から、`instance_pipe_path` の名前を作る。SID がない、セッション ID が食い違う、SID が正規表現に合わない（`S-1-5-18` など）GUI は飛ばす。16 本を超えた分は捨てる。同じ入力から同じ順序。
-  - `update_dir` の `FileHolder` の変換（Restart Manager の結果の PID、セッション ID、名前。RED-TEAM-3）: 名前の長さの上限、制御文字の除去。
+  - `update_dir` の `FileHolder` の変換（Restart Manager の結果の PID、セッション ID、名前。RED-TEAM-3）: 名前の長さの上限、制御文字の除去。名前はプロセスの表から（`proc_identity::image_file_names`: PID と作成時刻、作成時刻 0 は PID だけ。テストのプロセス自身がファイルを開いたままのとき、その名前は自分の exe のファイル名。M.3 の SECURITY-2）。
+  - `elevation::pin_system_environment`（M.3 の SECURITY-1）: `SystemDrive`（と `SystemRoot`、`windir`）を偽のフォルダーにした子プロセスで、固定しなければ `program_data_dir` が偽の `%ProgramData%` になり `verify_protected_dir` がそれを拒むこと（陽性の対照）、最初に固定すれば `program_data_dir` と `runner_environment` の `ProgramData` が本物で、3 つの変数が `GetSystemWindowsDirectoryW` の値になること。`security::PROGRAM_DATA_POLICY`: Windows の既定の `C:\ProgramData` の SDDL は通り、利用者の所有、`FILE_DELETE_CHILD`、`DELETE`、`WRITE_DAC`、`WRITE_OWNER`、`GENERIC_ALL`、NULL の DACL は通らないこと。
   - `InstanceCommand::QuitIfIdle` の wire（13 バイト、`MAX_INSTANCE_MESSAGE` 以内）と `parse`。
 - `installer/check-nsi.ps1` の規則（D.9.3）を、わざと壊したスクリプトの断片で確かめる Pester のテスト（WP-H。Windows PowerShell 5.1 の同梱の Pester 3 で動く形）。
 
@@ -1783,6 +1786,8 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 - helper は利用者の場所のファイルを開かない（インストーラーはパイプで受け取る）。helper の依存にネットワークのコードがない（上の CI）。
 - helper の固定のコマンドラインは 3 つ（パイプのセッション、`--uninstall-restore`、`--run-update`）で、どれも手書きの厳密なパーサー。
 - **H1 が H2 を、H2 が NSIS を起動するときは、`runner_environment` の最小の環境ブロックを明示し、親の環境を引き継がない**。作業フォルダーは System32（SECURITY-6）。
+- **helper と CLI の `main` は、どの既知のフォルダーの問い合わせよりも前に `pin_system_environment` を呼ぶ**（helper は失敗で終了、CLI は `--in-process` を拒む）。`%ProgramData%` 自体の所有者と DACL を確かめる（D.9.4。M.3 の SECURITY-1）。
+- `holders` の名前は、プロセスの表のイメージのファイル名で、相手が名乗る名前（Restart Manager の `strAppName`）ではない（D.8 の 4。M.3 の SECURITY-2）。
 - **H2 は、ほかのどの COM の呼び出しより前に `CoInitializeSecurity`（`RPC_C_IMP_LEVEL_IDENTIFY`、`EOAC_NO_CUSTOM_MARSHAL | EOAC_DISABLE_AAA`）を呼ぶ**（SECURITY-8）。
 - **H2 は、多重起動のパイプを列挙せず、動いている `$INSTDIR\mklm.exe` のプロセスのセッションと SID から名前を計算し、厳密な検査にも通してから開く**（FIX-VERIFICATION-5）。`quit` を送らず、`quit-if-idle` だけを送る（SECURITY-7、RELIABILITY-1）。
 - 通常用の鍵の署名の中の、埋め込みのバックアップ用の鍵の失効は無視され、記録されない（B.2 の規則 2。F.1 の「バックアップ用の鍵の回転」。FIX-VERIFICATION-1）。
@@ -2700,8 +2705,10 @@ impl InstallState {
 pub struct FileHolder {
     pub pid: u32,
     pub session_id: u32,
-    /// Executable file name (Restart Manager's `strAppName` or the image's file name), at most
-    /// 260 characters, control characters removed.
+    /// Executable file name: the image's file name from the system's process table (never a name
+    /// the process gives itself, such as Restart Manager's `strAppName`; M.3 の SECURITY-2), or
+    /// the installed program's; empty when unknown. At most 260 characters, control characters
+    /// removed.
     pub name: String,
 }
 
@@ -3378,9 +3385,11 @@ pub fn read_build_ids(install_dir: &std::path::Path) -> [Option<String>; 3];
 /// full sharing (another handle lacks FILE_SHARE_DELETE). Missing files are not in use.
 pub fn files_in_use(install_dir: &std::path::Path, names: &[&str]) -> Result<Vec<usize>, Error>;
 /// Who holds `paths` open (Restart Manager: `RmStartSession`, `RmRegisterResources`, `RmGetList`,
-/// `RmEndSession`): (PID, session ID, application name) each (RED-TEAM-3). Best effort; the
-/// callers treat an error as "unknown". Whether `RmGetList` reports plain open handles (not only
-/// loaded images) is unverified (design m5b I.16).
+/// `RmEndSession`): (PID, session ID, executable file name) each (RED-TEAM-3). Best effort; the
+/// callers treat an error as "unknown". The name is the image file name from the process table
+/// (`proc_identity::image_file_names`, by PID and Restart Manager's start time), never
+/// `strAppName` (the holder's own FileDescription or window title); empty when the process is
+/// gone (M.3 の SECURITY-2).
 pub fn file_holders(paths: &[std::path::PathBuf]) -> Result<Vec<(u32, u32, String)>, Error>;
 /// `GetDiskFreeSpaceExW` for the caller: free bytes on the volume of `path`.
 pub fn free_space(path: &std::path::Path) -> Result<u64, Error>;
@@ -3407,6 +3416,10 @@ pub fn native_machine() -> Result<NativeMachine, Error>;
 // crates/mklm-win/src/proc_identity.rs (additions, WP-H)
 /// PID → identity with its creation time (SystemProcessInformation); `None` if gone.
 pub fn process_identity(pid: u32) -> Result<Option<ProcessIdentity>, Error>;
+/// The image file name (`ImageName` of SystemProcessInformation, which the process cannot
+/// change) of each of `processes`, by PID and, when nonzero, creation time; `None` if not found
+/// (`update_dir::file_holders`; M.3 の SECURITY-2).
+pub fn image_file_names(processes: &[ProcessIdentity]) -> Result<Vec<Option<String>>, Error>;
 /// NT path of a file (`GetFinalPathNameByHandleW(VOLUME_NAME_NT)`), for comparing with
 /// `process_image_nt_path`.
 pub fn file_nt_path(path: &std::path::Path) -> Result<String, Error>;
@@ -3497,6 +3510,12 @@ pub fn quit_idle_instances(
 
 ```rust
 // crates/mklm-win/src/elevation.rs (additions, WP-H; SECURITY-6)
+/// Sets `SystemRoot` and `windir` to `GetSystemWindowsDirectoryW` and `SystemDrive` to its `X:`
+/// in this process's own environment. The helper (every mode; failure exits 1) and the CLI (for
+/// `--in-process`) call it first thing in `main`, before any known-folder lookup (D.9.4; M.3 の
+/// SECURITY-1).
+pub fn pin_system_environment() -> Result<(), Error>;
+
 /// Name/value pairs of an explicit environment block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanEnvironment {
@@ -3974,7 +3993,7 @@ JSON の例（形を固定するテストの期待値に使う）:
 13. **再現可能なビルド**（B.5 の 5）: 同じコミットを手元でビルドして CI と同じハッシュになるかは確かめていない（PDB のパス、時刻、NSIS の圧縮など）。比べるのは任意で、違っても直ちに異常とはしない。
 14. **ウイルス対策ソフトの遅れ**（D.4、RELIABILITY-5）: H2 の起動から `ready` までの時間。F.6 と T-UPD-15 で測り、120 秒で足りなければ見直す。
 15. **最小の環境ブロック**（D.9.4）: NSIS、プラグイン、`mklm.exe --quit` が、ほかの環境変数を必要としないか。F.6 と煙の試験で確かめる。
-16. **Restart Manager でファイルを開いているプロセスが分かるか**（D.8 の 4。RED-TEAM-3）: `RmGetList` は、読み込まれたモジュールだけでなく、ふつうに開いたファイルのハンドルの持ち主も返すと理解しているが、確かめていない。煙の試験の 4（PowerShell でファイルを開いたまま）と同じ状態で `file_holders` が `powershell.exe` を返すかを、F.6 で確かめる。返さなければ `holders` は空のままで、理由の文は変わらない。**統合で一部確認**（2026-09-29、L 章）: ふつうのハンドルの持ち主は返る。名前は `strAppName` で、実行ファイルの名前とは限らない（残る確認は L 章）。
+16. **Restart Manager でファイルを開いているプロセスが分かるか**（D.8 の 4。RED-TEAM-3）: `RmGetList` は、読み込まれたモジュールだけでなく、ふつうに開いたファイルのハンドルの持ち主も返すと理解しているが、確かめていない。煙の試験の 4（PowerShell でファイルを開いたまま）と同じ状態で `file_holders` が `powershell.exe` を返すかを、F.6 で確かめる。返さなければ `holders` は空のままで、理由の文は変わらない。**統合で一部確認**（2026-09-29、L 章）: ふつうのハンドルの持ち主は返る。名前は `strAppName` で、実行ファイルの名前とは限らなかったので、実装のレビューでプロセスの表のイメージのファイル名に替えた（M.3 の SECURITY-2。残る確認は L 章）。
 17. **凍結への備え**（B.4 の 4。RED-TEAM-1）: 自動の信号は `expires` だけ。期限は 180 日に短くした（J-3 の決定 (b)）。将来、オンラインの鍵で新しさだけを保証する仕組み（TUF の timestamp）を足すかは、ユーザーの判断に残る。
 
 ---
@@ -4062,6 +4081,8 @@ JSON の例（形を固定するテストの期待値に使う）:
 | 51 | WP-C | E.6: 最新のページ | 後の確認の失敗（無視した古い更新情報など）では、主の［今すぐ確認］の横に E.6 のボタン（リリース ページ）と［詳細をコピー］を残す | 失敗の手がかりを消さないため |
 | 52 | WP-C | m3 H.1: `vm::unexpected_latin` | 呼び出し元の名前を `FILE_NAMES_ALLOWED` より先に取り除く。`mklm-helper.exe` へのフル パスは許された 1 つの名前として数える | パスの中の `mklm-helper.exe` を誤って検出しないため |
 | 53 | 統合 | G.2: 骨組みの補助 | 統合で消した: `UpdateRefusal::skeleton()`、`state::skeleton()`、テストの骨組みの検出（`run_flow` のテストの `signer()`、`mklm-ipc` の `anchors()` / `stager_works()`、`mklm-client` の `wp_u_ready()` / `skeleton()`、`trust_report` の `is_ahead_of` の検出）。これらのテストは常に最後まで走る。`a_changed_file_is_never_completed` は偽の digest をやめ、本物の SHA-256 で同じ大きさの変更を検出する | 骨組みの間の早い戻りが、後で黙ってテストを飛ばさないため |
+| 54 | 実装のレビュー | D.9.4、H.3: helper の環境は UAC が渡したまま。`%ProgramData%` はリパースポイントでないことだけ確かめる | helper と CLI の `main` が最初に `elevation::pin_system_environment()`（`SystemDrive`、`SystemRoot`、`windir` を `GetSystemWindowsDirectoryW` から）。`protected_dir` は `%ProgramData%` の所有者と DACL も確かめる（`security::PROGRAM_DATA_POLICY`）。CLI の起動時の警告と `--in-process` の拒否の文を合わせた | `FOLDERID_ProgramData` がプロセスの環境の `%SystemDrive%` で展開され、`HKCU\Environment` から UAC を越えて届くため（M.3 の SECURITY-1） |
+| 55 | 実装のレビュー | D.8 の 4、H.1、H.3: `holders` の名前は Restart Manager の `strAppName` | プロセスの表のイメージのファイル名（`proc_identity::image_file_names` を足した。PID と開始時刻で照らす）。見つからなければ空 | `strAppName` は相手の `FileDescription` か窓の題で、更新を止める相手が管理者に見せる名前を選べたため（M.3 の SECURITY-2） |
 
 ---
 
@@ -4094,22 +4115,29 @@ JSON の例（形を固定するテストの期待値に使う）:
 **WP-U、WP-H、統合で確かめたこと**（2026-09-29、この開発機。統合したコミットで測り直したものは「統合」と書く）
 
 - **名前付きのプロキシと Windows の資格情報**（A.7、SECURITY-13。F.3 の `net_proxy`）: 127.0.0.1 のプロキシがすべての要求に 407（`NTLM`、`Negotiate`）を返すとき、製品の設定（autologon HIGH と `WINHTTP_DISABLE_AUTHENTICATION`）では https の CONNECT にも平文の http の GET にも `Proxy-Authorization` が付かない。LOW で自動の認証を残した対照では付く（Type 1 / Negotiate のトークン。プロキシが challenge を返さないので、資格情報から計算した応答は出ない）。WP-U の測定: HIGH だけでも、このプロキシには付かない。`WINHTTP_DISABLE_AUTHENTICATION` だけで、LOW でも付かない。ただし HIGH だけでは、`127.0.0.1` という名前の**サーバー**に NTLM の negotiate のメッセージを送った（K の #20 の理由）。統合で `net_proxy` の 5 つのテストが通った。「HIGH はプロキシへの既定の資格情報も止める」は `NAMED_PROXY` について確かめた（`AUTOMATIC_PROXY` は下の「確かめていないこと」）。
-- **Restart Manager とふつうのハンドル**（I.16。統合）: `FILE_SHARE_READ` で開いたままのファイル（読み込んだモジュールではない）について、`update_dir::file_holders`（`RmGetList`）は開いているプロセス（テストのプロセス自身、セッション 1）を返した（`update_dir::tests::holders_of_a_file`）。ただし名前は Restart Manager の `strAppName` で、VERSIONINFO のないテストの exe では拡張子のない名前（`mklm_win-67053c4071ff85fa`）だった。H.1 の `FileHolder::name` の説明と E.6 の例（`powershell.exe`）の「実行ファイルの名前」とは違う（下の「確かめていないこと」）。
+- **Restart Manager とふつうのハンドル**（I.16。統合）: `FILE_SHARE_READ` で開いたままのファイル（読み込んだモジュールではない）について、`update_dir::file_holders`（`RmGetList`）は開いているプロセス（テストのプロセス自身、セッション 1）を返した（`update_dir::tests::holders_of_a_file`）。ただし名前は Restart Manager の `strAppName` で、VERSIONINFO のないテストの exe では拡張子のない名前（`mklm_win-67053c4071ff85fa`）だった。H.1 の `FileHolder::name` の説明と E.6 の例（`powershell.exe`）の「実行ファイルの名前」とは違う。**実装のレビューで解決**（M.3 の SECURITY-2）: 名前をプロセスの表のイメージのファイル名にし、同じテストが自分の exe のファイル名（`.exe` 付き）を確かめる。
 - **NSIS の zip**（SECURITY-1。WP-H）: `nsis-3.12.zip`（SourceForge の NSIS 3/3.12、2,362,938 バイト）の SHA-256 は `56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f`。SourceForge が示す SHA-256、SHA-1、MD5 と一致した。release.yml に固定した。
 - **目印の陽性の対照**（A.10。統合）: `RUSTFLAGS=--cfg mklm_update_dev`、`CARGO_TARGET_DIR=target\dev-update` の `cargo build -p mklm -p mklm-cli -p mklm-helper` で、3 つの exe すべてに `MKLM-UPDATE-DEV-OVERRIDES!` がある（`installer/find-marker.ps1 -Expect Present`。GUI と CLI は `env::environment` から `for_this_build` を呼ぶようになった）。`cargo build --release --workspace` と `build-installer.ps1 -Arch x64`（`--target x86_64-pc-windows-msvc`）の 3 つの exe には目印がなく、`VersionInfo.IsDebug` は false。
 - **helper とネットワーク**（A.9。統合）: `cargo tree -p mklm-helper -e features` に `net`、`winhttp`、`Win32_Networking_WinHttp` がない。リリースの `mklm-helper.exe` は `WINHTTP.dll` をインポートしない（対照: `mklm-cli.exe` はインポートする）。
 - **ビルドの前の検査**（A.10。統合）: この開発機では `installer/check-build-env.ps1` が通る（`CARGO_HOME` とリポジトリの上のフォルダーに Cargo の設定ファイルがない）。`installer/check-nsi.ps1` は新しい `mklm.nsi` で通り、Pester 3.4.0 で `installer/tests` の 15 のテストが通る。
 - **鍵のないビルドの起動**（E.1、D.14。統合）: リリースの `mklm.exe --exit-after=5 --lang=ja` と `--lang=en` は終了コード 0 で、プロセスの TCP の接続も UDP の端点もなかった。ログは `updates: NotConfigured, installed 0.1.0 (x64)` と「after-update の RunOnce の値に触れない」。同じセッションでインストール済みの MKLM 0.1.0（`%ProgramFiles%`）が動いていたが、新しい exe は相手のパイプを「別のプログラムが持つ」として `Activate` を送らず、自分で起動した（m3 K の #14 のとおり）。`mklm-cli update --check`（`--json` も）は「this build of MKLM has no update keys…」で終了コード 22、`update --status` は `not-configured` で 0、使い方の誤りは 2。どれもネットワークを使わなかった。
 
+**実装のセキュリティ レビューで確かめたこと**（2026-09-29、この開発機。M.3）
+
+- **`FOLDERID_ProgramData` と環境**（SECURITY-1）: `HKLM\…\ProfileList\ProgramData` は `REG_EXPAND_SZ` の `%SystemDrive%\ProgramData`。`SystemDrive` だけを変えた環境の子プロセス（PowerShell の P/Invoke と、`elevation::tests::a_forged_system_drive_does_not_move_program_data` の子）で、`SHGetKnownFolderPath(FOLDERID_ProgramData, KF_FLAG_DEFAULT, NULL)` は `<偽の SystemDrive>\ProgramData` を返した（レビューの測定では、存在しないドライブ `Q:` なら 0x80070003。`ProgramData`、`ALLUSERSPROFILE`、`ProgramFiles`、`ProgramW6432` の変数を変えても結果は変わらず、`FOLDERID_ProgramFiles` と `FOLDERID_ProgramFilesX64` は影響を受けない）。最初の問い合わせの**後**に `SystemDrive` を直しても、同じプロセスの 2 回目の答えは偽のまま（キャッシュ）。最初の問い合わせの**前**に直せば `C:\ProgramData`。`pin_system_environment` を先に呼んだ子では、`program_data_dir` と `runner_environment` の `ProgramData` が本物になり、呼ばない子では `verify_protected_dir` が偽の `%ProgramData%` を所有者と DACL で拒んだ。
+- **`C:\ProgramData` の既定の ACL**（この開発機、Windows 11 25H2 の build 26200）: 所有者 SYSTEM、`D:PAI(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;DCLCRPCR;;;BU)`。Users の書き込み系の権利は `0x116`（ファイルとフォルダーの作成、拡張属性、属性）で、`DELETE` も `FILE_DELETE_CHILD` もない。`PROGRAM_DATA_POLICY` を通る（`security::tests::program_data_as_windows_sets_it_up` と `protected_dir::tests::program_data_is_an_absolute_directory`）。
+
 **確かめていないこと**
 
-- `minisign-verify` 0.3.0 と `minisign` 0.10.0（どちらも 2026-09-25 公開）の、前の版からの変更点（`minisign-verify` のソース全体の読み合わせは G.6 のレビュー）。`minisign` クレートの署名と鍵が、公式の `minisign` 0.12 の鍵ファイルと互換か（prehashed であることは WP-0 で確かめた）。
+- `minisign-verify` 0.3.0 と `minisign` 0.10.0（どちらも 2026-09-25 公開）の、前の版からの変更点（`minisign-verify` 0.3.0 のソース全体の読み合わせは、実装のレビューで行い `release-signing.ja.md` の 8 章に記録した。M.3 の SECURITY-3。前の版との差分は読んでいない）。`minisign` クレートの署名と鍵が、公式の `minisign` 0.12 の鍵ファイルと互換か（prehashed であることは WP-0 で確かめた）。
 - 公式の `minisign` のコマンドの鍵 ID の表示が、`minisign` クレートと同じ形か（B.5 の準備で目で確かめる。クレートの形は WP-0 で確かめた）。
 - 公式の `minisign` の Windows 版の配布物が、作者の鍵で署名された `.minisig` を伴うか、legacy の署名か（`verify-signer` は legacy も受け付ける）。ライセンスが ISC であること。
 - `IShellWindows` / `IShellDispatch2` などの `windows` 0.62.2 での置き場所（feature 名は WP-0 で確かめた）。
 - `AUTOMATIC_PROXY`（WPAD と PAC）で見つけたプロキシにも、既定の資格情報を送らない方針（autologon HIGH と `WINHTTP_DISABLE_AUTHENTICATION`）が効くこと。名前付きのプロキシでは F.3 の「プロキシの認証の試験」で確かめた（上。FIX-VERIFICATION-4）。`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` がループバックの要求をプロキシに送らないか（ループバックのテストはプロキシなしのセッションを使うので影響しない）。
 - `WTSEnumerateProcessesW` の `pUserSid` が、SYSTEM でない昇格したプロセスから、ほかの利用者のプロセスについても得られること（I.12。FIX-VERIFICATION-5）。
-- Restart Manager の `strAppName`（`FileHolder::name`）が、VERSIONINFO のある実行ファイルで何になるか（`FileDescription` なら、PowerShell は `powershell.exe` ではなく「Windows PowerShell」と出うる）。持ち主が返ること自体は確かめた（上。I.16。RED-TEAM-3）。E.6 と `docs/recovery.md` の「実行ファイルの名前」と食い違えば、`holders` の名前を PID からイメージのファイル名にするか、文を直す。煙の試験の 4 と同じ状態で F.6 で確かめる。
+- （確かめる必要がなくなったもの）Restart Manager の `strAppName` が VERSIONINFO のある実行ファイルで何になるか: `holders` の名前に使わなくなった（M.3 の SECURITY-2）。代わりに残る確認: Restart Manager が、ほかの利用者のプロセスについても `RM_PROCESS_INFO.Process.ProcessStartTime` を埋めるか（0 なら PID だけで名前を引く。PID と名前はどちらにせよ出る）。F.6 の煙の試験の 4 と同じ状態で確かめる。
+- `HKCU\Environment` の `SystemDrive` が、UAC（AppInfo）が作る昇格したプロセスの環境に実際に入ること（M.3 の SECURITY-1 の前提。設計 D.9.4 は `HKCU\Environment` の値が H1 に届くと考えている。確かめるには HKCU への書き込みと昇格が要るので、開発機では行わない）。固定は、届いても届かなくても害がない。
+- GitHub の `windows-2025` と `windows-latest` のランナーの `C:\ProgramData` が `PROGRAM_DATA_POLICY` を通ること（この開発機の既定の ACL は通る。上）。通らなければ煙の試験の `--uninstall-restore` が失敗して知らせる。
 - `std::hint::black_box` で参照した `#[used]` の静的な値が、`/OPT:REF` のリンクの後も 3 つの exe に残ること（A.10。dev のビルドで残ることは WP-0 で確かめた。リリースには開発用のモジュールがない。ci.yml と `-Profile dev` の陽性の対照が、残らなければ失敗して知らせる）。
 - GitHub の下書きのページがアセットの SHA-256 を表示するか（B.5 の手順 8 の任意の照合の手段にならないか。今の手順は手順 6 の表示と比べるだけ）。
 - （確かめる必要がなくなったもの）署名専用のアカウントにかかわる 2 つ（`C:\Users\Public` の受け渡しのフォルダーの権限、サインアウトした開発用のアカウントのプロセスが残らないこと）は、J-6 の決定 (a)（普段のアカウントで署名する）で不要になった。
@@ -4219,3 +4247,13 @@ JSON の例（形を固定するテストの期待値に使う）:
 | RED-TEAM-3 | minor | 採用 | G.7 の 16 と D.8 の 4 を「期限のない妨害で、自動で抜ける方法はない」に書き直した。`FilesInUse` と `ProgramsStillRunning` に相手のプロセス（`FileHolder`: PID、セッション ID、名前。Restart Manager と `processes_with_images` から。利用者の SID は入れない）、`InstanceBusy` にセッション ID を足し、技術的な詳細と `update --status` に出す（H.1、H.3 の `file_holders`、E.6、H.5）。管理者の手順（タスク マネージャーで止める、再起動の直後に更新する）を `recovery.md` に書く（G.4）。Restart Manager が開いたハンドルを返すかは未確認（I.16） |
 
 **m3 への反映**: `docs/design/m3-gui.md` の F.1（コマンドの一覧に `quit-if-idle`）、F.5（M5 の更新の段落）、A12（レビュー対応の表）に、この設計の D.8 と E.4.1 への参照を足した。
+
+### M.3 実装のセキュリティ レビュー（2026-09-29。3 件）
+
+統合した実装（76189c9）への、更新の経路の全体のセキュリティのレビュー（G.6 の確認事項、`verify_manifest`、H1 の `StageUpdate` / `InstallerChunk` / `RecordTrust`、`--run-update`、`Updates` フォルダー、H2 のプロセスの作成、Explorer での起動し直し、HKLM の `Update` の値、WinHTTP、開発用の差し替え、`xtask` の鍵の扱い）。ID はこのレビューの番号で、M.1 の SECURITY-n とは別のもの。不採用の指摘はない。
+
+| ID | 重さ | 対応 | 何を変えたか |
+|---|---|---|---|
+| SECURITY-1 | minor | 採用 | `SHGetKnownFolderPath(FOLDERID_ProgramData)` がプロセスの環境の `%SystemDrive%` で展開され（L 章で測った。答えはプロセスの中でキャッシュされる）、UAC で起動した helper の環境には `HKCU\Environment` の値が入るので、利用者がロック ファイル、`logs`、`Updates\<run-id>` の置き場所と H2 の `ProgramData` を選べた（乗っ取りはないが、更新が `HandOffFailed` で止まり、プロセスの間のロックが別のファイルになる）。helper の `main`（すべてのモード）と CLI の `main`（`--in-process`）が最初に `elevation::pin_system_environment()` を呼ぶ。加えて `protected_dir` が `%ProgramData%` 自体の所有者と DACL を確かめる（`security::PROGRAM_DATA_POLICY`。TrustedInstaller の所有も認める）。回帰テスト: 偽の `SystemDrive` の子プロセスで、固定しなければ偽の `%ProgramData%` になって拒まれ、固定すれば本物になる（F.2）。D.7 の 1、D.9.4、G.6、H.3、K の 54、L 章 |
+| SECURITY-2 | minor | 採用 | `FilesInUse` の `holders` の名前が Restart Manager の `strAppName`（相手の `FileDescription` か窓の題）で、更新を止める相手（G.7 の 16）が、Users の読める `LastResult` と管理者の見る技術的な詳細に好きな名前（「Windows Defender Antivirus Service」など）を出せた。名前をプロセスの表のイメージのファイル名にした（`proc_identity::image_file_names`。PID と Restart Manager の開始時刻で照らし、開始時刻が 0 なら PID だけ。見つからなければ空）。`strAppName` は残さない。`recovery.md` に「名前はファイル名で、相手は pid で探す」を書いた。回帰テスト: 純粋な照合の表と、テストのプロセスが開いたファイルの持ち主の名前が自分の exe のファイル名であること（F.2）。D.8 の 4、H.1、H.3、I.16、K の 55、L 章 |
+| SECURITY-3 | minor | 採用 | G.6 の最後の項目（`minisign-verify` 0.3.0 のソース全体の読み合わせ）が記録されていなかった。レビューの中でパッケージのすべてのファイル（`src/crypto/curve25519.rs`、`sha512.rs`、`blake2b.rs`、`cryptoutil.rs` を含む）を読み、`release-signing.ja.md` の 8 章に行とメモを足した（MKLM の使い方では問題なし。署名ファイルの読み方の緩さ、公開鍵の点の検査の弱さ、定数を数値として照らしていないことを注記）。読んだのは AI なので、メンテナー自身の読み合わせの代わりにはならないと書いた。版を上げるたびの差分の読み合わせは G.6 のまま |

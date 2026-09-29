@@ -171,8 +171,9 @@ enum GlobalCommand {
     },
 }
 
-/// Whether `restrict_dll_search` succeeded at startup. A failure is only a warning here, but the
-/// elevated `--in-process` fallback refuses to run without it (design A.7).
+/// Whether `restrict_dll_search` and `pin_system_environment` succeeded at startup. A failure is
+/// only a warning here, but the elevated `--in-process` fallback refuses to run without them
+/// (design A.7, m5b D.9.4).
 static DLL_SEARCH_RESTRICTED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn dll_search_restricted() -> bool {
@@ -180,11 +181,19 @@ pub(crate) fn dll_search_restricted() -> bool {
 }
 
 fn main() -> ExitCode {
-    // Plan 2.2: before anything else can load a DLL.
+    // Plan 2.2: before anything else can load a DLL. Then SystemDrive, SystemRoot and windir from
+    // the system, before any known-folder lookup (the first answer is cached; design m5b D.9.4):
+    // an elevated console's environment carries what the unelevated user set in HKCU\Environment,
+    // and the `--in-process` engine finds %ProgramData% through %SystemDrive%.
     #[cfg(windows)]
-    match mklm_win::restrict_dll_search() {
+    match mklm_win::restrict_dll_search()
+        .and_then(|()| mklm_win::elevation::pin_system_environment())
+    {
         Ok(()) => DLL_SEARCH_RESTRICTED.store(true, Ordering::SeqCst),
-        Err(error) => eprintln!("warning: could not restrict DLL loading to System32: {error}"),
+        Err(error) => eprintln!(
+            "warning: could not restrict DLL loading to System32 and take the system folders \
+             from Windows: {error}"
+        ),
     }
     let cli = Cli::parse();
     // An MKLM update past `ready` waits for this program to end (design m5b D.14).

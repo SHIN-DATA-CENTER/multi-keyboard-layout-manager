@@ -52,6 +52,13 @@ fn main() -> ExitCode {
         if mklm_win::restrict_dll_search().is_err() {
             return ExitCode::from(exit::FAILURE);
         }
+        // Design m5b D.9.4: SystemDrive, SystemRoot and windir from the system, before any
+        // known-folder lookup (the first answer is cached). The UAC-elevated helper's environment
+        // carries values the unelevated user sets in HKCU\Environment, and
+        // FOLDERID_ProgramData expands %SystemDrive% from it.
+        if mklm_win::elevation::pin_system_environment().is_err() {
+            return ExitCode::from(exit::FAILURE);
+        }
         session::run()
     }
     #[cfg(not(windows))]

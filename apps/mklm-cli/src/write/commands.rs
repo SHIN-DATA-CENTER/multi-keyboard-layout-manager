@@ -730,7 +730,8 @@ pub fn revert(args: &RevertArgs) -> Result<i32> {
 fn run_in_process(ui: &mut Ui, request: &InProcessRequest, apply: ApplyOptions) -> Result<i32> {
     if !crate::dll_search_restricted() {
         anyhow::bail!(
-            "--in-process refuses to run: DLL loading could not be restricted to System32"
+            "--in-process refuses to run: DLL loading could not be restricted to System32, or \
+             the system folders could not be taken from Windows"
         );
     }
     let presenter = Presenter::new(ui.console, None);

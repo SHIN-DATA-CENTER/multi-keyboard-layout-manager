@@ -211,6 +211,18 @@ F:\tools\minisign.exe -S -s F:\mklm-keys-backup\mklm-backup.key -m <out>\nonce.b
 
 | 日付 | 版 | 読んだ範囲 | 気になった点 | 読んだ人 |
 |---|---|---|---|---|
-| （未実施） | 0.3.0 | `src/lib.rs`、`src/base64.rs`、`src/crypto/*` | | |
+| 2026-09-29 | 0.3.0（crates.io の `.crate` の SHA-256 `871285dc…a960ce` = `Cargo.lock` の checksum） | パッケージのすべてのファイル: `Cargo.toml`、`src/lib.rs`、`src/base64.rs`、`src/crypto/{mod,ed25519,curve25519,sha512,blake2b,cryptoutil}.rs` | MKLM の使い方では問題になる点なし。注意点は下のメモ（署名ファイルの読み方が緩い、公開鍵の点の検査が弱い、定数は数値として照らしていない） | Claude Opus 5.5（AI。M5b の実装のセキュリティ レビュー、SECURITY-3） |
+
+2026-09-29 の読み合わせのメモ（上の行の詳細。版を上げるときは、この版からの差分を読む）:
+
+- **形**: 依存なし、ビルド スクリプトなし（`build = false`）、proc-macro なし、`unsafe` なし（`base64.rs` は `#![forbid(unsafe_code)]`、ほかのファイルにも `unsafe` と `extern` がない）。ネットワーク、プロセス、環境変数を使わない。ファイルを読むのは `PublicKey::from_file` と `Signature::from_file` だけで、MKLM は呼ばない（`from_base64` と `decode` だけ）。`Cargo.toml` の `[profile.release]`（`panic = "abort"` など）は、依存として使うときは効かない。
+- **`Signature::decode`**（`lib.rs`）: `str::lines()` で 4 行を読み、5 行目以降は読まない。1 行目（untrusted comment）は中身を確かめない。2 行目は base64 を解いて 74 バイト、4 行目は 64 バイトであること、3 行目が `trusted comment: `（17 バイト）で始まること（`trusted_comment()` の `[17..]` はこの確認があるので文字の境目で切れる）。アルゴリズムは `Ed`（legacy）と `ED`（prehashed）だけ。**緩い**: 行の数、改行の形、untrusted comment の形を問わない。MKLM は先に `mklm-update` の `parse_signature_text` で厳密に読み（ちょうど 4 行、正準の base64、`ED` だけ）、2 つの解析の trusted comment が一致することを確かめている（`verify.rs` の手順 2）。
+- **`base64.rs`**: 標準の文字の並び。パディングの数が合わないもの、余りのビットが 0 でないもの（非正準）、途中の空白や改行を拒む。文字の判定は分岐のない形。
+- **`PublicKey::verify`**: 鍵 ID を比べ（違えば `UnexpectedKeyId`）、prehashed なら BLAKE2b-512 の 64 バイトに Ed25519 を確かめ、`allow_legacy = false` なら legacy を `UnexpectedAlgorithm` で拒む。続けて、全体の署名を「署名の 64 バイト + trusted comment（`trusted comment: ` を除いた部分）」について確かめる。全体の署名は鍵 ID とアルゴリズムの 2 バイトを含まないが、鍵 ID は別に比べ、legacy への書き換えは `allow_legacy = false` で拒まれる。MKLM が `allow_legacy = true` にするのは `xtask verify-signer`（公式の minisign の配布物）だけ。
+- **`crypto/ed25519.rs`**: `s < L` を確かめ（署名の改変の防止）、単位元の公開鍵と全部 0 の公開鍵を拒む。`R` は点として解かず、`[s]B - [h]A` の正準の符号化とバイトで比べる（非正準の `R` は通らない）。cofactor を掛けない検証（ref10 と同じ）。**弱い点**: 公開鍵の `y` が正準か（`y < p`）と、単位元以外の位数の小さい点を拒まない。MKLM の公開鍵はビルドに埋め込んだ信頼の起点だけで、攻撃者が選べないので影響しない。比較は定数時間に近い形だが、検証は公開のデータしか扱わないので時間の差は問題にならない。
+- **`crypto/curve25519.rs`**: 体の演算は fiat-crypto が生成した 51 ビットの 5 語の形（`carry_mul`、`carry_square`、`carry`、`add`、`sub`、`opp`、`to_bytes`）。点の演算、`from_bytes_negate_vartime`、`slide`、`double_scalarmult_vartime`、`sc_reduce`、`is_identity` は ref10 の移植。どれも可変時間（公開のデータだけなので問題ない）。`Fe::from_bytes` は長さが 32 でなければ panic するが、呼ぶのは 32 バイトの配列だけ。
+- **`crypto/sha512.rs`、`crypto/blake2b.rs`、`crypto/cryptoutil.rs`**: SHA-512（80 の定数、128 ビットの長さの上位は 0）と BLAKE2b（12 回、`SIGMA` の 11、12 行目は 1、2 行目と同じ、ダイジェスト 64 バイト、鍵なし）の素直な実装。長さの数え方があふれるのは 2^61 バイト以上で、届かない。
+- **確かめていないこと**: 定数（`FE_D`、`FE_D2`、`FE_SQRTM1`、基点の倍数の表 `BI`、SHA-512 の定数、BLAKE2b の IV と `SIGMA`）を 1 つずつ計算し直してはいない。代わりに、クレート自身のテスト（公式の minisign の署名の legacy と prehashed。`cargo test -p minisign-verify --lib`、overflow の検査のある debug で 5 件が通る）と `crates/mklm-update/tests/crate_apis.rs`（`minisign` 0.10.0 で作った使い捨ての鍵の署名が通り、改変が拒まれる）が通ることで、実際の署名で正しく動くことを確かめた。定数の誤りは正しい署名を通さなくする向きに出るので、テストが通る限り偽造を易しくする形では残りにくい。
+- 読んだ人は AI（Claude）で、この記録はメンテナー自身の読み合わせの代わりにはならない。メンテナーが自分でも読むなら、この表に行を足す。
 
 WP-U（2026-09-29）が実装のために読んだ範囲のメモ（レビューの読み合わせの代わりではない）: `Signature::decode` は 4 行を `lines()` で読み（5 行目以降は読まない）、2 行目の 74 バイトと 4 行目の 64 バイトを確かめ、アルゴリズムが `Ed`（legacy）と `ED`（prehashed）以外なら拒む。`PublicKey::verify` は鍵 ID を比べ、prehashed なら BLAKE2b-512 を署名し、`allow_legacy = false` なら legacy を `UnexpectedAlgorithm` で拒む。署名と、署名 + trusted comment の全体の署名の 2 つを Ed25519 で確かめる。鍵 ID は署名の対象に含まれない（`mklm-update` は鍵 ID で鍵を選んだ後、その鍵で検証する）。`mklm-update` は `Signature::decode` の前に、署名ファイルを自分で厳密に読む（ちょうど 4 行、正準形の base64、prehashed だけ）。

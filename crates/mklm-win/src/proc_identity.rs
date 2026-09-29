@@ -323,6 +323,36 @@ pub fn process_identity(pid: u32) -> Result<Option<ProcessIdentity>, Error> {
         .map(|(pid, creation_time)| ProcessIdentity { pid, creation_time }))
 }
 
+/// The image file name of each of `processes` (`ImageName` of `SystemProcessInformation`, e.g.
+/// `powershell.exe`): the kernel's record of the executable the process was started from, which
+/// the process cannot change (unlike its `FileDescription` or window title). A process with a
+/// nonzero `creation_time` must match it too (so a reused PID is not named); `creation_time` 0
+/// means "not known" and matches the PID alone. `None` for a process not found (M5b security
+/// review, finding 2; design m5b D.8 step 4).
+pub fn image_file_names(processes: &[ProcessIdentity]) -> Result<Vec<Option<String>>, Error> {
+    Ok(match_image_names(&process_entries()?, processes))
+}
+
+/// [`image_file_names`] over a process table.
+fn match_image_names(
+    entries: &[ProcessEntry],
+    processes: &[ProcessIdentity],
+) -> Vec<Option<String>> {
+    processes
+        .iter()
+        .map(|process| {
+            entries
+                .iter()
+                .find(|entry| {
+                    entry.pid == process.pid
+                        && (process.creation_time == 0
+                            || entry.create_time == process.creation_time)
+                })
+                .and_then(|entry| entry.image_name.clone())
+        })
+        .collect()
+}
+
 /// NT path of a file (`GetFinalPathNameByHandleW(VOLUME_NAME_NT)`), for comparing with
 /// `process_image_nt_path`.
 pub fn file_nt_path(path: &std::path::Path) -> Result<String, Error> {
@@ -558,6 +588,55 @@ mod tests {
             ..me
         };
         assert_eq!(process_liveness(&impostor), Liveness::Dead);
+    }
+
+    /// M5b security review, finding 2: names come from the process table, by PID and creation
+    /// time.
+    #[test]
+    fn image_file_names_by_identity() {
+        let entry = |pid: u32, create_time: u64, name: Option<&str>| ProcessEntry {
+            pid,
+            create_time,
+            session_id: 1,
+            image_name: name.map(str::to_string),
+        };
+        let table = [
+            entry(0, 0, None),
+            entry(4, 10, Some("System")),
+            entry(7120, 500, Some("blocker.exe")),
+        ];
+        let id = |pid: u32, creation_time: u64| ProcessIdentity { pid, creation_time };
+        assert_eq!(
+            match_image_names(
+                &table,
+                &[
+                    id(7120, 500),
+                    id(7120, 501),
+                    id(7120, 0),
+                    id(8, 0),
+                    id(0, 0)
+                ]
+            ),
+            vec![
+                Some("blocker.exe".to_string()),
+                None,
+                Some("blocker.exe".to_string()),
+                None,
+                None
+            ]
+        );
+        // This process, from the real table: its executable's file name.
+        let me = current_process_identity().expect("own identity");
+        let exe = std::env::current_exe().expect("test executable");
+        let file_name = exe
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name");
+        let names = image_file_names(&[me]).expect("names");
+        assert!(
+            matches!(names.as_slice(), [Some(name)] if equal_ignoring_case(name, file_name)),
+            "{names:?} vs {file_name}"
+        );
     }
 
     #[test]
