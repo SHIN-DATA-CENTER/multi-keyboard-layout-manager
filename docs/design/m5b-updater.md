@@ -4116,6 +4116,13 @@ JSON の例（形を固定するテストの期待値に使う）:
 | 62 | ビルドと実行のレビュー | B.3 の手順 12: `SIGN-OFFLINE.txt` のパスは書いたまま | PowerShell に貼る形: 英数字と `\ / : . _ -` 以外を含むパスは `'…'` で囲み、囲んだ `minisign.exe` には `&` を付ける（`xtask::common::shell_arg` / `shell_program`。`key-drill start` の行と表示、`prepare-release --dev` も） | 空白を含む絶対の `--out`、`--dev-pub`、`--minisign` で、貼ったコマンドが `-m D:\SHIN` などに分かれて失敗していたため（M.6 の BUILD-RUN-2） |
 | 63 | ビルドと実行のレビュー | G.6: 見張りは毎週、無条件に `verify --remote` | `--skip-before-keyed-release`: 鍵を埋め込んだ安定版のタグがまだなければ、notice を出して成功する。checkout は `fetch-depth: 0` | 鍵と v0.2.0 ができるまで、毎週失敗してメールが届き、ただ 1 つの凍結の検知を無視する癖がつくため（M.6 の BUILD-RUN-4） |
 
+**v0.2.0 に含める M5b 以外の作業**（2026-09-29 にこのブランチへマージした）
+
+| 作業 | 内容と参照先 | M5b 側で合わせたこと |
+|---|---|---|
+| 起動 ID の修正（`fix/boot-id`） | 起動 ID を `KUSER_SHARED_DATA.BootId` のカウンター形式にし、0.1.x が記録した GUID はジャーナルを読むときに判定する。設計は m2 の C.10「起動 ID」と H.2 の MT-1〜MT-9、経緯と実機の結果は `docs/research/boot-id.md`。m2 C.10「公開する順序」のとおり、M5b の最初の公開版に含める（含まないと、止まった `PendingReboot` の PC は `check_journal` に断られる）。同じ修正を含むので、C.10 の公開の条件（MT-1〜MT-9。MT-1 は 2026-09-29 に合格）は v0.2.0 のタグにもかかる | `TidyingHost` が `Host::legacy_boot_guid` を中のホストに渡す。`Run.boot_id`、`classify_run`、`StagerEnv::boot_id`、クライアントの `update::status` はどれも `session::boot_id`（カウンター形式）を書き、比べる。`check_journal` は状態だけを見るので、カウンターと保存された GUID を比べる箇所はない。`install-guide.ja.md` は「v0.1.x には自動更新がない」とし、ダウングレードの注意を上書き更新の段落の後に 1 回だけ置いた |
+| リモート デスクトップのキーボード（`rdp/keyboard`） | `TERMINPUT_BUS` のキーボードを読み取り専用の仮想のキーボードとして示す、名前のない Raw Input のキーボードを飛ばす、`OsInfo::client_keyboard_type`、CLI と GUI の行、入力方式の案内の段落、診断の道具。調べた結果は `docs/research/rdp-keyboard.md`（E7 の打鍵の確かめは未実施）、設計は m2 の A.3（読み取りの問題の表）と D.2、m3 の B.2 と B.13 | `mklm-win::os` の import を両方残した（M5b の `fixed_install_dir` と RDP の `GetKeyboardType`）。M5b は `OsInfo` の値を作らないので、リテラルの追加はない。RDP の GUI の文言は i18n と Latin の検査を通る |
+
 ---
 
 ## L. 確認できていない事実
