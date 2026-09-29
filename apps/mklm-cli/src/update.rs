@@ -4,7 +4,7 @@
 //! | Command | Exit codes |
 //! |---|---|
 //! | `update --check` | 0 up to date, 20 an update is available, 21 it must be installed by hand, 22 this build cannot use updates (`NotConfigured`), 6 an update is running now (try again in a minute), 1 the check failed, 2 usage |
-//! | `update --status` | 0, 1, 2 |
+//! | `update --status` | 0 shown (records that could not be read are `warning:` lines, and `warnings` in the JSON), 1 the report could not be written, 2 usage |
 //!
 //! While an update runs (`Run` from `ready` on), the write commands and `update --check` end at
 //! once with 6: MKLM's runner waits only 30 s for `mklm-cli.exe` to end, and a check may take
@@ -34,7 +34,9 @@ pub const MANUAL_REQUIRED: i32 = 21;
 pub const NOT_CONFIGURED: i32 = 22;
 /// An update is running now (`write::exit_code::BLOCKED`).
 pub const UPDATE_RUNNING: i32 = 6;
-/// The check failed, or the records could not be read.
+/// `update --check` could not check. (`update --status` ends with 1 only when its report cannot be
+/// written, like the other read-only commands: records it cannot read are `warning:` lines, and
+/// the code stays 0.)
 pub const FAILED: i32 = 1;
 
 /// What `update` does.
@@ -726,6 +728,8 @@ mod tests {
             client: &client,
             warnings: &warnings,
         };
+        // A record that could not be read is a warning, not a failure: the code stays 0 as
+        // docs/install-guide.ja.md says (the read-only commands' convention, main.rs).
         let text = status_report(&input, false);
         assert_eq!(text.code, 0);
         assert_eq!(text.stderr, vec!["warning: reading the boot ID failed: x"]);
@@ -740,7 +744,10 @@ mod tests {
             assert!(text.stdout.contains(line), "{line}\n{}", text.stdout);
         }
         let json = status_report(&input, true);
+        assert_eq!(json.code, 0);
+        assert_eq!(json.stderr, text.stderr);
         let value: Value = serde_json::from_str(&json.stdout).unwrap();
+        assert_eq!(value["warnings"][0], "reading the boot ID failed: x");
         assert_eq!(value["run"], "in-progress");
         assert_eq!(value["run_phase"], "installing");
         assert_eq!(value["last_result"]["outcome"]["kind"], "not-installed");

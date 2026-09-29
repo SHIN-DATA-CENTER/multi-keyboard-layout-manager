@@ -5,7 +5,7 @@
 | 対象 | マイルストーン M5 の後半（M5b）: アップデーターとリリースの署名（計画 4.2〜4.4、6 章の M5） |
 | 根拠 | 承認済みプラン 2.1〜2.2、4.2〜4.4、5 章（4.x は MSI 向けに書かれている。インストーラーは 2026-09-28 のユーザーの決定で NSIS）。M2 設計（`docs/design/m2-engine.md`）の D.9、E、G.1、I.18。M3 設計（`docs/design/m3-gui.md`）の A.4、B.5、B.17、D、E、F。M5a の実機テスト（`docs/research/m5-install-tests.md`）。main の 37989f8 のコード |
 | ユーザーの決定（M5b の依頼） | 完全な自動更新（ダウンロード、署名の検証、サイレント インストール）。minisign で署名した `latest.json`。**秘密鍵はメンテナーがオフラインで保管し、GitHub の secrets には置かない**。公開鍵を 2 本（通常用とバックアップ用）埋め込み、鍵 ID、失効（`revoked_keys`）、`issued_at`（巻き戻しの防止）、`expires`（凍結の検知）を持つ。確認とダウンロードは自動、インストールは利用者がボタンを押したときだけ。UAC の事前説明あり（未署名のため）。当面バイナリは署名しない。インストーラーは NSIS 3.12（WiX は使わない）。「まず使えるもの」を優先するが、更新の経路は安全に直結するので、検証の正しさは譲らない |
-| 状態 | 設計。**レビュー第 1 回（47 件）と第 2 回（20 件: 第 1 回の対応の検証 17 件、新しい攻撃の検討 3 件）を反映した版**（対応は M 章の 2 つの表）。**2026-09-29 のユーザーの決定（J 章の J-1〜J-9）を反映した**（有効期限の既定 180 日、署名は普段のアカウント、など）。実装（WP-0、WP-U、WP-H、WP-C）は `m5b/updater` に統合済み（実装での変更点は K 章の 20 以降）。**実装のセキュリティ レビュー（3 件。M.3）を反映した** |
+| 状態 | 設計。**レビュー第 1 回（47 件）と第 2 回（20 件: 第 1 回の対応の検証 17 件、新しい攻撃の検討 3 件）を反映した版**（対応は M 章の 2 つの表）。**2026-09-29 のユーザーの決定（J 章の J-1〜J-9）を反映した**（有効期限の既定 180 日、署名は普段のアカウント、など）。実装（WP-0、WP-U、WP-H、WP-C）は `m5b/updater` に統合済み（実装での変更点は K 章の 20 以降）。**実装のセキュリティ レビュー（3 件。M.3）と設計適合のレビュー（6 件。M.4）を反映した** |
 | 読み手 | M5b を分担して実装する人（G 章、H 章）とレビューする人。指摘に使えるよう、すべての節に番号を付けた |
 
 識別子、コード、コマンドは英語のまま書く。「計画」は承認済みプラン、「m2 D.9」「m3 F.5」は M2 / M3 設計の節を指す。H1 と H2 は D 章で定義する helper の 2 つのプロセスを指す。「未確認」と書いたものは L 章にまとめた。レビューの指摘は「（SECURITY-1）」のように ID で引く（実装のレビューの指摘は、M.1 の ID と区別して「M.3 の SECURITY-1」と書く）。
@@ -1126,7 +1126,7 @@ SectionEnd
 | コマンド | 動作 | 終了コード |
 |---|---|---|
 | `mklm-cli update --check [--json]` | GUI と同じ確認（`mklm_client::update::check`。副署名の規則を含む）。利用者の記録を更新する。ダウンロードもインストールもしない。「MKLM 0.2.1 is available (installed 0.2.0). Open MKLM to install it.」または「MKLM is up to date (0.2.0).」。期限切れなら警告を 1 行（終了コードは変えない）。巻き戻しを無視したときも警告を 1 行 | 0: 最新。20: 更新あり。21: 手で更新が必要。22: このビルドでは更新を使えない（`NotConfigured`）。**6: 更新の途中（しばらくしてから再試行）**。1: 確認できなかった。2: 使い方の誤り |
-| `mklm-cli update --status [--json]` | 機械の記録（`LastResult`、進行中の `Run`、インストールの状態）と、利用者の記録（最後の確認、最後に成功した確認、最後の失敗の種類、無視した巻き戻し）を表示する | 0 / 1 / 2 |
+| `mklm-cli update --status [--json]` | 機械の記録（`LastResult`、進行中の `Run`、インストールの状態）と、利用者の記録（最後の確認、最後に成功した確認、最後の失敗の種類、無視した巻き戻し）を表示する | 0 / 1 / 2（ほかの読み取りのコマンドと同じく、読めなかった記録は標準エラーの `warning:` の行と JSON の `warnings` で知らせ、終了コードは 0 のまま。1 は表示を書き出せなかったとき） |
 
 - 終了コードを分けた（OPS-UX-TEST-20）: レビュー前は「最新」「更新あり」「手で更新が必要」がどれも 0 で、スクリプトは `--json` を解析するしかなかった。レビューの提案の 10〜12 ではなく 20〜22 にしたのは、書き込みのコマンドの 10（`AWAITING_CONFIRM`）と同じ数が別の意味になるのを避けるため。`NotInstalledCopy`（開発用のビルド）は確認だけできるので、結果に応じて 0 / 20 / 21。
 - **更新中の早い終了**（RELIABILITY-2 の 4。対象を FIX-VERIFICATION-14 で絞った）: 書き込みのコマンド（`set`、`migrate`、`revert`、`undo`、`resolve`、`restore`、`recover`、`keep`、`reboot`、`post-reboot`）と `update --check` は、起動の直後に `classify_run` を見て、`ready` 以降の `InProgress` なら「MKLM is being updated. Try again in a minute.」を出して終了コード 6（`BLOCKED`。書き込みのコマンドの既存の意味「ほかのものが道をふさいでいる」と同じ）で終わる。GUI と同じく、更新の途中で `mklm-cli.exe` を長く動かし続けないため（`update --check` はネットワークの待ちで 1 分を超えうる。H2 は CLI の終了を 30 秒しか待たない）。
@@ -1366,7 +1366,8 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
 | `RunPhase::{Staging, Staged, Ready, Waiting, Installing, Finishing, Done}` | — | `upd-phase-*` | 技術的な詳細の段階の名前だけ（受け取り中、受け取り済み、準備完了、ほかの MKLM の終了待ち、インストール中、確認中、完了）。利用者の文には段階の名前を出さない | — |
 | `ProgramKind::{Gui, Cli, Helper}` | — | `upd-program-*` | 一覧の名前（「MKLM」「mklm-cli」「mklm-helper」） | — |
 
-- `NotInstalled` と `Failed` の文には、キーボードの設定が変わっていないことを必ず添える（更新はキーボードに触れない。0.2 の 7）。
+- `NotInstalled` と `Failed` の文には、キーボードの設定が変わっていないことを必ず添える（更新はキーボードに触れない。0.2 の 7）。文の ID によらず、結果のオーバーレイ（`vm::update::result_overlay`）が最後に確かめて足す（`i18n::update::with_keyboards_unchanged`。すでに言っていれば足さない）。
+- `NotInstalled(Refused(…))`（H2 の検証し直し、ロック、ジャーナル、記録の書き込みでの拒否。D.7 の 8〜10、16）は、中の `UpdateRefusal` の行の文の後に「MKLM は 0.2.0 のままで、キーボードの設定も変わっていません。」を添える（`i18n::update::with_version_kept`。`upd-disk-full` のようにすでに言っている文には足さない）。拒否の行の文は H1 の拒否（何も始まっていない）のためのもので、更新しなかったことも今の版も言わないため（M.4 の CONFORMANCE-1）。
 - 表記の決まりは m3 D.5 に従う（ボタンは［］、Windows の画面の語は「」、2 文以上は「。」で終える、「確定」を使わない）。
 - 「構造」の失敗は、30 日の知らせを待たず、その場の文でもリリース ページへ案内する。
 
@@ -1440,7 +1441,7 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
   - どの返事の後も、`CallerOrder` は続く `Request` を受け付ける（セッションは続く）。
   - `CallerOrder`: `Welcome` の直後の `RecordTrust` → 受け付ける。`Request` の後、2 つ目の `RecordTrust`、`StageUpdate` の後の `RecordTrust` → プロトコルの誤り（helper は `HelperMessage::Error` を返して切断）。
   - **記録の後の巻き戻し**: 偽の環境で `record_trust`（更新情報 M2）の後、同じセッションで `stage_update`（M2 より `issued_at` の古い、正しく署名された M1）→ `Refused(Rollback)`、`Run` もフォルダーも作らない。
-- 結合テスト（`crates/mklm-client/tests/update_staging.rs` に足す。WP-C が書き、統合の後に通る。F.4）: 利用者の記録が進んでいるとき、`mklm-client` のセッションの開始が `RecordTrust` を送り、偽の helper の側で `record_trust` が機械の記録を進める。進んでいなければ送らない。
+- 結合テスト（`crates/mklm-client/tests/update_staging.rs` に足す。WP-C が書き、統合の後に通る。F.4）: 利用者の記録が進んでいるとき、`mklm-client` のセッションの開始が `RecordTrust` を送り、偽の helper の側で `record_trust` が機械の記録を進める。進んでいなければ送らない。（統合の時点では抜けていて、M.4 の CONFORMANCE-2 で足した: `a_session_carries_the_user_s_newer_manifest_to_the_machine`、`an_update_session_reports_before_it_stages`。）
 - **H2 の駆動部**（`mklm_update::run_flow::run_update`、偽の `RunnerEnv`）: D.12 の表の各行について、D.7 の各手順で失敗を注入し、終わりの `Run` と `LastResult`、起動し直したか、終了コードを確かめる。固定する順序: `Run = installing`（`installer` 付き）を書いてから `ResumeThread`。その書き込みの失敗 → 一時停止のままのインストーラーを止め、`NotInstalled(Refused(Storage))`。`LastResult` を書いて `Run` を消し、ロックを放してから後片付け、最後に起動し直す。15 分の期限 → `Failed(InstallerTimedOut)` を書き、`Run` を残して待ち続け、60 分以内に終われば本当の結果で書き直す。60 分 → `Run` を残し、起動し直さず、7。`ready` / `waiting` でのセッションの終了 → インストーラーを作らず `NotInstalled(SessionEnding)`。`installing` でのセッションの終了 → 止める答え。
 - `mklm_update::run`（WP-H）: `classify_installer_exit` の表（25 は `Other`）、`leaves_old_files`、`decide_outcome` の表（D.13。26 と 27 を含む）、`classify_run`（すべての段階 × 起動 ID の変化 × `stager`、`runner`、`installer` の生死。`installing` で runner が死に installer が生きている → `InProgress`）、`interrupted_result`、`RunId` の文法、JSON の往復と形の固定（H.5）。
 - `mklm_update::gate::check_journal`: `mklm_core::fixtures` のジャーナルで、読めない項目、書き込み中、確認待ち、再起動待ち、衝突、閉じたものだけ。
@@ -1502,14 +1503,14 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
   - E.4.1 の表の各升（×、終了、`quit`、`quit-if-idle`、`activate`、セッションの終了 × 更新のセッションの 4 段階）。
   - `session_purpose`（FIX-VERIFICATION-11）: 更新のボタン → `Launching` と `Some(Update)`。変更の適用 → `Launching` と `Some(Change)`。`Notice::Connected` で、`Update` なら `Updating { Sending }`、`Change` なら `Running`。セッションが終われば `None`。
   - `HandedOff` → `started_run`、RunOnce、オーバーレイ、終了。［OK］で即座に終了の経路へ。［OK］なしでは `HANDOFF_OVERLAY_MAX`（15 秒）で終了の経路へ（FIX-VERIFICATION-13）。定数の関係 `HANDOFF_OVERLAY_MAX + 2 秒 < CALLER_EXIT_WAIT` を固定するテスト。最後のチャンクの後の `Lost` で、`Run.caller` が自分で `ready` なら引き継ぎとして扱う。
-  - 起動時の `InProgress`（`ready` 以降）→ すぐ終了。セッションが `Run.caller_session` と同じ → RunOnce を消さず、何も書かない。違う、または `caller_session` がない → 昇格していなければ RunOnce を登録し、`closed_by_update` を書いてから終了（FIX-VERIFICATION-9）。
+  - 起動時の `InProgress`（`ready` 以降）→ すぐ終了。セッションが `Run.caller_session` と同じ → RunOnce を消さず、何も書かない。違う、または `caller_session` がない → 昇格していなければ RunOnce を登録し、`closed_by_update` を書いてから終了（FIX-VERIFICATION-9）。判断は `state::update::start_gate`（どちらで終わるか）と `state::update::start_gate_effects`（`Effect::AfterUpdateRunOnce(true)` と `Effect::SaveSettings`。`app.rs` はこの 2 つを行うだけ）の 2 つの純粋な関数で、両方をテストする（昇格、昇格しているか分からない、設定のフォルダーがない、同じセッションでは設定を読みもしない。M.4 の CONFORMANCE-3）。
   - `classify`（FIX-VERIFICATION-12）: `CheckError` のすべての列挙子について、E.6 の表と同じ種類と文の ID。`Cancelled`（2 つ）と `NotConfigured` → `None` で、`last_failure` と `last_check` が変わらない。`Rollback` → `Structural`。30 日の間 `Rollback` だけが続いた後のバナーは構造の文（`upd-stale-structural`）と巻き戻しの警告。
   - 結果の表示の条件（D.13）: 14 日を過ぎた `LastResult`、今の版と合わない `LastResult`、ほかの利用者の更新（中立の文）、失敗はほかの利用者に出さない、中断は利用者ごとに 1 回だけ、表示するものがなければ `unregister_after_update`。
   - バナー: 30 日以上確認できていない（一時 / 構造）、期限切れ（発行から 180 日を過ぎた更新情報。J-3）、30 日に 1 回、巻き戻しの警告（同じ `issued_at` に 1 回）。
   - UAC の説明の画面の行き先（`UacNoticeOrigin::Update` で［キャンセル］→ 更新のページ）。
-- `vm::update` のスナップショット（日英、m3 H.3）: E.2 の各状態、E.6 の表のすべての行。ラテン文字の検査（E.7）。
+- `vm::update` のスナップショット（日英、m3 H.3）: E.2 の各状態、E.6 の表のすべての行。ラテン文字の検査（E.7）。すべての `NotInstalledReason`（`Refused` の中のすべての `UpdateRefusal` を含む）、`InstallerExit`、`FailedReason` の結果のオーバーレイが、日英で「キーボードの設定は変わっていません」を言い、`Refused` は元の版も言うこと（E.6。M.4 の CONFORMANCE-1）。
 - `mklm-client::update`: 偽の `Transport` で `check`（主署名、副署名の取得の条件、キャッシュ、記録の更新、スキップ、巻き戻しの記録、最後の失敗の種類と最初の時刻）と `download`。偽の `Link` で `stage`（正常、`Refused`、途中の取り消し、元のファイルの変化、helper の喪失、`SendInstaller` の中身が申し出と違う、`StartingRunner` の後の Heartbeat の間の待ち）。`pending_trust_report`（利用者の記録が進んでいるときだけ）。
-- 結合テスト（統合の後に通る。WP-C が書く）: `crates/mklm-client/tests/update_staging.rs` で、`mklm_client::update::stage` と `mklm_ipc::staging::stage_update`（偽の `StagerEnv`）をメモリ上の双方向のリンクでつなぐ。
+- 結合テスト（統合の後に通る。WP-C が書く）: `crates/mklm-client/tests/update_staging.rs` で、`mklm_client::update::stage` と `mklm_ipc::staging::stage_update`（偽の `StagerEnv`）をメモリ上の双方向のリンクでつなぐ。同じファイルで、F.2 の最後の項目の `RecordTrust`（偽の helper のセッションの繰り返しは `CallerOrder` を通し、`RecordTrust` を `record_trust` に渡す。報告者は `pending_trust_report` の上に作る）: キーボードの設定の要求のセッションと更新のセッションの両方で、利用者の記録が進んでいれば最初に送られて機械の記録が進み、返事 `TrustRecorded { changed: true }` が報告者に届く。追いついた後のセッションは送らない（M.4 の CONFORMANCE-2）。
 - CLI: `update --check` と `--status` の出力と終了コード（0 / 20 / 21 / 22 / 6 / 1 / 2。偽の `Transport` と偽の記録で）。更新中の早い終了: 書き込みのコマンドと `update --check` → 6。`list`、`status`、`global status`、`journal`、`update --status` → 早い終了をせず、ふだんどおり（FIX-VERIFICATION-14）。`--json` に `issued_at` があること（RED-TEAM-1）。
 
 ### F.5 インストーラーの CI の試験
@@ -3904,6 +3905,7 @@ impl HandOffProbe for RunRecordProbe { /* … */ }
 | `UacNoticeOrigin::{Change, Update}`（`AppState::uac_origin`） | 同上 | UAC の説明の画面の［続ける］と［キャンセル］の行き先（E.4） |
 | `OverlayKind::UpdateHandOff` | 同上 | 引き継ぎのオーバーレイ（［OK］か `HANDOFF_OVERLAY_MAX` の 15 秒で閉じる。E.4） |
 | `state::quit_if_idle(&mut AppState, received: Instant) -> (Vec<Effect>, InstanceReply)` | 同上 | E.4.1 の `quit-if-idle` の決まり |
+| `state::update::{StartGate::{QuitQuietly, QuitAndRemember}, start_gate(&RunView, caller_session: Option<u32>, my_session: Option<u32>) -> Option<StartGate>, start_gate_effects(StartGate, elevated: bool, now_unix: u64, settings: impl FnOnce() -> Option<Settings>) -> Vec<Effect>}` | `apps/mklm/src/state/update.rs` | D.13 の 1 の起動の門（FIX-VERIFICATION-9）。`start_gate_effects` は `QuitQuietly` で空（`settings` を呼ばない）、`QuitAndRemember` で、昇格していなければ `AfterUpdateRunOnce(true)`、`settings` が設定を返せば `closed_by_update = now_unix` にした `SaveSettings`。`app.rs::update_start_gate` はこの 2 つを行うだけ（M.4 の CONFORMANCE-3） |
 | `Settings.update.{auto_check, skipped_version, result_seen, started_run, closed_by_update, stale_notice_at, rollback_notice_for}` | `apps/mklm/src/settings.rs` | E.1 |
 
 ### H.5 コマンドライン、ファイル、レジストリ、JSON
@@ -4083,6 +4085,8 @@ JSON の例（形を固定するテストの期待値に使う）:
 | 53 | 統合 | G.2: 骨組みの補助 | 統合で消した: `UpdateRefusal::skeleton()`、`state::skeleton()`、テストの骨組みの検出（`run_flow` のテストの `signer()`、`mklm-ipc` の `anchors()` / `stager_works()`、`mklm-client` の `wp_u_ready()` / `skeleton()`、`trust_report` の `is_ahead_of` の検出）。これらのテストは常に最後まで走る。`a_changed_file_is_never_completed` は偽の digest をやめ、本物の SHA-256 で同じ大きさの変更を検出する | 骨組みの間の早い戻りが、後で黙ってテストを飛ばさないため |
 | 54 | 実装のレビュー | D.9.4、H.3: helper の環境は UAC が渡したまま。`%ProgramData%` はリパースポイントでないことだけ確かめる | helper と CLI の `main` が最初に `elevation::pin_system_environment()`（`SystemDrive`、`SystemRoot`、`windir` を `GetSystemWindowsDirectoryW` から）。`protected_dir` は `%ProgramData%` の所有者と DACL も確かめる（`security::PROGRAM_DATA_POLICY`）。CLI の起動時の警告と `--in-process` の拒否の文を合わせた | `FOLDERID_ProgramData` がプロセスの環境の `%SystemDrive%` で展開され、`HKCU\Environment` から UAC を越えて届くため（M.3 の SECURITY-1） |
 | 55 | 実装のレビュー | D.8 の 4、H.1、H.3: `holders` の名前は Restart Manager の `strAppName` | プロセスの表のイメージのファイル名（`proc_identity::image_file_names` を足した。PID と開始時刻で照らす）。見つからなければ空 | `strAppName` は相手の `FileDescription` か窓の題で、更新を止める相手が管理者に見せる名前を選べたため（M.3 の SECURITY-2） |
+| 56 | 設計適合のレビュー | E.6: `NotInstalled(Refused(…))` の文は中の `UpdateRefusal` の行の文だけ | その後に「MKLM は 0.2.0 のままで、キーボードの設定も変わっていません。」（`i18n::update::with_version_kept`）。結果のオーバーレイは、どの文でも `NotInstalled` と `Failed` にキーボードの文を確かめて足す | E.6 の「必ず添える」が、H2 の拒否（D.7 の 8〜10、16）で抜けていたため（M.4 の CONFORMANCE-1） |
+| 57 | 設計適合のレビュー | H.4: 起動の門の効果は `app.rs` の中 | `state::update::start_gate_effects` を足し、RunOnce と `closed_by_update` の判断を純粋な関数にした。`app.rs` は `AfterUpdateRunOnce` と `SaveSettings` を行うだけ | F.4 の FIX-VERIFICATION-9 のテストが、判断の半分（`start_gate`）しか試していなかったため（M.4 の CONFORMANCE-3） |
 
 ---
 
@@ -4257,3 +4261,16 @@ JSON の例（形を固定するテストの期待値に使う）:
 | SECURITY-1 | minor | 採用 | `SHGetKnownFolderPath(FOLDERID_ProgramData)` がプロセスの環境の `%SystemDrive%` で展開され（L 章で測った。答えはプロセスの中でキャッシュされる）、UAC で起動した helper の環境には `HKCU\Environment` の値が入るので、利用者がロック ファイル、`logs`、`Updates\<run-id>` の置き場所と H2 の `ProgramData` を選べた（乗っ取りはないが、更新が `HandOffFailed` で止まり、プロセスの間のロックが別のファイルになる）。helper の `main`（すべてのモード）と CLI の `main`（`--in-process`）が最初に `elevation::pin_system_environment()` を呼ぶ。加えて `protected_dir` が `%ProgramData%` 自体の所有者と DACL を確かめる（`security::PROGRAM_DATA_POLICY`。TrustedInstaller の所有も認める）。回帰テスト: 偽の `SystemDrive` の子プロセスで、固定しなければ偽の `%ProgramData%` になって拒まれ、固定すれば本物になる（F.2）。D.7 の 1、D.9.4、G.6、H.3、K の 54、L 章 |
 | SECURITY-2 | minor | 採用 | `FilesInUse` の `holders` の名前が Restart Manager の `strAppName`（相手の `FileDescription` か窓の題）で、更新を止める相手（G.7 の 16）が、Users の読める `LastResult` と管理者の見る技術的な詳細に好きな名前（「Windows Defender Antivirus Service」など）を出せた。名前をプロセスの表のイメージのファイル名にした（`proc_identity::image_file_names`。PID と Restart Manager の開始時刻で照らし、開始時刻が 0 なら PID だけ。見つからなければ空）。`strAppName` は残さない。`recovery.md` に「名前はファイル名で、相手は pid で探す」を書いた。回帰テスト: 純粋な照合の表と、テストのプロセスが開いたファイルの持ち主の名前が自分の exe のファイル名であること（F.2）。D.8 の 4、H.1、H.3、I.16、K の 55、L 章 |
 | SECURITY-3 | minor | 採用 | G.6 の最後の項目（`minisign-verify` 0.3.0 のソース全体の読み合わせ）が記録されていなかった。レビューの中でパッケージのすべてのファイル（`src/crypto/curve25519.rs`、`sha512.rs`、`blake2b.rs`、`cryptoutil.rs` を含む）を読み、`release-signing.ja.md` の 8 章に行とメモを足した（MKLM の使い方では問題なし。署名ファイルの読み方の緩さ、公開鍵の点の検査の弱さ、定数を数値として照らしていないことを注記）。読んだのは AI なので、メンテナー自身の読み合わせの代わりにはならないと書いた。版を上げるたびの差分の読み合わせは G.6 のまま |
+
+### M.4 実装の設計適合のレビュー（2026-09-29。6 件）
+
+統合した実装（76189c9）と、この設計の A〜F 章、H 章の約束、E.6 の文、G.6 の CI の手順、メンテナーと利用者の文書との食い違いのレビュー。ID はこのレビューの番号。不採用の指摘はない。
+
+| ID | 重さ | 対応 | 何を変えたか |
+|---|---|---|---|
+| CONFORMANCE-1 | minor | 採用 | H2 が拒否した結果（`NotInstalled(Refused(…))`。D.7 の 8〜10、16）の文が拒否の行の文だけで、E.6 の「キーボードの設定が変わっていないことを必ず添える」が抜けていた（キーボードの文を足すのが、決まった文の ID の一覧だけだったため）。結果のオーバーレイが、`NotInstalled` と `Failed` のすべてに `with_keyboards_unchanged` を通す。`Refused` には「MKLM は 0.2.0 のままで、キーボードの設定も変わっていません。」を添える（`with_version_kept`）。回帰テスト: すべての `UpdateRefusal`、`NotInstalledReason`、`InstallerExit`、`FailedReason` について日英で確かめる（F.4）。スナップショットは「再起動を待っている変更」の 1 行だけが変わった。E.6、F.4、K の 56 |
+| CONFORMANCE-2 | minor | 採用 | F.2 の最後の項目の結合テスト（セッションの開始の `RecordTrust` が偽の helper の `record_trust` で機械の記録を進める。進んでいなければ送らない）がなく、偽の helper は `RecordTrust` を捨てていた。`update_staging.rs` の偽の helper のセッションの繰り返しを、`CallerOrder` の確認、`RecordTrust` → `record_trust`、要求 → 「変更なし」の結果、に広げ、テストを 2 つ足した（キーボードの設定の要求のセッション、更新のセッション）。報告者は `CurrentUser` と同じく `pending_trust_report` の上に、スレッドごとに作る（ほかのテストは何も送らない）。F.2、F.4 |
+| CONFORMANCE-3 | minor | 採用 | F.4 の起動の門（FIX-VERIFICATION-9）の効果（昇格していなければ RunOnce、`closed_by_update` の保存、同じセッションでは何もしない）が `app.rs` にあり、テストがなかった。`state::update::start_gate_effects` に移し、`quit_if_idle` と同じく `Effect` を返す純粋な関数にしてテストした。`app.rs` は `AfterUpdateRunOnce` と `SaveSettings` を行うだけ。F.4、H.4、K の 57 |
+| CONFORMANCE-4 | minor | 採用（文書を直す案） | `install-guide.ja.md` は `update --status` の 1 を「読めなかった」としていたが、コードは読めなかった記録を `warning:` の行（JSON では `warnings`）で知らせて 0 で終わる。これは `main.rs` の読み取りのコマンドの約束（個々の読めないものは警告）と同じで、コードを変えると、キャッシュのない利用者などで監視のスクリプトが 1 を受け取ることになる。そこで文書（`install-guide.ja.md` の日本語の表と英語のまとめ、`FAILED` の説明、`update.rs` の先頭の表、D.14）を「0（読めなかったものは警告）、1（表示を書き出せなかった）、2」に直し、テストに JSON の終了コードと `warnings` の確認を足した |
+| CONFORMANCE-5 | minor | 採用 | `recovery.md` の 9.1 が、画面に出ない文「インストーラーが時間内に終わりませんでした」と 15 分を引いていた。実際の動き（15 分で記録、60 分まで待つ、終われば本当の結果、60 分を過ぎれば `Run` を残し、インストーラーが動いている間は MKLM が開かない、その後は 9.1 の表）と、E.6 の `upd-timeout` の文が出たときにすることに書き直した。**調べて分かったこと**: 60 分を過ぎて `Run` が残ると、後で見た GUI は `Run` から中断の結果（D.13 の表）を出し、同じ `run_id` の `LastResult`（`Failed(InstallerTimedOut)`）は表示済みとして出さない。helper の片付けも `LastResult` を中断の結果で上書きする（D.11、D.13）。つまり `upd-timeout` の文が GUI に出る経路はふつうない（D.12 の表の「次の GUI の表示: D.13 の表」のとおり）。`update --status` は 15〜60 分の間 `failed: the installer did not end in time` と `in-progress (installing)` を出す。設計の変更はしていない |
+| CONFORMANCE-6 | minor | 採用 | `crates/mklm-ipc/tests/messages.rs` に M2 の骨組みの `op_id()`（`OpId::parse` の `catch_unwind` と、早い `return`）が残っていて、`PROTOCOL_VERSION` 3 の JSON の形のテストを含む 4 つのテストが、`OpId::parse` が panic すると黙って通るようになっていた（K の 53 で消した M5b の検出と同じ種類）。`OpId::parse(…).unwrap_or_else(panic)` にして、早い戻りを消した |

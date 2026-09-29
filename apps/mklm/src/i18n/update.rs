@@ -577,6 +577,24 @@ pub fn with_keyboards_unchanged(text: String, lang: Lang) -> String {
     }
 }
 
+/// "MKLM は 0.2.0 のままで、キーボードの設定も変わっていません。": added to the text of an update
+/// the runner refused (`NotInstalled(Refused(…))`, design m5b D.7 steps 8–10, E.6), which is
+/// the refusal's own text and names neither — unless `text` already says it (`DiskFull`).
+pub fn with_version_kept(text: String, version: &str, lang: Lang) -> String {
+    let said = match lang {
+        Lang::Ja => text.contains("キーボードの設定"),
+        Lang::En => text.contains("keyboard settings"),
+    };
+    if said {
+        return text;
+    }
+    let kept = match lang {
+        Lang::Ja => format!("MKLM は {version} のままで、キーボードの設定も変わっていません。"),
+        Lang::En => format!("MKLM stays at {version}, and the keyboard settings did not change."),
+    };
+    join_sentences(&text, &kept, lang)
+}
+
 /// "今の MKLM は 0.2.0 です。" (a failed update whose installation is consistent now).
 pub fn version_now(version: &str, lang: Lang) -> String {
     match lang {

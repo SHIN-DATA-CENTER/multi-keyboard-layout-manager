@@ -1,21 +1,37 @@
 //! The update session end to end in memory (design m5b F.4): the caller's `update::stage` against
 //! the helper's `mklm_ipc::staging::stage_update` (H1) over a duplex link of channels, with a fake
 //! `StagerEnv` in place of the machine. Nothing is written outside memory and a scratch folder.
+//! Also the `RecordTrust` a session starts with (design m5b C.4, F.2 last bullet):
+//! `session::send_trust_report` with a reporter built on `update::trust_report::pending_trust_report`
+//! against the helper's `mklm_ipc::staging::record_trust`.
 
 mod update_common;
 
+use std::cell::RefCell;
+use std::io;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use mklm_client::session::{Link, Recv};
+use mklm_client::session::{
+    Frontend as RelayFrontend, Link, Recv, RelayConfig, SessionEnd, SessionView, TrustReporter,
+    relay, set_trust_reporter,
+};
+use mklm_client::update::cache::UpdateCache;
 use mklm_client::update::check::{CheckOutcome, Offer, check};
 use mklm_client::update::download::download;
 use mklm_client::update::stage::{HandOffProbe, StageEnd, StageFrontend, stage};
-use mklm_core::{BootId, Journal, Liveness, ProcessIdentity, Timestamp};
-use mklm_ipc::staging::{StageLink, StageSink, StagedInstaller, StagerEnv, stage_update};
-use mklm_ipc::{CallerMessage, FrameError, HelperMessage};
+use mklm_client::update::trust_report::pending_trust_report;
+use mklm_core::{
+    BootId, Decision, Event, Journal, Liveness, OperationResult, Outcome, ProcessIdentity,
+    Timestamp,
+};
+use mklm_ipc::staging::{
+    CallerOrder, StageLink, StageSink, StagedInstaller, StagerEnv, record_trust, stage_update,
+};
+use mklm_ipc::{CallerMessage, FrameError, HelperMessage, Request, TrustReport, UpdateMessage};
 use mklm_update::run::{InstallState, RunId, RunPhase, RunRecord, UpdateResult};
 use mklm_update::{Arch, TrustAnchors, TrustState, UpdateRefusal, Version};
 use update_common::*;
@@ -97,6 +113,8 @@ struct Machine {
     runner: Option<ProcessIdentity>,
     removed: Vec<String>,
     log: Vec<String>,
+    /// The caller's messages the helper's session loop read, in order.
+    received: Vec<&'static str>,
 }
 
 /// H1's machine: in memory; the runner becomes ready as soon as it is started.
@@ -321,15 +339,46 @@ fn downloaded_offer(scratch: &Scratch) -> (Offer, std::path::PathBuf) {
     (offer, path)
 }
 
-/// Runs H1 on its own thread for one `StageUpdate`, then until the caller leaves.
+fn kind(message: &CallerMessage) -> &'static str {
+    match message {
+        CallerMessage::Welcome(_) => "welcome",
+        CallerMessage::Request(_) => "request",
+        CallerMessage::Decision(_) => "decision",
+        CallerMessage::Bye => "bye",
+        CallerMessage::RecordTrust(_) => "record-trust",
+        CallerMessage::StageUpdate(_) => "stage-update",
+        CallerMessage::InstallerChunk(_) => "installer-chunk",
+    }
+}
+
+/// The helper's session loop after `Welcome` (as `apps/mklm-helper`'s `serve`), on its own thread
+/// until the caller leaves: the order rule (`CallerOrder`), `RecordTrust` → `record_trust`,
+/// `StageUpdate` → H1, and a request answered "no change".
 fn serve(machine: FakeMachine, mut end: HelperEnd) -> thread::JoinHandle<Arc<Mutex<Machine>>> {
     thread::spawn(move || {
         let state = machine.state.clone();
         let mut machine = machine;
+        let mut order = CallerOrder::new();
         while let Ok(message) = end.recv(Duration::from_secs(20)) {
+            state.lock().unwrap().received.push(kind(&message));
+            if let Err(detail) = order.check(&message) {
+                state
+                    .lock()
+                    .unwrap()
+                    .log
+                    .push(format!("protocol: {detail}"));
+                break;
+            }
             match message {
+                CallerMessage::RecordTrust(report) => {
+                    let reply = record_trust(&mut machine, &report);
+                    let _ = end.send(HelperMessage::Update(reply));
+                }
                 CallerMessage::StageUpdate(request) => {
                     stage_update(&mut machine, &mut end, &request);
+                }
+                CallerMessage::Request(_) => {
+                    let _ = end.send(HelperMessage::Result(no_change()));
                 }
                 CallerMessage::Bye => break,
                 _ => {}
@@ -339,6 +388,19 @@ fn serve(machine: FakeMachine, mut end: HelperEnd) -> thread::JoinHandle<Arc<Mut
     })
 }
 
+fn no_change() -> OperationResult {
+    OperationResult {
+        op_id: None,
+        outcome: Outcome::NoChange,
+        failure: None,
+        pending_action: None,
+        conflicts: Vec::new(),
+        inv_ps2_violation: None,
+        recovered: Vec::new(),
+        warnings: Vec::new(),
+    }
+}
+
 fn machine(free: u64) -> FakeMachine {
     FakeMachine {
         version: Version::new(0, 2, 0),
@@ -346,6 +408,88 @@ fn machine(free: u64) -> FakeMachine {
         free,
         state: Arc::default(),
     }
+}
+
+thread_local! {
+    /// This thread's user: the update cache and the fake machine whose record stands in for HKLM.
+    static USER: RefCell<Option<(PathBuf, Arc<Mutex<Machine>>)>> = const { RefCell::new(None) };
+    /// The helper's answers the reporter was handed.
+    static ANSWERS: RefCell<Vec<UpdateMessage>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The front end's reporter, as `update::trust_report::CurrentUser` builds it (the user's cache
+/// and the machine record, then `pending_trust_report`), per thread: the tests that set no user
+/// send nothing.
+struct ThreadUser;
+
+impl TrustReporter for ThreadUser {
+    fn report(&self) -> Option<TrustReport> {
+        USER.with(|user| {
+            let user = user.borrow();
+            let (cache_dir, machine) = user.as_ref()?;
+            let machine = machine.lock().unwrap().trust.clone();
+            pending_trust_report(&UpdateCache::new(cache_dir.clone()), &machine)
+        })
+    }
+
+    fn answered(&self, reply: &UpdateMessage) {
+        ANSWERS.with(|answers| answers.borrow_mut().push(reply.clone()));
+    }
+}
+
+/// This thread's sessions report as the user of `cache_dir` on `machine` (`None`: nobody).
+fn report_as(user: Option<(PathBuf, Arc<Mutex<Machine>>)>) {
+    let _ = set_trust_reporter(Box::new(ThreadUser));
+    USER.with(|slot| *slot.borrow_mut() = user);
+    ANSWERS.with(|answers| answers.borrow_mut().clear());
+}
+
+fn answers() -> Vec<UpdateMessage> {
+    ANSWERS.with(|answers| answers.borrow().clone())
+}
+
+/// A relay front end that shows nothing and decides nothing.
+struct Quiet;
+
+impl RelayFrontend for Quiet {
+    fn event(&mut self, _event: &Event, _view: &SessionView) -> io::Result<Option<Decision>> {
+        Ok(None)
+    }
+    fn poll(&mut self, _view: &SessionView, _now: Instant) -> io::Result<Option<Decision>> {
+        Ok(None)
+    }
+    fn finish(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// One helper session of a keyboard-settings request on the machine `state`; returns how it ended
+/// and the caller's messages the helper read.
+fn request_session(state: &Arc<Mutex<Machine>>) -> (SessionEnd, Vec<&'static str>) {
+    let (mut caller, helper) = pipe();
+    let h1 = serve(
+        FakeMachine {
+            state: state.clone(),
+            ..machine(u64::MAX / 2)
+        },
+        helper,
+    );
+    let end = relay(
+        &mut caller,
+        Request::SetMachineSettings {
+            restore_on_uninstall: true,
+        },
+        &mut Quiet,
+        RelayConfig {
+            tick: Duration::from_millis(10),
+            silence_limit: Duration::from_secs(20),
+        },
+    )
+    .unwrap();
+    drop(caller);
+    let state = h1.join().unwrap();
+    let received = std::mem::take(&mut state.lock().unwrap().received);
+    (end, received)
 }
 
 #[test]
@@ -413,4 +557,69 @@ fn a_refusal_changes_nothing() {
     let state = state.lock().unwrap();
     assert!(state.installer.lock().unwrap().is_empty());
     assert_eq!(state.run, None);
+}
+
+/// Design m5b C.4 and F.2 (last bullet): when the user's record is ahead of the machine's, a
+/// helper session — here a keyboard-settings request — starts with `RecordTrust`, and the helper's
+/// `record_trust` advances the machine record. Once the machine knows as much, nothing is sent.
+#[test]
+fn a_session_carries_the_user_s_newer_manifest_to_the_machine() {
+    let scratch = Scratch::new("staging-record-trust");
+    // The user's check verified the manifest of 0.2.1; the machine record is still empty.
+    let _ = downloaded_offer(&scratch);
+    let user = UpdateCache::new(scratch.0.clone()).load_state().trust;
+    assert!(user.max_issued_at.contains_key(PRIMARY_ID), "{user:?}");
+    let state: Arc<Mutex<Machine>> = Arc::default();
+    assert!(user.is_ahead_of(&state.lock().unwrap().trust));
+    report_as(Some((scratch.0.clone(), state.clone())));
+
+    let (end, received) = request_session(&state);
+    assert_eq!(end, SessionEnd::Finished(no_change()));
+    assert_eq!(received, ["record-trust", "request"]);
+    assert_eq!(answers(), [UpdateMessage::TrustRecorded { changed: true }]);
+    {
+        let machine = state.lock().unwrap();
+        assert!(!machine.log.iter().any(|line| line.starts_with("protocol")));
+        assert_eq!(
+            machine.trust.max_issued_at.get(PRIMARY_ID),
+            user.max_issued_at.get(PRIMARY_ID)
+        );
+        assert!(!user.is_ahead_of(&machine.trust));
+    }
+
+    // The machine caught up: the next session sends only its request.
+    let (end, received) = request_session(&state);
+    assert_eq!(end, SessionEnd::Finished(no_change()));
+    assert_eq!(received, ["request"]);
+    assert_eq!(answers().len(), 1);
+    report_as(None);
+}
+
+/// The same report before an update session (`update::stage`): `RecordTrust` goes before
+/// `StageUpdate`, its answer is skipped, and H1 still hands off.
+#[test]
+fn an_update_session_reports_before_it_stages() {
+    let scratch = Scratch::new("staging-record-trust-stage");
+    let (offer, path) = downloaded_offer(&scratch);
+    let machine = machine(u64::MAX / 2);
+    report_as(Some((scratch.0.clone(), machine.state.clone())));
+    let (mut caller, helper) = pipe();
+    let h1 = serve(machine, helper);
+    let end = stage(
+        &mut caller,
+        &offer,
+        &path,
+        &mut Frontend::default(),
+        &mut NoProbe,
+    );
+    drop(caller);
+    let state = h1.join().unwrap();
+    let answered = answers();
+    report_as(None);
+    assert!(matches!(end, StageEnd::HandedOff { .. }), "{end:?}");
+    assert_eq!(answered, [UpdateMessage::TrustRecorded { changed: true }]);
+    let state = state.lock().unwrap();
+    assert_eq!(state.received[..2], ["record-trust", "stage-update"]);
+    assert!(!state.log.iter().any(|line| line.starts_with("protocol")));
+    assert!(state.trust.max_issued_at.contains_key(PRIMARY_ID));
 }

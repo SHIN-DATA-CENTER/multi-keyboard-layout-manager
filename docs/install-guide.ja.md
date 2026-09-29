@@ -120,7 +120,7 @@ MKLM はまだコード署名をしていないので、UAC の確認画面の�
 | 1 | 確認できませんでした |
 | 2 | 使い方の誤り |
 
-`update --status` の終了コードは 0（表示した）、1（読めなかった）、2（使い方の誤り）です。
+`update --status` の終了コードは 0（表示した）、1（表示を書き出せなかった）、2（使い方の誤り）です。読めなかった記録があっても終了コードは 0 のままで、読めなかったものを標準エラーに `warning:` の行で出します（`--json` では `warnings` にも入ります）。監視のスクリプトで読めなかったことを知るには、`warnings` が空でないことを確かめてください。
 
 ## サイレント インストール（管理者向け）
 
@@ -192,5 +192,5 @@ Start-Process .\MKLM-Setup-0.2.1-x64.exe -ArgumentList '/S' -Verb RunAs -Wait -P
 - **Automatic updates (from v0.2.0; install v0.2.0 by hand once).** MKLM checks GitHub once a day (it sends only its version and x64/ARM64; you can turn this off in Settings), downloads a new installer automatically and verifies it against the maintainer's offline minisign signature of `latest.json` and its SHA-256. It installs **only when you press "Update now"**. The UAC prompt shows "Unknown publisher": click "Show more details" and check that the program location is `C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe`; MKLM asks for permission only right after you press a button. MKLM closes and reopens by itself; keyboard settings are not touched. It stays on the same architecture (no automatic x64 → ARM64 switch).
 - Manifests expire 180 days after they are issued; an expired one only shows a notice. Behind a proxy that needs Windows integrated authentication, automatic updates do not work (MKLM never sends Windows credentials); download from the release page instead.
 - To verify by hand: `minisign -Vm latest.json -x latest.json.minisig -P <public key>` (the keys are listed above once they exist), then compare the installer's SHA-256 with `assets[].sha256` in `latest.json`. When approving an update as an administrator on someone else's PC, download and verify the installer yourself.
-- `mklm-cli update --check [--json]` exit codes: 0 up to date, 20 update available, 21 manual update required, 22 updates unavailable in this build, 6 an update is in progress, 1 check failed, 2 usage error. `mklm-cli update --status [--json]`: 0 / 1 / 2. The CLI never installs.
+- `mklm-cli update --check [--json]` exit codes: 0 up to date, 20 update available, 21 manual update required, 22 updates unavailable in this build, 6 an update is in progress, 1 check failed, 2 usage error. `mklm-cli update --status [--json]`: 0 shown, 1 the report could not be written, 2 usage error; records that could not be read keep the code at 0 and are reported as `warning:` lines on standard error (and in `warnings` with `--json`). The CLI never installs.
 - Silent install: `MKLM-Setup-<version>-<arch>.exe /S` (elevated). Exit codes: 0 success, 1 cancelled, 2 aborted, 20 Windows too old, 21 wrong architecture, 22 / 23 / 24 helper / CLI / GUI still running, 26 files in use, 27 files could not be written; nothing was replaced for any code but 0.

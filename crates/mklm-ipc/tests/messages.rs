@@ -29,21 +29,10 @@ const KEYCHRON_COL02: &str = r"HID\VID_3434&PID_D027&MI_00&COL02\8&148AD7E3&0&00
 const INTERNAL_PS2: &str = r"ACPI\MSFT0001\4&2A8B8D0D&0";
 const BUILD: &str = "0.1.0+0123456789abcdef0123456789abcdef";
 
-// ---- Until WP1 lands ----
-
-/// `OpId::parse` belongs to work package WP1 (mklm-core), developed in parallel with this one;
-/// until it is merged it is `todo!()`. The tests that need an `OpId` then return early instead of
-/// failing, and run in full once it is implemented.
-// TODO(M2 integration): drop the `catch_unwind` once WP1's `OpId::parse` is merged.
-fn op_id(text: &str) -> Option<OpId> {
-    match std::panic::catch_unwind(|| OpId::parse(text)) {
-        Ok(Ok(id)) => Some(id),
-        Ok(Err(error)) => panic!("{text:?} must be a valid OpId: {error}"),
-        Err(_) => {
-            eprintln!("skipped: OpId::parse is not implemented yet (WP1)");
-            None
-        }
-    }
+/// An operation ID of the samples. A panic here fails the test: no test skips itself (design m5b
+/// K #53: the skeleton probes that made tests pass silently are gone).
+fn op_id(text: &str) -> OpId {
+    OpId::parse(text).unwrap_or_else(|error| panic!("{text:?} must be a valid OpId: {error}"))
 }
 
 // ---- Samples ----
@@ -873,7 +862,7 @@ where
 
 #[test]
 fn every_caller_message_round_trips() {
-    let Some(op) = op_id(OP) else { return };
+    let op = op_id(OP);
     let samples = caller_messages(&op);
     for (label, message) in &samples {
         round_trip(label, message);
@@ -900,9 +889,7 @@ fn every_caller_message_round_trips() {
 
 #[test]
 fn every_helper_message_round_trips() {
-    let (Some(op), Some(other_op)) = (op_id(OP), op_id(OTHER_OP)) else {
-        return;
-    };
+    let (op, other_op) = (op_id(OP), op_id(OTHER_OP));
     let samples = helper_messages(&op, &other_op);
     for (label, message) in &samples {
         round_trip(label, message);
@@ -923,7 +910,7 @@ fn every_helper_message_round_trips() {
 
 #[test]
 fn every_embedded_value_round_trips() {
-    let Some(op) = op_id(OP) else { return };
+    let op = op_id(OP);
     // `vocabulary` round-trips each value as it builds the list.
     assert!(!vocabulary(&op).is_empty());
 }
@@ -1329,9 +1316,7 @@ fn snapshot_path(version: u32) -> PathBuf {
 /// never overwrites an existing snapshot.
 #[test]
 fn json_shape_matches_the_snapshot_of_this_protocol_version() {
-    let (Some(op), Some(other_op)) = (op_id(OP), op_id(OTHER_OP)) else {
-        return;
-    };
+    let (op, other_op) = (op_id(OP), op_id(OTHER_OP));
     let actual = snapshot_text(&op, &other_op);
     let path = snapshot_path(PROTOCOL_VERSION);
     let recorded = match std::fs::read_to_string(&path) {

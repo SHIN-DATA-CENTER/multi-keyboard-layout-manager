@@ -356,7 +356,7 @@ details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: the insta
 
 == result: refused again by the runner: a restart is pending ==
 title: MKLM update
-message: A change is waiting for a PC restart, so MKLM cannot update now. Restart the PC (Restart, not Shut down), finish the check, then update.
+message: A change is waiting for a PC restart, so MKLM cannot update now. Restart the PC (Restart, not Shut down), finish the check, then update. MKLM stays at 0.2.0, and the keyboard settings did not change.
 tone: Warning
 button: [Restart…]
 button: [Close] primary

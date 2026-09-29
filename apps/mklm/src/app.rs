@@ -1513,9 +1513,10 @@ fn log_trust_answer(reply: &mklm_ipc::UpdateMessage) {
 
 /// The start while an update runs (design m5b D.13 step 1): `Some(exit code)` to end at once.
 /// Another session's update: this user's after-update value (unelevated) and `closed_by_update`
-/// first, so that the next start says why MKLM was away (FIX-VERIFICATION-9).
+/// first, so that the next start says why MKLM was away (FIX-VERIFICATION-9). What to do is
+/// `state::update::start_gate_effects`; only its I/O is here.
 fn update_start_gate(args: &Args) -> Option<ExitCode> {
-    use crate::state::update::{StartGate, start_gate};
+    use crate::state::update::{start_gate, start_gate_effects};
 
     let (record, view) = mklm_client::update::status::current_run()?;
     let my_session = mklm_win::proc_identity::process_users()
@@ -1526,20 +1527,41 @@ fn update_start_gate(args: &Args) -> Option<ExitCode> {
         "an update to {} is running ({view:?}); MKLM does not start now ({gate:?})",
         record.to_version
     ));
-    if gate == StartGate::QuitAndRemember && args.exit_after.is_none() {
-        if matches!(mklm_win::elevation::is_elevated(), Ok(false)) {
-            crate::reader::after_update_run_once(true);
-        }
-        match mklm_win::ui::user_settings_dir() {
-            Ok(dir) => {
-                let (mut settings, loaded) = load_or_default(&dir);
-                settings.update.closed_by_update = Some(unix_now());
-                let mut store = SettingsStore::new(dir, loaded.is_err());
-                if let Err(error) = store.save(&settings) {
+    if args.exit_after.is_some() {
+        return Some(ExitCode::SUCCESS);
+    }
+    // An elevated GUI registers no RunOnce value (design m5b D.10, m3 F.2); nor one that cannot
+    // tell.
+    let elevated = !matches!(mklm_win::elevation::is_elevated(), Ok(false));
+    let mut store = None;
+    let effects =
+        start_gate_effects(
+            gate,
+            elevated,
+            unix_now(),
+            || match mklm_win::ui::user_settings_dir() {
+                Ok(dir) => {
+                    let (settings, loaded) = load_or_default(&dir);
+                    store = Some(SettingsStore::new(dir, loaded.is_err()));
+                    Some(settings)
+                }
+                Err(error) => {
+                    log::warn(format!("no settings folder: {error}"));
+                    None
+                }
+            },
+        );
+    for effect in effects {
+        match effect {
+            Effect::AfterUpdateRunOnce(register) => crate::reader::after_update_run_once(register),
+            Effect::SaveSettings(settings) => {
+                if let Some(store) = store.as_mut()
+                    && let Err(error) = store.save(&settings)
+                {
                     log::warn(format!("saving the settings failed: {error}"));
                 }
             }
-            Err(error) => log::warn(format!("no settings folder: {error}")),
+            other => log::warn(format!("start gate: {other:?} is not carried out here")),
         }
     }
     Some(ExitCode::SUCCESS)

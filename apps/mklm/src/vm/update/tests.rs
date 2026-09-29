@@ -617,6 +617,173 @@ fn japanese_update_texts_use_only_allowed_latin_words() {
     }
 }
 
+/// Every `UpdateRefusal` (design m5b H.1).
+fn every_refusal() -> Vec<UpdateRefusal> {
+    let text = || "x".to_string();
+    vec![
+        UpdateRefusal::NotConfigured,
+        UpdateRefusal::NotInstalledCopy,
+        UpdateRefusal::ManifestTooLarge { len: 1 },
+        UpdateRefusal::SignatureTooLarge { len: 1 },
+        UpdateRefusal::SignatureMalformed,
+        UpdateRefusal::WrongTrustedComment,
+        UpdateRefusal::UnknownKey { key_id: text() },
+        UpdateRefusal::BadSignature,
+        UpdateRefusal::RevokedKey { key_id: text() },
+        UpdateRefusal::ManifestMalformed { detail: text() },
+        UpdateRefusal::UnsupportedSchema { schema: 2 },
+        UpdateRefusal::WrongProduct,
+        UpdateRefusal::WrongChannel,
+        UpdateRefusal::SignerNotListed { key_id: text() },
+        UpdateRefusal::IllegalRevocation { key_id: text() },
+        UpdateRefusal::BadVersion { text: text() },
+        UpdateRefusal::TagMismatch {
+            tag: "v0.2.2".into(),
+            version: "0.2.1".into(),
+        },
+        UpdateRefusal::BadTimestamps,
+        UpdateRefusal::Rollback {
+            issued_at: 1,
+            seen: 2,
+        },
+        UpdateRefusal::NoAssetForArch {
+            arch: mklm_update::Arch::Arm64,
+        },
+        UpdateRefusal::AssetMalformed { detail: text() },
+        UpdateRefusal::NotNewer {
+            offered: "0.2.1".into(),
+            installed: "0.2.1".into(),
+        },
+        UpdateRefusal::ManualUpdateRequired {
+            min_from: "0.2.0".into(),
+            installed: "0.1.0".into(),
+        },
+        UpdateRefusal::Busy,
+        UpdateRefusal::UpdateInProgress,
+        UpdateRefusal::OperationOpen {
+            waiting_for_reboot: false,
+        },
+        UpdateRefusal::OperationOpen {
+            waiting_for_reboot: true,
+        },
+        UpdateRefusal::RecoveryNeeded,
+        UpdateRefusal::JournalUnreadable,
+        UpdateRefusal::DiskFull {
+            needed: 1 << 30,
+            available: 1 << 20,
+        },
+        UpdateRefusal::InstallerSizeMismatch {
+            expected: 2,
+            received: 1,
+        },
+        UpdateRefusal::InstallerHashMismatch,
+        UpdateRefusal::ChunkMalformed,
+        UpdateRefusal::ChunkOutOfOrder {
+            expected: 0,
+            found: 1,
+        },
+        UpdateRefusal::CallerLeft,
+        UpdateRefusal::HandOffFailed { detail: text() },
+        UpdateRefusal::Storage { detail: text() },
+        UpdateRefusal::Internal { detail: text() },
+    ]
+}
+
+/// Design m5b E.6: every `NotInstalled` and `Failed` result says the keyboard settings did not
+/// change, whatever message it maps to — a refusal of the runner too (D.7 steps 8–10), which
+/// also says that MKLM stays at its version.
+#[test]
+fn every_not_installed_or_failed_result_says_the_keyboards_did_not_change() {
+    let mut outcomes: Vec<UpdateOutcome> = every_refusal()
+        .into_iter()
+        .map(|refusal| UpdateOutcome::NotInstalled(NotInstalledReason::Refused(refusal)))
+        .collect();
+    let reasons = [
+        NotInstalledReason::CallerDidNotExit,
+        NotInstalledReason::InstanceBusy { sessions: vec![2] },
+        NotInstalledReason::ProgramsStillRunning {
+            programs: vec![ProgramKind::Cli],
+            holders: Vec::new(),
+        },
+        NotInstalledReason::FilesInUse {
+            programs: Vec::new(),
+            holders: Vec::new(),
+        },
+        NotInstalledReason::DiskFull {
+            needed: 1 << 30,
+            available: 1 << 20,
+        },
+        NotInstalledReason::SessionEnding,
+        NotInstalledReason::InstalledVersionChanged {
+            found: Some("0.2.0".into()),
+        },
+        NotInstalledReason::InstallerNotStarted { code: 225 },
+        NotInstalledReason::InstallerNotStarted { code: 5 },
+        NotInstalledReason::InstallerExit { code: 1 },
+    ];
+    outcomes.extend(reasons.into_iter().map(UpdateOutcome::NotInstalled));
+    for exit in [
+        InstallerExit::Success,
+        InstallerExit::UserCancelled,
+        InstallerExit::ScriptAborted,
+        InstallerExit::HelperRunning,
+        InstallerExit::CliRunning,
+        InstallerExit::GuiRunning,
+        InstallerExit::FilesInUse,
+        InstallerExit::OsTooOld,
+        InstallerExit::WrongArch,
+        InstallerExit::FileWrite,
+        InstallerExit::Other(99),
+    ] {
+        outcomes.push(UpdateOutcome::NotInstalled(
+            NotInstalledReason::InstallerRefused { exit },
+        ));
+    }
+    outcomes.extend(
+        [
+            FailedReason::InstallerTimedOut,
+            FailedReason::Inconsistent,
+            FailedReason::UnexpectedVersion {
+                found: "0.1.9".into(),
+            },
+        ]
+        .map(UpdateOutcome::Failed),
+    );
+    for outcome in outcomes {
+        let refused = matches!(
+            outcome,
+            UpdateOutcome::NotInstalled(NotInstalledReason::Refused(_))
+        );
+        for (own, closed) in [(true, false), (false, true)] {
+            for inconsistent in [false, true] {
+                let mut state = installed();
+                if inconsistent {
+                    state.update.machine.consistent = None;
+                }
+                state.update.shown = Some(ShownResult::Result {
+                    result: Box::new(update_result(outcome.clone())),
+                    own,
+                    closed_for_update: closed,
+                });
+                for lang in [Lang::Ja, Lang::En] {
+                    let message = result_overlay(&state, lang).unwrap().message;
+                    let keyboards = match lang {
+                        Lang::Ja => "キーボードの設定",
+                        Lang::En => "keyboard settings",
+                    };
+                    assert!(
+                        message.contains(keyboards),
+                        "{outcome:?} {lang:?}: {message}"
+                    );
+                    if refused {
+                        assert!(message.contains("0.2.0"), "{outcome:?} {lang:?}: {message}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The messages of the check's failures are the ones the user's record keeps (E.6; the class and
 /// ID of `mklm_client::update::classify`).
 #[test]

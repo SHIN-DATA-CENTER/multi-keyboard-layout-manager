@@ -980,6 +980,64 @@ fn a_running_update_keeps_mklm_from_starting() {
     assert_eq!(start_gate(&RunView::Idle, Some(1), Some(1)), None);
 }
 
+/// What the stopped start does (design m5b D.13 step 1; FIX-VERIFICATION-9): for another
+/// session's update, the after-update value only when not elevated, and `closed_by_update` saved
+/// with the rest of the user's settings kept; for this session's own update, nothing — not even a
+/// read of the settings, and the RunOnce value is left alone.
+#[test]
+fn a_start_stopped_by_an_update_remembers_why() {
+    let mut mine = crate::settings::Settings::default();
+    mine.update.auto_check = false;
+    mine.update.started_run = Some(RUN.into());
+    let saved = |effects: &[Effect]| {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::SaveSettings(settings) => Some((**settings).clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = crate::settings::Settings {
+        update: crate::settings::UpdateSettings {
+            closed_by_update: Some(NOW),
+            ..mine.update.clone()
+        },
+        ..mine.clone()
+    };
+
+    let effects = start_gate_effects(StartGate::QuitAndRemember, false, NOW, || {
+        Some(mine.clone())
+    });
+    assert_eq!(effects[0], Effect::AfterUpdateRunOnce(true));
+    assert_eq!(saved(&effects), std::slice::from_ref(&expected));
+    assert_eq!(effects.len(), 2, "{effects:?}");
+
+    // Elevated (or not known to be unelevated): the settings, no RunOnce value.
+    let effects = start_gate_effects(StartGate::QuitAndRemember, true, NOW, || Some(mine.clone()));
+    assert_eq!(saved(&effects), [expected]);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::AfterUpdateRunOnce(_))),
+        "{effects:?}"
+    );
+
+    // No settings folder: the RunOnce value still, nothing to save.
+    assert_eq!(
+        start_gate_effects(StartGate::QuitAndRemember, false, NOW, || None),
+        [Effect::AfterUpdateRunOnce(true)]
+    );
+
+    // This session's update: the runner starts MKLM again; nothing is read or changed.
+    for elevated in [false, true] {
+        let effects = start_gate_effects(StartGate::QuitQuietly, elevated, NOW, || {
+            panic!("the settings are not read for this session's own update")
+        });
+        assert_eq!(effects, []);
+    }
+}
+
 // --- What a start shows (design m5b D.13, E.5; OPS-UX-TEST-6, RELIABILITY-7) -----------------
 
 fn result(outcome: UpdateOutcome, finished: u64) -> UpdateResult {

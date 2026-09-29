@@ -1151,6 +1151,32 @@ pub fn start_gate(
     })
 }
 
+/// What a start that [`start_gate`] stopped does before it ends (pure; `app.rs` carries out
+/// `AfterUpdateRunOnce` and `SaveSettings` and nothing else). `QuitQuietly`: nothing, and the
+/// user's settings are not even read (the runner starts this session's MKLM again).
+/// `QuitAndRemember`: the after-update value unless MKLM is elevated (`elevated` is true also when
+/// that could not be told), then `closed_by_update = now_unix` in the user's settings, saved —
+/// no save when `settings` has none to give (no settings folder).
+pub fn start_gate_effects(
+    gate: StartGate,
+    elevated: bool,
+    now_unix: u64,
+    settings: impl FnOnce() -> Option<crate::settings::Settings>,
+) -> Vec<Effect> {
+    if gate == StartGate::QuitQuietly {
+        return Vec::new();
+    }
+    let mut effects = Vec::new();
+    if !elevated {
+        effects.push(Effect::AfterUpdateRunOnce(true));
+    }
+    if let Some(mut settings) = settings() {
+        settings.update.closed_by_update = Some(now_unix);
+        effects.push(Effect::SaveSettings(Box::new(settings)));
+    }
+    effects
+}
+
 /// Handles an [`UpdateMsg`].
 pub fn handle(state: &mut AppState, msg: UpdateMsg) -> Vec<Effect> {
     match msg {

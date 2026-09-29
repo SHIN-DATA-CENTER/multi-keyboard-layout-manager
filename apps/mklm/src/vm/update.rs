@@ -1181,8 +1181,25 @@ pub fn result_overlay(state: &AppState, lang: Lang) -> Option<ResultOverlayView>
                     &text::keyboards_unchanged(lang),
                     lang,
                 ),
+                // The runner refused (D.7 steps 8–10): the refusal's text, which does not say
+                // what stayed as it was.
+                UpdateOutcome::NotInstalled(NotInstalledReason::Refused(_)) => {
+                    text::with_version_kept(
+                        words(explained.msg, &result_params, lang),
+                        &result_params.installed,
+                        lang,
+                    )
+                }
                 _ => words(explained.msg, &result_params, lang),
             };
+            // Whatever message they map to, "not installed" and "failed" say the keyboards did
+            // not change (E.6).
+            if matches!(
+                result.outcome,
+                UpdateOutcome::NotInstalled(_) | UpdateOutcome::Failed(_)
+            ) {
+                message = text::with_keyboards_unchanged(message, lang);
+            }
             if *closed_for_update {
                 message =
                     text::join_sentences(&message, &text::closed_for_another_update(lang), lang);

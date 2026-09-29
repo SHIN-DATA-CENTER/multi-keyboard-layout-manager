@@ -356,7 +356,7 @@ details: update 0.2.1-3f9a0c2b7d1e4a65: 0.2.0 -> 0.2.1, not installed: the insta
 
 == result: refused again by the runner: a restart is pending ==
 title: MKLM の更新
-message: PC の再起動を待っている変更があるため、今は更新できません。PC を再起動し（シャットダウンではなく再起動）、確認を終えてから更新してください。
+message: PC の再起動を待っている変更があるため、今は更新できません。PC を再起動し（シャットダウンではなく再起動）、確認を終えてから更新してください。MKLM は 0.2.0 のままで、キーボードの設定も変わっていません。
 tone: Warning
 button: [再起動…]
 button: [閉じる] primary
