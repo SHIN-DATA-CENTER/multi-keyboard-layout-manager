@@ -4,6 +4,8 @@
 # Written for the Pester 3.4 that ships with Windows PowerShell 5.1 and for Pester 5: only
 # Describe / It and plain `throw` (no Should syntax, which differs between them), and the script
 # under test is dot-sourced inside each It (Pester 5 runs It blocks apart from the file's top level).
+# CI runs these under GitHub's powershell wrapper: see the two rules at the top of
+# smoke-test.Tests.ps1 (design standard-layout D.4).
 
 Describe 'check-nsi.ps1' {
 

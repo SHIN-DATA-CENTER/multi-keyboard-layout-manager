@@ -1,6 +1,8 @@
 # installer\find-marker.ps1 (design m5b A.10): an exact byte search, the same for the "absent"
 # check of release builds and the "present" positive control of development builds.
 # Pester 3.4 and 5: Describe / It and plain `throw` only.
+# CI runs these under GitHub's powershell wrapper: see the two rules at the top of
+# smoke-test.Tests.ps1 (design standard-layout D.4).
 
 Describe 'find-marker.ps1' {
 
@@ -37,6 +39,9 @@ Describe 'find-marker.ps1' {
         }
         finally {
             Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+            # The last call above fails on purpose (exit 1); CI's wrapper must not take that as
+            # the step's result (design standard-layout D.4, rule 1 in smoke-test.Tests.ps1).
+            $global:LASTEXITCODE = 0
         }
     }
 }

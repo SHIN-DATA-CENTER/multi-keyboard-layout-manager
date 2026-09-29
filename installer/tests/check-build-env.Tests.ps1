@@ -2,6 +2,8 @@
 # configuration files that could add --cfg mklm_update_dev to a release build.
 # Pester 3.4 and 5: Describe / It and plain `throw` only. Everything runs on scratch folders and
 # scratch hashtables; the process environment is never changed.
+# CI runs these under GitHub's powershell wrapper: see the two rules at the top of
+# smoke-test.Tests.ps1 (design standard-layout D.4).
 
 Describe 'check-build-env.ps1' {
 

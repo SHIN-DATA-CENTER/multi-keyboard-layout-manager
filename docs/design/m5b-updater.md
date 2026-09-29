@@ -999,6 +999,8 @@ SectionEnd
 5. 3 つの exe を書く `File` は、`/oname=…\<名前>.new` の形だけであること。`AllowSkipFiles on` は `.new` の展開の直前にだけ現れ、直後に `off` に戻ること。インストールのセクションに `/REBOOTOK` がないこと。
 6. **実行中の MKLM は `$INSTDIR` のパスでだけ見つける**: プロセスの名前で探す命令やプラグイン（`FindProcDLL`、`nsProcess`、`Processes::`、`KillProc`、`tasklist`、`taskkill`）がないこと（RELIABILITY-12）。
 
+ci.yml ではこの検査と `installer/tests` の Pester のテストを `installer/tests/Invoke-InstallerChecks.ps1` から動かす（明示の `exit`。GitHub の `powershell` の包みの `$ErrorActionPreference = 'stop'` と、後の `exit $LASTEXITCODE` のもとで、残った終了コードや子の標準エラーで段が落ちないため。規則は G.6 と standard-layout D.4）。`smoke-test.ps1` の拒否は関数 `Assert-OnThrowawayMachine` で、テストは子のプロセスを使わずに確かめる。
+
 **煙の試験**（`installer/smoke-test.ps1`。ランナーは `windows-2025` に固定する。`.onInit` と `--uninstall-restore` は build 26100 未満を拒否するので、`windows-latest` の中身が変わってもリリースが理由なく落ちないように。`windows-2025` が build 26100 であることは未確認。使い捨ての VM で、管理者として動く）
 
 1. **直前のリリースからの上書き**: 公開中の最新のリリースの x64 のインストーラーを `gh release download` で取り、`/S` → 0。`HKLM\SOFTWARE\SHIN DATA CENTER` を書き出しておく。新しいインストーラーを `/S` → 0。3 つの exe のビルド ID がそろって新しい版であること。`HKLM\SOFTWARE\SHIN DATA CENTER` が変わっていないこと。
@@ -1760,7 +1762,7 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 
 - F.3: `RUSTFLAGS=--cfg mklm_update_dev`、`CARGO_TARGET_DIR=target\dev-update` で `cargo test -p mklm-update --features winhttp --locked` と `cargo test -p mklm-win --features net --test net_proxy --locked`、続けて同じ設定で 3 つの exe をビルドし、目印が**ある**ことを確かめる（A.10 の陽性の対照。FIX-VERIFICATION-3）。
 - `cargo tree -p mklm-helper -e features --locked` の出力に `mklm-win feature "net"` と `mklm-update feature "winhttp"` がないこと。
-- `installer/check-nsi.ps1` と、その Pester のテスト（D.9.3、F.2）。
+- `installer/check-nsi.ps1` と、その Pester のテスト（D.9.3、F.2）。段の本体は `installer/tests/Invoke-InstallerChecks.ps1`（`shell: powershell` のまま、`run:` はこのファイルだけ）で、明示の `exit` で終わる（standard-layout D.4）。失敗の判定は `FailedCount`、`TotalCount` と、Pester 5 の `FailedContainersCount` と `FailedBlocksCount`（あるときだけ）。テストのファイルの 2 つの規則: (1) ネイティブのコマンドを動かすテストは `finally` で `$global:LASTEXITCODE = 0` に戻す。(2) 引き継いだ `'stop'` のもとでネイティブのコマンドの標準エラーを `2>&1` でつながない（その `It` の中で `$ErrorActionPreference = 'Continue'` にするか、子のプロセスを使わない）。
 
 **installer.yml（新規。WP-H）**
 

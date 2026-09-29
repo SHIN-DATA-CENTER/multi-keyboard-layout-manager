@@ -2,6 +2,8 @@
 # exes from (target\<triple>\release), whatever CARGO_TARGET_DIR the caller has (CLEAN-RUN-2).
 # A fake cargo records the target folder it was given and fails, so nothing is built or packed.
 # Pester 3.4 and 5: Describe / It and plain `throw` only.
+# CI runs these under GitHub's powershell wrapper: see the two rules at the top of
+# smoke-test.Tests.ps1 (design standard-layout D.4).
 
 Describe 'build-installer.ps1' {
 

@@ -75,11 +75,9 @@ jobs:
       # Design m5b D.9.3: the NSIS script's rules (silent installs never stop at a dialog, every
       # refusal has an exit code, the two-stage replacement, no process-name lookups), and the
       # Pester tests of the installer scripts (Windows PowerShell, whichever Pester it has: the
-      # tests use Describe / It / throw only, which Pester 3.4 and 5 share).
+      # tests use Describe / It / throw only, which Pester 3.4 and 5 share). The step body is a
+      # file that ends with an explicit exit code, so that a native command's leftover
+      # $LASTEXITCODE cannot decide the step under this wrapper (design standard-layout D.4).
       - name: NSIS script rules and the installer scripts' tests (design m5b D.9.3, F.2)
         shell: powershell
-        run: |
-          ./installer/check-nsi.ps1
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          $result = Invoke-Pester -Path installer/tests -PassThru
-          if ($result.FailedCount -gt 0 -or $result.TotalCount -eq 0) { exit 1 }
+        run: ./installer/tests/Invoke-InstallerChecks.ps1

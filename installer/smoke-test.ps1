@@ -190,11 +190,19 @@ function Get-VendorKeyExport {
     return [System.IO.File]::ReadAllText($file)
 }
 
-if ($MyInvocation.InvocationName -ne '.') {
-    $ErrorActionPreference = 'Stop'
-    if (-not $OnThrowawayMachine) {
+# The refusal that keeps the smoke test off machines people use. The body below calls it first, so
+# that installer\tests can check the refusal by dot-sourcing the script (which runs nothing) instead
+# of running it as a child process (design standard-layout D.4).
+function Assert-OnThrowawayMachine {
+    param([bool]$Confirmed)
+    if (-not $Confirmed) {
         throw 'This installs, upgrades and uninstalls MKLM. Run it on a throwaway machine (CI) only, with -OnThrowawayMachine.'
     }
+}
+
+if ($MyInvocation.InvocationName -ne '.') {
+    Assert-OnThrowawayMachine -Confirmed $OnThrowawayMachine.IsPresent
+    $ErrorActionPreference = 'Stop'
     $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw 'The smoke test runs as an administrator (a CI runner).'

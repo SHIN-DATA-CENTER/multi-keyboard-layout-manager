@@ -1,14 +1,49 @@
 # The read-only parts of installer\smoke-test.ps1. The smoke test itself installs MKLM and runs on
 # CI machines only (design m5b D.9.3); dot-sourcing it runs nothing but its definitions.
 # Pester 3.4 and 5: Describe / It and plain `throw` only.
+#
+# Two rules for every test file here (design standard-layout D.4), because CI runs Pester under
+# GitHub's `shell: powershell` wrapper ($ErrorActionPreference = 'stop' before the step, and
+# `exit $LASTEXITCODE` after it):
+# 1. A test that runs a native command resets `$global:LASTEXITCODE = 0` in a `finally`, so that
+#    a deliberate failure it provoked does not become the step's exit code.
+# 2. Never redirect a native command's stderr with `2>&1` under the inherited 'stop': Windows
+#    PowerShell 5.1 turns every stderr line into a terminating NativeCommandError. Set
+#    `$ErrorActionPreference = 'Continue'` inside that `It` first, or avoid the child process
+#    (as the refusal test below does).
 
 Describe 'smoke-test.ps1' {
 
     It 'refuses to run without -OnThrowawayMachine' {
-        $script = Join-Path $PSScriptRoot '..\smoke-test.ps1'
-        $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Installer 'C:\nowhere\MKLM-Setup-0.2.1-x64.exe' 2>&1 | Out-String
-        if ($LASTEXITCODE -eq 0) { throw "it ran: $output" }
-        if ($output -notmatch 'throwaway') { throw "unexpected refusal: $output" }
+        . (Join-Path $PSScriptRoot '..\smoke-test.ps1')
+        $refused = $null
+        try {
+            Assert-OnThrowawayMachine -Confirmed $false
+        }
+        catch {
+            $refused = $_.Exception.Message
+        }
+        if (-not $refused) { throw 'it did not refuse' }
+        if ($refused -notmatch 'throwaway') { throw "unexpected refusal: $refused" }
+        # Confirmed: no refusal.
+        Assert-OnThrowawayMachine -Confirmed $true
+    }
+
+    It 'refuses before anything else when run as a script' {
+        $path = Join-Path $PSScriptRoot '..\smoke-test.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path).Path, [ref]$tokens, [ref]$errors)
+        if ($errors.Count -ne 0) { throw "smoke-test.ps1 does not parse: $($errors[0])" }
+        $body = $ast.EndBlock.Statements | Where-Object {
+            $_ -is [System.Management.Automation.Language.IfStatementAst] -and
+            $_.Clauses[0].Item1.Extent.Text -eq '$MyInvocation.InvocationName -ne ''.'''
+        } | Select-Object -First 1
+        if (-not $body) { throw 'the script has no body guarded by the dot-source check' }
+        $first = $body.Clauses[0].Item2.Statements[0]
+        if ($first.Extent.Text -notmatch '^Assert-OnThrowawayMachine\b') {
+            throw "the body starts with: $($first.Extent.Text)"
+        }
     }
 
     It 'reads no build ID from files without one' {
