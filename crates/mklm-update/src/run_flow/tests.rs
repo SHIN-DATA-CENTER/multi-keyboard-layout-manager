@@ -149,6 +149,7 @@ struct Fake {
     installer_waits: VecDeque<Option<u32>>,
     fail_write_run: Option<RunPhase>,
     fail_last_result: bool,
+    fail_delete_run: bool,
     resume_fails: bool,
     relaunch: Result<(), String>,
     /// Every `LastResult` written, in order.
@@ -219,6 +220,7 @@ impl Fake {
             installer_waits: VecDeque::from([Some(0)]),
             fail_write_run: None,
             fail_last_result: false,
+            fail_delete_run: false,
             resume_fails: false,
             relaunch: Ok(()),
             results: Vec::new(),
@@ -304,6 +306,9 @@ impl RunnerEnv for Fake {
         Ok(())
     }
     fn delete_run(&mut self) -> Result<(), String> {
+        if self.fail_delete_run {
+            return Err("RegDeleteValueW failed with Win32 error 5".to_string());
+        }
         self.event("delete_run");
         self.run = None;
         Ok(())
@@ -984,7 +989,65 @@ fn a_last_result_that_cannot_be_written_keeps_the_run() {
     let left = fake.run.clone().expect("Run stays for the next start");
     assert_eq!(left.phase, RunPhase::Finishing);
     assert!(!fake.lock_held);
+    // A GUI started now would see this live runner in `Run` and quit at once (D.13 step 1):
+    // no relaunch; the RunOnce value, the Run key or the user start it later (MECHANICS-2).
+    assert!(!fake.has("relaunch"));
+    assert!(fake.has("cleanup"), "the clean-up still runs");
+}
+
+/// `Run` that cannot be deleted after `LastResult` was written: no relaunch into a GUI that would
+/// quit at once, and `LastResult` says so (D.7 steps 19 and 21; MECHANICS-2).
+#[test]
+fn a_run_that_cannot_be_deleted_gets_no_relaunch() {
+    // Installed.
+    let mut fake = Fake::signed(signer());
+    fake.fail_delete_run = true;
+    assert_eq!(run(&mut fake), EXIT_INSTALLED);
+    let left = fake.run.clone().expect("Run stays");
+    assert_eq!(left.phase, RunPhase::Finishing);
+    assert!(!fake.has("relaunch"));
+    assert!(!fake.lock_held);
+    assert_eq!(fake.results.len(), 2, "written, then corrected");
+    assert!(fake.results[0].gui_relaunch_attempted);
+    let last = fake.last_result.clone().unwrap();
+    assert_eq!(last.outcome, UpdateOutcome::Installed);
+    assert!(!last.gui_relaunch_attempted);
+    // The start gate of a GUI started while this runner lives: in progress, so it would quit.
+    let runner = left.runner.expect("the runner is recorded");
+    let alive = move |p: &ProcessIdentity| {
+        if *p == runner {
+            Liveness::Alive
+        } else {
+            Liveness::Dead
+        }
+    };
+    assert!(matches!(
+        classify_run(Some(&left), BOOT, &alive),
+        crate::run::RunView::InProgress { .. }
+    ));
+    // Once it is gone, the next start reports the run as interrupted.
+    assert!(matches!(
+        classify_run(Some(&left), BOOT, &|_| Liveness::Dead),
+        crate::run::RunView::Interrupted(_)
+    ));
+
+    // Not installed (a refusal after `ready`): the same.
+    let mut fake = Fake::signed(signer());
+    fake.fail_delete_run = true;
+    fake.lock_result = Err(UpdateRefusal::Busy);
+    assert_eq!(run(&mut fake), EXIT_NOT_INSTALLED);
+    assert!(matches!(fake.outcome(), UpdateOutcome::NotInstalled(_)));
+    assert!(fake.run.is_some());
+    assert!(!fake.has("relaunch"));
+    assert!(!fake.last_result.clone().unwrap().gui_relaunch_attempted);
+
+    // Deleted: relaunched, and recorded as attempted (the control).
+    let mut fake = Fake::signed(signer());
+    assert_eq!(run(&mut fake), EXIT_INSTALLED);
+    assert_eq!(fake.run, None);
     assert!(fake.has("relaunch"));
+    assert_eq!(fake.results.len(), 1);
+    assert!(fake.results[0].gui_relaunch_attempted);
 }
 
 #[test]

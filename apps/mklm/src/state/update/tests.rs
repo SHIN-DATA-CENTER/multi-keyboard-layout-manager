@@ -1096,8 +1096,10 @@ fn this_user_s_update_is_shown_once() {
     assert!(effects.contains(&Effect::ShowWindow));
     // The installer in the cache goes: the update to the running version is complete (D.11).
     assert!(effects.contains(&Effect::Update(UpdateTask::Prune { keep: None })));
-    assert!(!effects.contains(&Effect::AfterUpdateRunOnce(false)));
-    // Seen: the next start shows nothing and removes the RunOnce value (D.13 step 5).
+    // Shown and marked seen at once: the RunOnce value goes now, not at the next sign-in, where
+    // it would start MKLM next to the Run value's `--tray` (D.13 step 5; MECHANICS-1).
+    assert!(effects.contains(&Effect::AfterUpdateRunOnce(false)));
+    // Seen: the next start shows nothing, and removes the value too (D.13 step 5).
     let mut again = updated();
     again.settings = state.settings.clone();
     let effects = start(&mut again, machine, ClientState::default());
@@ -1112,6 +1114,109 @@ fn this_user_s_update_is_shown_once() {
         ClientState::default(),
     );
     assert!(!effects.contains(&Effect::AfterUpdateRunOnce(false)));
+}
+
+/// Whatever a start shows, the after-update RunOnce value goes at once (unelevated): the result
+/// is marked seen, so at the next sign-in the value would only start MKLM a second time next to
+/// the Run value's `--tray` (D.13 step 5, D.10; MECHANICS-1).
+#[test]
+fn a_start_that_shows_something_removes_the_after_update_value() {
+    let own = crate::settings::UpdateSettings {
+        started_run: Some(RUN.into()),
+        ..crate::settings::UpdateSettings::default()
+    };
+    let other = crate::settings::UpdateSettings {
+        closed_by_update: Some(NOW - 600),
+        ..crate::settings::UpdateSettings::default()
+    };
+    let busy = UpdateOutcome::NotInstalled(NotInstalledReason::InstanceBusy { sessions: vec![2] });
+    let interrupted = UpdateResult {
+        outcome: UpdateOutcome::Interrupted {
+            phase: RunPhase::Waiting,
+        },
+        installer_exit: None,
+        installed_version: Some("0.2.0".into()),
+        ..result(UpdateOutcome::Installed, NOW - 60)
+    };
+    let cases: Vec<(&str, AppState, crate::settings::UpdateSettings, MachineView)> = vec![
+        (
+            "this user's update, installed",
+            updated(),
+            own.clone(),
+            machine_with(
+                result(UpdateOutcome::Installed, NOW - 60),
+                Some(Version::new(0, 2, 1)),
+            ),
+        ),
+        (
+            "another user's update, installed, MKLM closed for it",
+            updated(),
+            other.clone(),
+            machine_with(
+                result(UpdateOutcome::Installed, NOW - 60),
+                Some(Version::new(0, 2, 1)),
+            ),
+        ),
+        (
+            "this user's update, not installed",
+            installed(),
+            own.clone(),
+            machine_with(result(busy, NOW - 60), Some(Version::new(0, 2, 0))),
+        ),
+        (
+            "this user's update, interrupted",
+            installed(),
+            own.clone(),
+            MachineView {
+                run: RunView::Interrupted(dummy_record()),
+                interrupted: Some(interrupted),
+                consistent: Some(Version::new(0, 2, 0)),
+                install_known: true,
+                ..MachineView::default()
+            },
+        ),
+        (
+            "the programs out of step, another user's update",
+            installed(),
+            other,
+            machine_with(
+                result(UpdateOutcome::Failed(FailedReason::Inconsistent), NOW - 60),
+                None,
+            ),
+        ),
+    ];
+    for (label, base, settings, machine) in cases {
+        let mut state = base.clone();
+        state.visible = false;
+        state.settings.update = settings.clone();
+        let effects = start(&mut state, machine.clone(), ClientState::default());
+        assert!(state.update.shown.is_some(), "{label}: shown");
+        assert!(
+            effects.contains(&Effect::ShowWindow),
+            "{label}: {effects:?}"
+        );
+        assert!(
+            effects.contains(&Effect::AfterUpdateRunOnce(false)),
+            "{label}: {effects:?}"
+        );
+        assert!(
+            !effects.contains(&Effect::AfterUpdateRunOnce(true)),
+            "{label}: {effects:?}"
+        );
+        // An elevated GUI shows the same and leaves the value alone (it may be another
+        // administrator's HKCU; m3 F.2).
+        let mut elevated = base;
+        elevated.elevated = true;
+        elevated.settings.update = settings;
+        let effects = start(&mut elevated, machine, ClientState::default());
+        assert!(elevated.update.shown.is_some(), "{label}: shown elevated");
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::AfterUpdateRunOnce(_))),
+            "{label}: {effects:?}"
+        );
+    }
 }
 
 #[test]

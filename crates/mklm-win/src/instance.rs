@@ -13,8 +13,9 @@
 //!   with `FILE_FLAG_FIRST_PIPE_INSTANCE`, `PIPE_REJECT_REMOTE_CLIENTS` and the plan's DACL
 //!   ([`instance_pipe_sddl`]). When creating it fails with `ERROR_ACCESS_DENIED` or
 //!   `ERROR_PIPE_BUSY` (the name is taken), the instance logs it and keeps running without the
-//!   pipe. It accepts exactly three commands, one per connection: `activate`, `quit` and (M5b,
-//!   the updater's only command) `quit-if-idle` ([`InstanceCommand`]), each within
+//!   pipe. It accepts exactly four commands, one per connection: `activate`, `quit`, (M5b, the
+//!   updater's only command) `quit-if-idle` and (M5b, a second start that shows no window)
+//!   `ping` ([`InstanceCommand`]), each within
 //!   [`INSTANCE_READ_TIMEOUT`] (a client that connects and stays silent is disconnected), and
 //!   answers `ok` or `busy`.
 //! - A second process connects (`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`) and verifies
@@ -22,7 +23,8 @@
 //!   session (`GetNamedPipeServerSessionId`), the user SID of the server process's token
 //!   (`GetNamedPipeServerProcessId` → `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` →
 //!   `OpenProcessToken`) and its image (`QueryFullProcessImageNameW`) must all be this process's.
-//!   Only then does it call `AllowSetForegroundWindow` for that PID and send its command. On a
+//!   Only then does it call `AllowSetForegroundWindow` for that PID (not for `ping`) and send its
+//!   command. On a
 //!   mismatch it sends nothing and runs as the instance itself. The M5b elevated sender (the
 //!   update runner, [`quit_idle_instances`]) computes each GUI's pipe name from the running GUI
 //!   processes instead of enumerating pipes, checks the server likewise, and sends
@@ -107,6 +109,11 @@ pub enum InstanceCommand {
     /// change nothing (design m5b D.8, E.4.1; RELIABILITY-1, OPS-UX-TEST-4). The updater's only
     /// command.
     QuitIfIdle,
+    /// `ping\n`: answer `ok` and change nothing — a second start that shows no window
+    /// (`--tray`, `--after-update`) only makes sure the instance runs (design m5b D.13 step 5;
+    /// MECHANICS-1). The running instance shows what its own start found; an `activate` from
+    /// the other of the two sign-in starts (Run and RunOnce) would open the window for nothing.
+    Ping,
 }
 
 impl InstanceCommand {
@@ -116,17 +123,25 @@ impl InstanceCommand {
             InstanceCommand::Activate => b"activate\n",
             InstanceCommand::Quit => b"quit\n",
             InstanceCommand::QuitIfIdle => b"quit-if-idle\n",
+            InstanceCommand::Ping => b"ping\n",
         }
     }
 
-    /// Parses one received message; anything but the three exact commands is `None`.
+    /// Parses one received message; anything but the four exact commands is `None`.
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         match bytes {
             b"activate\n" => Some(InstanceCommand::Activate),
             b"quit\n" => Some(InstanceCommand::Quit),
             b"quit-if-idle\n" => Some(InstanceCommand::QuitIfIdle),
+            b"ping\n" => Some(InstanceCommand::Ping),
             _ => None,
         }
+    }
+
+    /// Whether the instance may need the foreground for this command (the sender then calls
+    /// `AllowSetForegroundWindow` for it): not for `ping`, which changes nothing.
+    pub fn may_take_foreground(self) -> bool {
+        self != InstanceCommand::Ping
     }
 }
 
@@ -571,7 +586,8 @@ impl InstanceServer {
 /// user SID of the server process's token, `QueryFullProcessImageNameW`) and fails with
 /// [`Error::Insecure`] when it cannot be read or is not [`is_our_instance`]: nothing is sent then
 /// and the caller runs as the instance. Only for our own instance does it call
-/// `AllowSetForegroundWindow`, so that the instance may bring its window to the front.
+/// `AllowSetForegroundWindow` (and not for [`InstanceCommand::Ping`]), so that the instance may
+/// bring its window to the front.
 /// [`Error::Timeout`] when no pipe could be reached or no reply came in time.
 pub fn send_to_instance(
     command: InstanceCommand,
@@ -606,9 +622,11 @@ fn send_at(
         });
     }
     // Lets the instance take the foreground; when this fails the instance can only flash its
-    // taskbar button, which is no reason not to send.
-    // SAFETY: plain Win32 call with a process ID.
-    let _ = unsafe { AllowSetForegroundWindow(connection.peer_pid()) };
+    // taskbar button, which is no reason not to send. A `ping` shows nothing and gets no right.
+    if command.may_take_foreground() {
+        // SAFETY: plain Win32 call with a process ID.
+        let _ = unsafe { AllowSetForegroundWindow(connection.peer_pid()) };
+    }
     connection.set_write_timeout(Some(timeout));
     connection
         .write_all(command.wire())
@@ -862,16 +880,20 @@ mod tests {
                 .and_then(|connection| server_identity(&connection));
             let first = send_at(&client_path, InstanceCommand::Activate, timeout, &ours);
             let second = send_at(&client_path, InstanceCommand::Quit, timeout, &ours);
-            (identity, first, second)
+            let third = send_at(&client_path, InstanceCommand::Ping, timeout, &ours);
+            (identity, first, second, third)
         });
         assert_eq!(server.next_command(), Ok(InstanceCommand::Activate));
         assert_eq!(server.reply(InstanceReply::Ok), Ok(()));
         assert_eq!(server.next_command(), Ok(InstanceCommand::Quit));
         assert_eq!(server.reply(InstanceReply::Busy), Ok(()));
-        let (identity, first, second) = client.join().expect("client thread");
+        assert_eq!(server.next_command(), Ok(InstanceCommand::Ping));
+        assert_eq!(server.reply(InstanceReply::Ok), Ok(()));
+        let (identity, first, second, third) = client.join().expect("client thread");
         assert_eq!(identity, own_identity());
         assert_eq!(first, Ok(InstanceReply::Ok));
         assert_eq!(second, Ok(InstanceReply::Busy));
+        assert_eq!(third, Ok(InstanceReply::Ok));
         // Nothing is left to answer.
         assert!(server.reply(InstanceReply::Ok).is_err());
     }
@@ -984,11 +1006,12 @@ mod tests {
     }
 
     #[test]
-    fn only_the_three_commands_are_accepted() {
+    fn only_the_four_commands_are_accepted() {
         for command in [
             InstanceCommand::Activate,
             InstanceCommand::Quit,
             InstanceCommand::QuitIfIdle,
+            InstanceCommand::Ping,
         ] {
             assert_eq!(InstanceCommand::parse(command.wire()), Some(command));
             assert!(command.wire().len() <= MAX_INSTANCE_MESSAGE);
@@ -996,6 +1019,10 @@ mod tests {
         // The updater's command (design m5b D.8): 13 bytes.
         assert_eq!(InstanceCommand::QuitIfIdle.wire(), b"quit-if-idle\n");
         assert_eq!(InstanceCommand::QuitIfIdle.wire().len(), 13);
+        // A second start without a window (design m5b D.13 step 5): no foreground right.
+        assert_eq!(InstanceCommand::Ping.wire(), b"ping\n");
+        assert!(!InstanceCommand::Ping.may_take_foreground());
+        assert!(InstanceCommand::Activate.may_take_foreground());
         for bad in [
             &b"activate"[..],
             b"ACTIVATE\n",
@@ -1008,6 +1035,10 @@ mod tests {
             b"quit_if_idle\n",
             b"quit-if-idle \n",
             b"quit-if-idle\r\n",
+            b"ping",
+            b"PING\n",
+            b"ping\r\n",
+            b"ping\nactivate\n",
         ] {
             assert_eq!(InstanceCommand::parse(bad), None, "{bad:?}");
         }

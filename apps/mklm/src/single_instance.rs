@@ -1,8 +1,9 @@
 //! One GUI per session (plan 2.2, 3.9; design m3 F.1), on top of `mklm_win::instance`.
 //!
 //! Start-up ([`claim`]):
-//! 1. `acquire_instance()`. `Secondary`: `send_to_instance(Activate, 5 s)` (or `Quit` for
-//!    `--quit`) and exit 0. When the pipe's server is not our own instance (another user or
+//! 1. `acquire_instance()`. `Secondary`: `send_to_instance(command_for(start), 5 s)` — `Activate`,
+//!    `Quit` for `--quit`, `Ping` for `--tray` and `--after-update` — and exit 0. When the pipe's
+//!    server is not our own instance (another user or
 //!    program squatted the name, `Error::Insecure`), or the pipe never answers, log it and run as
 //!    the instance instead — except for `--quit`, which never opens a window.
 //! 2. `Primary`: a mutex name taken by another account is logged and MKLM runs on. `--quit` with
@@ -13,8 +14,9 @@
 //!    `AppMsg::QuitRequested`, reply `Busy` while the quit waits for a running session, else `Ok`;
 //!    `QuitIfIdle` (the update runner's only command, design m5b E.4.1) →
 //!    `state::quit_if_idle`, which quits only when nothing is going on and otherwise changes
-//!    nothing (`Busy`). The handler gets the time the command arrived: one that reaches the UI
-//!    thread after [`UI_REPLY_WAIT`] is ignored, since nobody waits for its reply any more.
+//!    nothing (`Busy`); `Ping` → `Ok` and nothing else (design m5b D.13 step 5). The handler gets
+//!    the time the command arrived: one that reaches the UI thread after [`UI_REPLY_WAIT`] is
+//!    ignored, since nobody waits for its reply any more.
 //!
 //! `--post-reboot` needs nothing of its own here: the running instance reads the journal and
 //! shows the post-reboot check (or the recovery) when the next `SystemRead` says it is due
@@ -53,11 +55,17 @@ pub const UI_REPLY_WAIT: Duration = Duration::from_secs(4);
 /// Consecutive pipe failures after which the instance stops serving the pipe (logged).
 const MAX_PIPE_FAILURES: u32 = 10;
 
-/// What a second process does with its command line.
+/// What a second process does with its command line. `--tray` (the Run value) and
+/// `--after-update` (the update runner, the after-update RunOnce value) only make sure MKLM runs
+/// (`ping`): at sign-in the two start together, and the running instance already shows what its
+/// own start found (a result, a check, the wizard). An `activate` from the other one would open
+/// the window with nothing to show (design m5b D.13 step 5, E.5; MECHANICS-1).
+/// `--post-reboot` and a plain start still activate (design m3 F.1, F.2).
 pub fn command_for(start: StartMode) -> InstanceCommand {
     match start {
         StartMode::Quit => InstanceCommand::Quit,
-        _ => InstanceCommand::Activate,
+        StartMode::Tray | StartMode::AfterUpdate => InstanceCommand::Ping,
+        StartMode::Window | StartMode::PostReboot => InstanceCommand::Activate,
     }
 }
 
@@ -265,18 +273,21 @@ mod tests {
         assert_eq!(command_for(StartMode::Quit), InstanceCommand::Quit);
         // The UI thread ignores a `quit-if-idle` older than this (design m5b E.4.1).
         assert_eq!(UI_REPLY_WAIT, crate::state::update::QUIT_IF_IDLE_WAIT);
-        for start in [
-            StartMode::Window,
-            StartMode::Tray,
-            StartMode::PostReboot,
-            StartMode::AfterUpdate,
-        ] {
+        for start in [StartMode::Window, StartMode::PostReboot] {
             assert_eq!(command_for(start), InstanceCommand::Activate);
+        }
+        // The Run value's `--tray` and the after-update value start together at sign-in: the
+        // second one only makes sure MKLM runs, and opens no window (design m5b D.13 step 5;
+        // MECHANICS-1).
+        for start in [StartMode::Tray, StartMode::AfterUpdate] {
+            assert_eq!(command_for(start), InstanceCommand::Ping);
         }
         assert_eq!(
             reply_for(InstanceCommand::Activate, true),
             InstanceReply::Ok
         );
+        assert_eq!(reply_for(InstanceCommand::Ping, true), InstanceReply::Ok);
+        assert_eq!(reply_for(InstanceCommand::Ping, false), InstanceReply::Ok);
         assert_eq!(reply_for(InstanceCommand::Quit, false), InstanceReply::Ok);
         assert_eq!(reply_for(InstanceCommand::Quit, true), InstanceReply::Busy);
     }

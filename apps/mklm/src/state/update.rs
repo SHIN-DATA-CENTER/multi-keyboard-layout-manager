@@ -794,9 +794,12 @@ fn started(state: &mut AppState, start: UpdateStart) -> Vec<Effect> {
         }
         state.visible = true;
         effects.push(Effect::ShowWindow);
-    } else if !state.elevated {
-        // Nothing left to show: the after-update value has nothing to do at the next sign-in
-        // (design m5b D.13 step 5).
+    }
+    if !state.elevated {
+        // Nothing is left unshown: a result shown now is already in `result_seen` (and the
+        // installation out of step is shown by every start anyway). The after-update value has
+        // nothing to do at the next sign-in, where it would only start MKLM a second time next to
+        // the Run value's `--tray` (design m5b D.13 step 5, D.10; OPS-UX-TEST-15).
         effects.push(Effect::AfterUpdateRunOnce(false));
     }
     // The cache keeps the installer until an update to the running version is complete and the

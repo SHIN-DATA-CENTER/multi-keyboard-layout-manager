@@ -32,6 +32,39 @@ Describe 'smoke-test.ps1' {
         }
     }
 
+    It 'tells a replaced file from a kept one only against another release (MECHANICS-3)' {
+        . (Join-Path $PSScriptRoot '..\smoke-test.ps1')
+        $previous = @('0.1.0+aaaa', '0.1.0+aaaa', '0.1.0+aaaa')
+        $new = @('0.2.1+bbbb', '0.2.1+bbbb', '0.2.1+bbbb')
+        if (-not (Test-InStep $previous)) { throw 'the previous release is in step' }
+        if (Test-InStep @('0.1.0+aaaa', $null, '0.1.0+aaaa')) { throw 'a missing ID is not in step' }
+        if (Test-InStep @('0.1.0+aaaa', '0.1.0+aaaa')) { throw 'two IDs are not in step' }
+        if (Test-InStep $null) { throw 'nothing is not in step' }
+        if (-not (Test-DistinctRelease -Previous $previous -New $new)) { throw 'two releases differ' }
+        if (Test-DistinctRelease -Previous $new -New $new) { throw 'the same build cannot tell anything apart' }
+        # Refused, nothing replaced.
+        if (-not (Test-NothingReplaced -Ids $previous -Kept $previous)) { throw 'kept' }
+        # A rollback that deleted the .old copies instead of renaming them back leaves the new
+        # helper and CLI next to the previous GUI (the swap order is helper, CLI, GUI).
+        $mixed = @('0.1.0+aaaa', '0.2.1+bbbb', '0.2.1+bbbb')
+        if (Test-NothingReplaced -Ids $mixed -Kept $previous) { throw 'a half-replaced install passed' }
+        # Everything replaced, or one file missing.
+        if (Test-NothingReplaced -Ids $new -Kept $previous) { throw 'a replaced install passed' }
+        if (Test-NothingReplaced -Ids @('0.1.0+aaaa', $null, '0.1.0+aaaa') -Kept $previous) { throw 'a missing file passed' }
+    }
+
+    It 'runs the held-file steps as upgrades from the previous release (MECHANICS-3)' {
+        $text = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\smoke-test.ps1'))
+        $restore = $text.IndexOf('$code = Invoke-Setup -Path $PreviousInstaller')
+        $step3 = $text.IndexOf('# 3. mklm-cli.exe held')
+        if ($restore -lt 0 -or $step3 -lt 0 -or $restore -gt $step3) { throw 'the previous release does not go back before step 3' }
+        $checks = [regex]::Matches($text, [regex]::Escape('Test-NothingReplaced -Ids $ids -Kept $previous')).Count
+        if ($checks -ne 3) { throw "steps 3-5 compare with the previous release $checks time(s), not 3" }
+        $step6 = $text.IndexOf('# 6. The ARM64 installer')
+        $upgrade = $text.LastIndexOf('$code = Invoke-Setup -Path $Installer', $step6)
+        if ($upgrade -lt $text.IndexOf('# 5. mklm.exe shared')) { throw 'the new build is not installed again before step 7' }
+    }
+
     It 'gives the installer the update runner''s environment only' {
         . (Join-Path $PSScriptRoot '..\smoke-test.ps1')
         $environment = Get-RunnerEnvironment -TempDir 'C:\run\tmp'

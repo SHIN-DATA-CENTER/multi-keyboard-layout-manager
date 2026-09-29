@@ -14,12 +14,17 @@
      unchanged (a silent upgrade writes nothing there and runs no restore, D.9.5).
   2. The new installer again /S -> 0, with the update runner's minimal environment block only
      (ProcessStartInfo with an emptied environment; D.9.4, I.15).
+  Before 3-5 the previous release goes back (/S -> 0), so that 3-5 are real upgrade attempts:
+  "nothing replaced" means the three build IDs are still the previous release's (all there and
+  the same). Re-running the build that is already installed could not tell a replaced file from a
+  kept one (design m5b M.5, MECHANICS-3: a rollback that deleted the .old copies would pass).
   3. mklm-cli.exe held open without sharing -> 23 (MKLM_EXIT_CLI_RUNNING); nothing replaced.
   4. mklm.exe held open for reading, shared for reading and writing but not deleting -> 26
      (MKLM_EXIT_FILES_IN_USE: the rename fails, the swap is rolled back); nothing replaced and no
      .new / .old left.
   5. mklm.exe held open shared for reading only -> 24 (MKLM_EXIT_GUI_RUNNING: the installer's
-     running check cannot open it).
+     running check cannot open it); nothing replaced.
+  Then the new installer /S -> 0 again: the upgrade goes through after the refused attempts.
   6. The ARM64 installer /S -> 21 (MKLM_EXIT_WRONG_ARCH) on this x64 machine (-Arm64Installer).
   7. uninstall.exe /S _?=<INSTDIR> -> 0; the executables are gone (the folder is removed here).
 
@@ -103,6 +108,33 @@ function Get-MklmBuildId {
 function Get-InstalledBuildIds {
     param([Parameter(Mandatory)] [string]$InstallDir)
     return @($script:Executables | ForEach-Object { Get-MklmBuildId -Path (Join-Path $InstallDir $_) })
+}
+
+# True when the three build IDs are all there and the same: one release in step.
+function Test-InStep {
+    param([object[]]$Ids)
+    if ($null -eq $Ids -or $Ids.Count -ne 3) { return $false }
+    foreach ($id in $Ids) {
+        if ([string]::IsNullOrEmpty([string]$id) -or [string]$id -ne [string]$Ids[0]) { return $false }
+    }
+    return $true
+}
+
+# True when a refused upgrade replaced nothing (design m5b D.9.3): the three installed build IDs
+# are in step and exactly the ones installed before the attempt (`Kept`). Meaningful only when
+# `Kept` is not the attempted build's (Test-DistinctRelease).
+function Test-NothingReplaced {
+    param([object[]]$Ids, [object[]]$Kept)
+    if (-not (Test-InStep $Ids) -or -not (Test-InStep $Kept)) { return $false }
+    return [string]$Ids[0] -eq [string]$Kept[0]
+}
+
+# True when `Previous` is a release in step whose build differs from `New` (in step too), so that
+# a replaced file shows as a changed build ID.
+function Test-DistinctRelease {
+    param([object[]]$Previous, [object[]]$New)
+    if (-not (Test-InStep $Previous) -or -not (Test-InStep $New)) { return $false }
+    return [string]$Previous[0] -ne [string]$New[0]
 }
 
 # The environment the update runner gives the installer (mklm_win::elevation::runner_environment,
@@ -194,10 +226,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         Test-Step "${Name}: the three build IDs are the new version's" ($same -and $ids[0].StartsWith("$version+")) ($ids -join ', ')
         return $ids
     }
-    function Test-SameIds {
-        param([object[]]$A, [object[]]$B)
-        return ($A -join '|') -eq ($B -join '|')
-    }
 
     # 1. Upgrade from the latest published release.
     if (-not $PreviousInstaller) {
@@ -222,20 +250,33 @@ if ($MyInvocation.InvocationName -ne '.') {
     Test-Step '2: the installer runs with the minimal environment' ($code -eq 0) "exit $code"
     $installed = Test-NewVersionInstalled '2'
 
+    # 3-5 are real upgrade attempts from the previous release: a replaced file then shows as the
+    # new build ID instead of the previous one (D.9.3 "3 つのビルド ID が変わっていないこと").
+    $code = Invoke-Setup -Path $PreviousInstaller
+    Test-Step '3-5: the previous release goes back for the held-file runs' ($code -eq 0) "exit $code"
+    $previous = Get-InstalledBuildIds -InstallDir $installDir
+    Test-Step '3-5: the previous release is installed and in step' (Test-InStep $previous) ($previous -join ', ')
+    if (-not (Test-DistinctRelease -Previous $previous -New $installed)) {
+        # Same version and same hashed sources (installer.yml before the version is bumped): the
+        # IDs cannot tell the two builds apart; the exit codes and the leftovers are still checked.
+        Write-Host "WARN 3-5: the previous release has the new build's IDs ($($previous -join ', ')); 'nothing was replaced' cannot see a replaced file"
+    }
+
     # 3. mklm-cli.exe held without sharing: the running check refuses (23).
     $held = [System.IO.File]::Open((Join-Path $installDir 'mklm-cli.exe'), 'Open', 'Read', 'None')
     try { $code = Invoke-Setup -Path $Installer } finally { $held.Dispose() }
     Test-Step '3: a held mklm-cli.exe is refused with 23' ($code -eq 23) "exit $code"
     $ids = Get-InstalledBuildIds -InstallDir $installDir
-    Test-Step '3: nothing was replaced' (Test-SameIds $ids $installed) ($ids -join ', ')
+    Test-Step '3: nothing was replaced' (Test-NothingReplaced -Ids $ids -Kept $previous) ($ids -join ', ')
 
     # 4. mklm.exe held for reading, shared for reading and writing but not deleting: the running
-    #    check passes, the rename fails, the swap is rolled back (26).
+    #    check passes, the rename fails, the swap is rolled back (26): the helper and the CLI, swapped
+    #    already, must be the previous release's again.
     $held = [System.IO.File]::Open((Join-Path $installDir 'mklm.exe'), 'Open', 'Read', 'ReadWrite')
     try { $code = Invoke-Setup -Path $Installer } finally { $held.Dispose() }
     Test-Step '4: a mklm.exe held without delete sharing is refused with 26' ($code -eq 26) "exit $code"
     $ids = Get-InstalledBuildIds -InstallDir $installDir
-    Test-Step '4: nothing was replaced' (Test-SameIds $ids $installed) ($ids -join ', ')
+    Test-Step '4: nothing was replaced' (Test-NothingReplaced -Ids $ids -Kept $previous) ($ids -join ', ')
     $leftovers = @(Get-ChildItem $installDir -File | Where-Object { $_.Name -match '\.(new|old)$' })
     Test-Step '4: no .new or .old is left' ($leftovers.Count -eq 0) (($leftovers | ForEach-Object Name) -join ', ')
 
@@ -243,6 +284,13 @@ if ($MyInvocation.InvocationName -ne '.') {
     $held = [System.IO.File]::Open((Join-Path $installDir 'mklm.exe'), 'Open', 'Read', 'Read')
     try { $code = Invoke-Setup -Path $Installer } finally { $held.Dispose() }
     Test-Step '5: a mklm.exe shared for reading only is refused with 24' ($code -eq 24) "exit $code"
+    $ids = Get-InstalledBuildIds -InstallDir $installDir
+    Test-Step '5: nothing was replaced' (Test-NothingReplaced -Ids $ids -Kept $previous) ($ids -join ', ')
+
+    # The upgrade goes through once nothing holds the files (and step 7 removes the new build).
+    $code = Invoke-Setup -Path $Installer
+    Test-Step '5: the new installer upgrades after the refused attempts' ($code -eq 0) "exit $code"
+    $installed = Test-NewVersionInstalled '5'
 
     # 6. The ARM64 installer on x64 (21).
     if ($Arm64Installer) {

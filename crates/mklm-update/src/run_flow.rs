@@ -512,6 +512,14 @@ impl Run<'_> {
     /// Steps 19–22: `LastResult`, `Run` deleted, the lock released, the clean-up, and the GUI
     /// relaunch last. When `LastResult` cannot be written, `Run` stays: the next start then
     /// reports the run as interrupted instead of reporting nothing.
+    ///
+    /// The GUI is relaunched only when `Run` is gone (MECHANICS-2). While `Run` still names this
+    /// runner, alive until it exits a moment later, a GUI started in the caller's session sees an
+    /// update in progress and quits at once without a window (D.13 step 1): the relaunch would
+    /// leave the user with no MKLM at all. Without it the user opens MKLM (the hand-off told them
+    /// to after 2 minutes, E.4), or the caller's RunOnce value and the Run key start it at the
+    /// next sign-in; by then this runner is gone and the start reports the run as interrupted.
+    /// `LastResult`, when it was written, is corrected to `gui_relaunch_attempted = false`.
     fn conclude(
         &mut self,
         outcome: UpdateOutcome,
@@ -520,21 +528,39 @@ impl Run<'_> {
         relaunch: bool,
     ) -> u32 {
         let installed = outcome == UpdateOutcome::Installed;
-        let result = self.result(outcome, installer_exit, after, relaunch);
-        match self.env.write_last_result(&result) {
-            Ok(()) => {
-                if let Err(detail) = self.env.delete_run() {
+        let mut result = self.result(outcome, installer_exit, after, relaunch);
+        let (written, run_deleted) = match self.env.write_last_result(&result) {
+            Ok(()) => match self.env.delete_run() {
+                Ok(()) => (true, true),
+                Err(detail) => {
                     self.env.log(&format!("Run cannot be deleted: {detail}"));
+                    (true, false)
                 }
+            },
+            Err(detail) => {
+                self.env.log(&format!(
+                    "LastResult cannot be written ({detail}); Run stays for the next start"
+                ));
+                (false, false)
             }
-            Err(detail) => self.env.log(&format!(
-                "LastResult cannot be written ({detail}); Run stays for the next start"
-            )),
+        };
+        let skipped = relaunch && !run_deleted;
+        if skipped && written {
+            result.gui_relaunch_attempted = false;
+            if let Err(detail) = self.env.write_last_result(&result) {
+                self.env
+                    .log(&format!("LastResult cannot be corrected: {detail}"));
+            }
         }
         self.release_lock();
         self.env.cleanup_own_run_dir();
         self.env.sweep_other_run_dirs();
-        if relaunch && let Err(detail) = self.env.relaunch_gui() {
+        if skipped {
+            self.env.log(
+                "the GUI is not relaunched: Run is still there, so it would quit at once; \
+                 the RunOnce value and the Run key start it later",
+            );
+        } else if relaunch && let Err(detail) = self.env.relaunch_gui() {
             self.env
                 .log(&format!("the GUI could not be relaunched: {detail}"));
         }

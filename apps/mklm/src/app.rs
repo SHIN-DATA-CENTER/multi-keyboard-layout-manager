@@ -112,11 +112,14 @@ fn not_launched(session: SessionId, message: String) -> AppMsg {
 /// `busy` while the quit has to wait for a connected helper session (design m3 F.5, m5b E.4.1).
 /// The update runner's `quit-if-idle` quits only when nothing is going on, and otherwise changes
 /// nothing (`state::quit_if_idle`, design m5b E.4.1); `received` is when the pipe thread got it.
+/// `ping` (a second `--tray` or `--after-update` start) changes nothing: this instance already
+/// shows what its own start found (design m5b D.13 step 5).
 fn instance_command(command: InstanceCommand, received: Instant) -> InstanceReply {
     let message = match command {
         InstanceCommand::Activate => AppMsg::Activate,
         InstanceCommand::Quit => AppMsg::QuitRequested,
         InstanceCommand::QuitIfIdle => return quit_if_idle(received),
+        InstanceCommand::Ping => return single_instance::reply_for(command, false),
     };
     let quit_waits = current_app().is_some_and(|app| {
         app.state

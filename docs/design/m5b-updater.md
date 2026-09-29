@@ -5,7 +5,7 @@
 | 対象 | マイルストーン M5 の後半（M5b）: アップデーターとリリースの署名（計画 4.2〜4.4、6 章の M5） |
 | 根拠 | 承認済みプラン 2.1〜2.2、4.2〜4.4、5 章（4.x は MSI 向けに書かれている。インストーラーは 2026-09-28 のユーザーの決定で NSIS）。M2 設計（`docs/design/m2-engine.md`）の D.9、E、G.1、I.18。M3 設計（`docs/design/m3-gui.md`）の A.4、B.5、B.17、D、E、F。M5a の実機テスト（`docs/research/m5-install-tests.md`）。main の 37989f8 のコード |
 | ユーザーの決定（M5b の依頼） | 完全な自動更新（ダウンロード、署名の検証、サイレント インストール）。minisign で署名した `latest.json`。**秘密鍵はメンテナーがオフラインで保管し、GitHub の secrets には置かない**。公開鍵を 2 本（通常用とバックアップ用）埋め込み、鍵 ID、失効（`revoked_keys`）、`issued_at`（巻き戻しの防止）、`expires`（凍結の検知）を持つ。確認とダウンロードは自動、インストールは利用者がボタンを押したときだけ。UAC の事前説明あり（未署名のため）。当面バイナリは署名しない。インストーラーは NSIS 3.12（WiX は使わない）。「まず使えるもの」を優先するが、更新の経路は安全に直結するので、検証の正しさは譲らない |
-| 状態 | 設計。**レビュー第 1 回（47 件）と第 2 回（20 件: 第 1 回の対応の検証 17 件、新しい攻撃の検討 3 件）を反映した版**（対応は M 章の 2 つの表）。**2026-09-29 のユーザーの決定（J 章の J-1〜J-9）を反映した**（有効期限の既定 180 日、署名は普段のアカウント、など）。実装（WP-0、WP-U、WP-H、WP-C）は `m5b/updater` に統合済み（実装での変更点は K 章の 20 以降）。**実装のセキュリティ レビュー（3 件。M.3）と設計適合のレビュー（6 件。M.4）を反映した** |
+| 状態 | 設計。**レビュー第 1 回（47 件）と第 2 回（20 件: 第 1 回の対応の検証 17 件、新しい攻撃の検討 3 件）を反映した版**（対応は M 章の 2 つの表）。**2026-09-29 のユーザーの決定（J 章の J-1〜J-9）を反映した**（有効期限の既定 180 日、署名は普段のアカウント、など）。実装（WP-0、WP-U、WP-H、WP-C）は `m5b/updater` に統合済み（実装での変更点は K 章の 20 以降）。**実装のセキュリティ レビュー（3 件。M.3）、設計適合のレビュー（6 件。M.4）、Windows の仕組みと信頼性のレビュー（3 件。M.5）を反映した** |
 | 読み手 | M5b を分担して実装する人（G 章、H 章）とレビューする人。指摘に使えるよう、すべての節に番号を付けた |
 
 識別子、コード、コマンドは英語のまま書く。「計画」は承認済みプラン、「m2 D.9」「m3 F.5」は M2 / M3 設計の節を指す。H1 と H2 は D 章で定義する helper の 2 つのプロセスを指す。「未確認」と書いたものは L 章にまとめた。レビューの指摘は「（SECURITY-1）」のように ID で引く（実装のレビューの指摘は、M.1 の ID と区別して「M.3 の SECURITY-1」と書く）。
@@ -859,9 +859,9 @@ mklm-update-runner.exe --run-update <run-id>
     - 期限を過ぎたら: `LastResult = Failed(InstallerTimedOut)` を書く（`Run` は `installing` のまま残す。**インストーラーは止めない**。ファイルの置き換えの途中で止めると、必ず半端になるため）。さらに最大 `INSTALLER_WAIT_MAX`（合わせて 60 分）待ち続ける。その間に終われば手順 18 へ進み、`LastResult` を本当の結果で書き直す。
     - 60 分でも終わらなければ: 止める理由を消し、ロックを放し、`Run`（`installing`、`installer` 付き）を残したまま `exit 7`。GUI は起動し直さない（インストーラーがまだ `mklm.exe` を置き換えているかもしれないため）。`installer` が生きている間は、誰が見ても `InProgress`。死んだ後に見た人が、ビルド ID で結果を決める（`interrupted_result`。D.13）。
 18. 止める理由を消す（`ShutdownBlockReasonDestroy`）。`Run.phase = finishing`。インストール先の 3 つの exe のビルド ID を読み（`InstallState::from_build_ids(update_dir::read_build_ids(install_dir))`。環境のトレイトでは `RunnerEnv::read_install_state`）、`run::decide_outcome` で結果を決める（D.13）。
-19. `LastResult` を書き（`gui_relaunch_attempted` は、次の手順で起動を試みるなら true）、`Run` を消し、ロックを放す。
+19. `LastResult` を書き（`gui_relaunch_attempted` は、次の手順で起動を試みるなら true）、`Run` を消し、ロックを放す。`Run` が残った（`LastResult` を書けなかった、または `Run` を消せなかった）ときは 21 の起動をせず、書けていた `LastResult` を `gui_relaunch_attempted = false` で書き直す（試みるだけ。失敗はログ）。
 20. 後片付け（D.11）: 自分の実行のフォルダーのインストーラー、2 つの更新情報、`tmp` を消す。
-21. **最後に** GUI を起動し直す（D.10。17 の 60 分の期限切れを除く）。
+21. **最後に** GUI を起動し直す（D.10。17 の 60 分の期限切れと、19 で `Run` が残ったときを除く）。`Run` がこの H2（まだ生きている）を指したままだと、起動した GUI は D.13 の 1 で「更新の途中」と見て窓を出さずにすぐ終わり、利用者の手元に MKLM がなくなるため（M.5 の MECHANICS-2）。その場合は、GUI が引き継ぎで伝えた「2 分たっても開かない場合は、スタート メニューから」と、呼び出し元の RunOnce、Run キーに任せる。そのときには H2 は終わっているので、起動した GUI は `Run` を中断として報告する（D.13）。
 22. 結果が `Installed` なら `exit 0`、それ以外は `exit 7`。
 
 **サインアウトとシャットダウン**（RELIABILITY-3）
@@ -998,9 +998,11 @@ SectionEnd
 1. **直前のリリースからの上書き**: 公開中の最新のリリースの x64 のインストーラーを `gh release download` で取り、`/S` → 0。`HKLM\SOFTWARE\SHIN DATA CENTER` を書き出しておく。新しいインストーラーを `/S` → 0。3 つの exe のビルド ID がそろって新しい版であること。`HKLM\SOFTWARE\SHIN DATA CENTER` が変わっていないこと。
 2. もう一度 `/S` → 0（同じ版の上書き）。この 1 回は D.9.4 の最小の環境ブロックで実行する。
    開いたままにするハンドルの権利と共有は、NSIS の `IsLocked` と合わせて正確に決める（FIX-VERIFICATION-10）。`IsLocked` の `FileOpen … a` は NSIS の `myOpenFile` を通り、`CreateFile` を**書き込みを含む権利と、共有 `FILE_SHARE_READ` だけ**で開く（共有は NSIS の `util.c` の `myOpenFile` で確認。`a` が読み書きか書き込みだけかはコンパイラーの対応表で、未確認だが、どちらでも下の結論は同じ）。したがって、先に開いておくハンドルの権利が読み取りだけなら `IsLocked` は通り、書き込みを含めば通らない。
+   **3〜5 の前に直前のリリースを入れ直す**（`/S` → 0。3 つのビルド ID がそろっていること）。3〜5 は直前のリリースからの本当の上書きの試みになり、「ビルド ID が変わっていない」は「直前のリリースの ID のまま（3 つともあってそろっている）」を意味する（`Test-NothingReplaced`）。レビュー前（M.5 の MECHANICS-3）は、すでに入っている同じビルドを入れ直していたので、置き換えられたファイルと残ったファイルを ID で見分けられず、戻しが `.old` を名前を戻さずに消す後退（新しい helper と CLI が残る。本当の上書きでは版の混ざったインストール）を見逃していた。直前のリリースと新しいビルドの ID が同じ（版を上げる前の `installer.yml` で、ID の元のクレートが変わっていない）ときは、見分けられないことを `WARN` の行で知らせ、終了コードと残りのファイルの確認だけを行う。
 3. PowerShell で `[IO.File]::Open("$INSTDIR\mklm-cli.exe", 'Open', 'Read', 'None')` のまま `/S` → 23（共有なしなので `IsLocked` が開けない）。3 つのビルド ID が変わっていないこと。
-4. `[IO.File]::Open("$INSTDIR\mklm.exe", 'Open', 'Read', 'ReadWrite')` のまま `/S` → 26。権利は読み取りだけ（`IsLocked` の書き込みの開き方と両立するので「動いていない」とみなされ、置き換えまで進む）、共有は読み取りと書き込みで削除なし（名前の変更が失敗する）。3 つのビルド ID が変わっておらず、`.new` と `.old` が残っていないこと（2 段階の置き換えの戻し）。権利を `ReadWrite` にすると `IsLocked` が「動いている」と判断して 24 になり、戻しの経路を試さなくなるので、そうしない。
-5. `[IO.File]::Open("$INSTDIR\mklm.exe", 'Open', 'Read', 'Read')` のまま `/S` → 24（共有が読み取りだけなので `IsLocked` の書き込みの開き方が失敗し、「動いている」とみなす。`--quit` の後も同じ。今の決まりの記録）。
+4. `[IO.File]::Open("$INSTDIR\mklm.exe", 'Open', 'Read', 'ReadWrite')` のまま `/S` → 26。権利は読み取りだけ（`IsLocked` の書き込みの開き方と両立するので「動いていない」とみなされ、置き換えまで進む）、共有は読み取りと書き込みで削除なし（名前の変更が失敗する）。3 つのビルド ID が変わっておらず（入れ替え済みの helper と CLI が直前のリリースに戻っている）、`.new` と `.old` が残っていないこと（2 段階の置き換えの戻し）。権利を `ReadWrite` にすると `IsLocked` が「動いている」と判断して 24 になり、戻しの経路を試さなくなるので、そうしない。
+5. `[IO.File]::Open("$INSTDIR\mklm.exe", 'Open', 'Read', 'Read')` のまま `/S` → 24（共有が読み取りだけなので `IsLocked` の書き込みの開き方が失敗し、「動いている」とみなす。`--quit` の後も同じ。今の決まりの記録）。3 つのビルド ID が変わっていないこと。
+   その後、何も開いていない状態で新しいインストーラーを `/S` → 0、3 つのビルド ID が新しい版（拒まれた試みの後でも上書きできること。7 のアンインストーラーも新しい版のものになる）。
 6. ARM64 のインストーラーを `/S` → 21。
 7. アンインストール: `Start-Process -Wait "$INSTDIR\uninstall.exe" -ArgumentList '/S', "_?=$INSTDIR"`（`_?=` を付けると、自分を写して起動し直さず、終わるまで待て、終了コードも届く）→ 0。3 つの exe が消えていること（`_?=` のときは `uninstall.exe` 自身とフォルダーが残るので、試験が消す）。
 
@@ -1042,8 +1044,8 @@ SectionEnd
   1. 更新を始めた GUI は、終了する前に自分の HKCU の RunOnce に `SHINDATACENTER.MKLM.AfterUpdate = "<INSTDIR>\mklm.exe" --after-update` を登録する（計画 4.2 の手順 8 の予備。昇格している GUI は登録しない。m3 F.2）。次のサインインで結果が前面に出る。
   2. Run キーの自動起動（既定でオン。次のサインインで）。
   3. 利用者がスタート メニューから開く。GUI は引き継ぎの前に「2 分たっても開かない場合は、スタート メニューから開いてください」と伝えている（E.4）。
-- 起動し直した GUI、または手で開いた GUI は、表示していない結果がなければ RunOnce の値を消す（`unregister_after_update`。同じ利用者なので消せる。D.13。OPS-UX-TEST-15）。
-- 起動し直したかどうかは `LastResult.gui_relaunch_attempted`（試みたか）に残す。GUI が `LastResult` を読むより先に起動しないよう、`LastResult` を書いてから起動する（D.7 の 19、21）。
+- 起動し直した GUI、または手で開いた GUI は、昇格していなければ、起動の表示を決めたところで RunOnce の値を消す（`unregister_after_update`。同じ利用者なので消せる。D.13 の 5。OPS-UX-TEST-15）。結果を表示したときも消す: 表示した結果はその場で `result_seen` に書くので、表示していない結果はもう残っていない。レビュー前（M.5 の MECHANICS-1）は表示したときに値を残していたので、ふつうの成功（H2 の起動し直しが動いた）の後、次のサインインで Run の `--tray` と RunOnce の `--after-update` が並んで起動し、後から来た方の `activate` で、表示するもののない窓が出ていた。
+- 起動し直したかどうかは `LastResult.gui_relaunch_attempted`（試みたか）に残す。GUI が `LastResult` を読むより先に起動しないよう、`LastResult` を書いてから起動する（D.7 の 19、21）。`Run` を消せなかったときは起動しない（D.7 の 19、21。M.5 の MECHANICS-2）。
 
 ### D.11 後片付け（RELIABILITY-9）
 
@@ -1109,7 +1111,8 @@ SectionEnd
      - 画面と読み上げの文で「検証済み」「確かめた」と言わない（ボタンは「インストーラーを実行（管理者の許可が要ります）」だけ）。
      - 標準ユーザーの画面で別の管理者が資格情報を入れる場合（UAC の資格情報の画面）、その管理者から見ると、この経路の UAC は署名のない任意のプログラムと見分けがつかない（場所は利用者のフォルダーになる）。`docs/recovery.md` と `install-guide.ja.md` に「ほかの利用者の PC で管理者として承認するときは、リリース ページから自分でダウンロードし、`SHA256SUMS` と署名で確かめたインストーラーを使う」と書く（WP-H、WP-U）。標準ユーザーはこの経路がなくても、同じ見た目の UAC を管理者に出せるので、MKLM が新しい昇格の道を開くわけではない。
    - ［リリース ページを開く］も出す。
-5. 表示していない結果がなければ、`unregister_after_update` を呼ぶ（手で開いた場合も、次のサインインで意味のない窓が出ないように）。`--after-update` で起動していて表示するものがなければ、`--tray` と同じに振る舞う。
+5. 表示していない結果がなければ、`unregister_after_update` を呼ぶ（手で開いた場合も、次のサインインで意味のない窓が出ないように）。2 と 1 の結果は表示した時点で `result_seen` に書き、4 は起動のたびに出るので、昇格していない GUI は**表示したかどうかによらず**、起動のたびに呼ぶ（M.5 の MECHANICS-1。レビュー前は表示したときに呼ばず、ふつうの成功の後にも値が残っていた）。`--after-update` で起動していて表示するものがなければ、`--tray` と同じに振る舞う。
+   - **2 つ目の起動**: サインインでは Run の `--tray` と RunOnce の `--after-update`（または `--post-reboot`）が同時に起動し、ミューテックスで 1 つになる。1 つ目は自分の起動で見つけたもの（結果、再起動後の確認、ウィザード）を自分で出すので、2 つ目の `--tray` と `--after-update` は `activate` ではなく `ping`（`InstanceCommand::Ping`。返事 `ok`、何も変えず、`AllowSetForegroundWindow` もしない。H.3）を送って終わる（M.5 の MECHANICS-1）。`activate` のままでは、ほかの利用者の更新の失敗（3 で出さない）の後の、`quit-if-idle` や起動の門で登録した RunOnce で、表示するもののない窓が出ていた。`ping` にも返事がなければ、今までどおり自分が 1 つ目として動く（乗っ取られた名前で MKLM を止めない。m3 F.1）。引数なしの起動と `--post-reboot` は `activate` のまま（m3 F.1、F.2）。
 
 | 中断した段階 | インストールの状態 | 表示（この利用者の更新のとき） |
 |---|---|---|
@@ -1295,7 +1298,7 @@ m3 F.5 の表に、更新のセッションの列を足したもの。`SessionPh
 
 ### E.5 更新の後の表示
 
-- `--after-update`（H2 か RunOnce から）: 窓を表示して前面に出し、表示する結果があれば、結果のオーバーレイで出す（m3 B.17 の形）。`--after-update` がなくても、表示する結果があれば 1 回出す。何を出すかは D.13 の条件（14 日以内、今の状態と合う、この利用者の更新か）。表示するものがなければ `--tray` と同じ。
+- `--after-update`（H2 か RunOnce から）: 窓を表示して前面に出し、表示する結果があれば、結果のオーバーレイで出す（m3 B.17 の形）。`--after-update` がなくても、表示する結果があれば 1 回出す。何を出すかは D.13 の条件（14 日以内、今の状態と合う、この利用者の更新か）。表示するものがなければ `--tray` と同じ。どちらでも、昇格していなければ RunOnce の値を消す（D.13 の 5）。MKLM がすでに動いているときの `--after-update` と `--tray` は `ping` だけを送って終わり、窓を出させない（D.13 の 5）。
 - 結果の文は E.6。`Installed` では「MKLM を 0.2.1 に更新しました。」と［リリースノートを開く］。
 - ほかの利用者の GUI（その利用者が MKLM を開き直すか、次にサインインしたときに起動）は、中立の文「MKLM は 0.2.1 に更新されました（別のユーザーが更新しました）。」を 1 回出す。その GUI が `quit-if-idle` で終わっていれば「別のユーザーの更新のために、MKLM はいったん終了していました。」を添える（RELIABILITY-7）。
 - 更新の後、D.11 の条件を満たせば、利用者のキャッシュのインストーラーを消す。
@@ -1442,7 +1445,7 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
   - `CallerOrder`: `Welcome` の直後の `RecordTrust` → 受け付ける。`Request` の後、2 つ目の `RecordTrust`、`StageUpdate` の後の `RecordTrust` → プロトコルの誤り（helper は `HelperMessage::Error` を返して切断）。
   - **記録の後の巻き戻し**: 偽の環境で `record_trust`（更新情報 M2）の後、同じセッションで `stage_update`（M2 より `issued_at` の古い、正しく署名された M1）→ `Refused(Rollback)`、`Run` もフォルダーも作らない。
 - 結合テスト（`crates/mklm-client/tests/update_staging.rs` に足す。WP-C が書き、統合の後に通る。F.4）: 利用者の記録が進んでいるとき、`mklm-client` のセッションの開始が `RecordTrust` を送り、偽の helper の側で `record_trust` が機械の記録を進める。進んでいなければ送らない。（統合の時点では抜けていて、M.4 の CONFORMANCE-2 で足した: `a_session_carries_the_user_s_newer_manifest_to_the_machine`、`an_update_session_reports_before_it_stages`。）
-- **H2 の駆動部**（`mklm_update::run_flow::run_update`、偽の `RunnerEnv`）: D.12 の表の各行について、D.7 の各手順で失敗を注入し、終わりの `Run` と `LastResult`、起動し直したか、終了コードを確かめる。固定する順序: `Run = installing`（`installer` 付き）を書いてから `ResumeThread`。その書き込みの失敗 → 一時停止のままのインストーラーを止め、`NotInstalled(Refused(Storage))`。`LastResult` を書いて `Run` を消し、ロックを放してから後片付け、最後に起動し直す。15 分の期限 → `Failed(InstallerTimedOut)` を書き、`Run` を残して待ち続け、60 分以内に終われば本当の結果で書き直す。60 分 → `Run` を残し、起動し直さず、7。`ready` / `waiting` でのセッションの終了 → インストーラーを作らず `NotInstalled(SessionEnding)`。`installing` でのセッションの終了 → 止める答え。
+- **H2 の駆動部**（`mklm_update::run_flow::run_update`、偽の `RunnerEnv`）: D.12 の表の各行について、D.7 の各手順で失敗を注入し、終わりの `Run` と `LastResult`、起動し直したか、終了コードを確かめる。固定する順序: `Run = installing`（`installer` 付き）を書いてから `ResumeThread`。その書き込みの失敗 → 一時停止のままのインストーラーを止め、`NotInstalled(Refused(Storage))`。`LastResult` を書いて `Run` を消し、ロックを放してから後片付け、最後に起動し直す。`LastResult` を書けない、または `Run` を消せない → `Run` が残り、起動し直さない（書けていた `LastResult` は `gui_relaunch_attempted = false` に書き直す。`Installed` と `NotInstalled` の両方。残った `Run` は H2 が生きている間 `InProgress`、死ねば `Interrupted`。M.5 の MECHANICS-2）。15 分の期限 → `Failed(InstallerTimedOut)` を書き、`Run` を残して待ち続け、60 分以内に終われば本当の結果で書き直す。60 分 → `Run` を残し、起動し直さず、7。`ready` / `waiting` でのセッションの終了 → インストーラーを作らず `NotInstalled(SessionEnding)`。`installing` でのセッションの終了 → 止める答え。
 - `mklm_update::run`（WP-H）: `classify_installer_exit` の表（25 は `Other`）、`leaves_old_files`、`decide_outcome` の表（D.13。26 と 27 を含む）、`classify_run`（すべての段階 × 起動 ID の変化 × `stager`、`runner`、`installer` の生死。`installing` で runner が死に installer が生きている → `InProgress`）、`interrupted_result`、`RunId` の文法、JSON の往復と形の固定（H.5）。
 - `mklm_update::gate::check_journal`: `mklm_core::fixtures` のジャーナルで、読めない項目、書き込み中、確認待ち、再起動待ち、衝突、閉じたものだけ。
 - `crates/mklm-update/tests/nsis_exit_codes.rs`: `mklm.nsi` の定義と定数の一致（D.9.1）。
@@ -1453,7 +1456,7 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
   - `instance::instance_pipe_candidates`（純粋。FIX-VERIFICATION-5）: GUI のプロセスと `process_users` の結果から、`instance_pipe_path` の名前を作る。SID がない、セッション ID が食い違う、SID が正規表現に合わない（`S-1-5-18` など）GUI は飛ばす。16 本を超えた分は捨てる。同じ入力から同じ順序。
   - `update_dir` の `FileHolder` の変換（Restart Manager の結果の PID、セッション ID、名前。RED-TEAM-3）: 名前の長さの上限、制御文字の除去。名前はプロセスの表から（`proc_identity::image_file_names`: PID と作成時刻、作成時刻 0 は PID だけ。テストのプロセス自身がファイルを開いたままのとき、その名前は自分の exe のファイル名。M.3 の SECURITY-2）。
   - `elevation::pin_system_environment`（M.3 の SECURITY-1）: `SystemDrive`（と `SystemRoot`、`windir`）を偽のフォルダーにした子プロセスで、固定しなければ `program_data_dir` が偽の `%ProgramData%` になり `verify_protected_dir` がそれを拒むこと（陽性の対照）、最初に固定すれば `program_data_dir` と `runner_environment` の `ProgramData` が本物で、3 つの変数が `GetSystemWindowsDirectoryW` の値になること。`security::PROGRAM_DATA_POLICY`: Windows の既定の `C:\ProgramData` の SDDL は通り、利用者の所有、`FILE_DELETE_CHILD`、`DELETE`、`WRITE_DAC`、`WRITE_OWNER`、`GENERIC_ALL`、NULL の DACL は通らないこと。
-  - `InstanceCommand::QuitIfIdle` の wire（13 バイト、`MAX_INSTANCE_MESSAGE` 以内）と `parse`。
+  - `InstanceCommand::QuitIfIdle` の wire（13 バイト、`MAX_INSTANCE_MESSAGE` 以内）と `parse`。`InstanceCommand::Ping`（`ping\n`）の wire と `parse`、近い形（`ping`、`PING\n`、`ping\r\n`、2 つのコマンドの連結）の拒否、`may_take_foreground` が false、本物のパイプでの往復（M.5 の MECHANICS-1）。
 - `installer/check-nsi.ps1` の規則（D.9.3）を、わざと壊したスクリプトの断片で確かめる Pester のテスト（WP-H。Windows PowerShell 5.1 の同梱の Pester 3 で動く形）。
 
 ### F.3 ループバックの HTTP テスト（`mklm-update`、feature `winhttp`、Windows、開発用の cfg）
@@ -1505,7 +1508,8 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
   - `HandedOff` → `started_run`、RunOnce、オーバーレイ、終了。［OK］で即座に終了の経路へ。［OK］なしでは `HANDOFF_OVERLAY_MAX`（15 秒）で終了の経路へ（FIX-VERIFICATION-13）。定数の関係 `HANDOFF_OVERLAY_MAX + 2 秒 < CALLER_EXIT_WAIT` を固定するテスト。最後のチャンクの後の `Lost` で、`Run.caller` が自分で `ready` なら引き継ぎとして扱う。
   - 起動時の `InProgress`（`ready` 以降）→ すぐ終了。セッションが `Run.caller_session` と同じ → RunOnce を消さず、何も書かない。違う、または `caller_session` がない → 昇格していなければ RunOnce を登録し、`closed_by_update` を書いてから終了（FIX-VERIFICATION-9）。判断は `state::update::start_gate`（どちらで終わるか）と `state::update::start_gate_effects`（`Effect::AfterUpdateRunOnce(true)` と `Effect::SaveSettings`。`app.rs` はこの 2 つを行うだけ）の 2 つの純粋な関数で、両方をテストする（昇格、昇格しているか分からない、設定のフォルダーがない、同じセッションでは設定を読みもしない。M.4 の CONFORMANCE-3）。
   - `classify`（FIX-VERIFICATION-12）: `CheckError` のすべての列挙子について、E.6 の表と同じ種類と文の ID。`Cancelled`（2 つ）と `NotConfigured` → `None` で、`last_failure` と `last_check` が変わらない。`Rollback` → `Structural`。30 日の間 `Rollback` だけが続いた後のバナーは構造の文（`upd-stale-structural`）と巻き戻しの警告。
-  - 結果の表示の条件（D.13）: 14 日を過ぎた `LastResult`、今の版と合わない `LastResult`、ほかの利用者の更新（中立の文）、失敗はほかの利用者に出さない、中断は利用者ごとに 1 回だけ、表示するものがなければ `unregister_after_update`。
+  - 結果の表示の条件（D.13）: 14 日を過ぎた `LastResult`、今の版と合わない `LastResult`、ほかの利用者の更新（中立の文）、失敗はほかの利用者に出さない、中断は利用者ごとに 1 回だけ、表示するものがなければ `unregister_after_update`。**表示したときも**（この利用者の成功、ほかの利用者の成功、この利用者の失敗、中断、ファイルの版がそろっていない）昇格していなければ `Effect::AfterUpdateRunOnce(false)`、昇格していれば RunOnce に触れない（`a_start_that_shows_something_removes_the_after_update_value`。M.5 の MECHANICS-1）。
+  - `single_instance::command_for`: `--tray` と `--after-update` → `Ping`、引数なしと `--post-reboot` → `Activate`、`--quit` → `Quit`。`Ping` の返事は `ok`（M.5 の MECHANICS-1）。
   - バナー: 30 日以上確認できていない（一時 / 構造）、期限切れ（発行から 180 日を過ぎた更新情報。J-3）、30 日に 1 回、巻き戻しの警告（同じ `issued_at` に 1 回）。
   - UAC の説明の画面の行き先（`UacNoticeOrigin::Update` で［キャンセル］→ 更新のページ）。
 - `vm::update` のスナップショット（日英、m3 H.3）: E.2 の各状態、E.6 の表のすべての行。ラテン文字の検査（E.7）。すべての `NotInstalledReason`（`Refused` の中のすべての `UpdateRefusal` を含む）、`InstallerExit`、`FailedReason` の結果のオーバーレイが、日英で「キーボードの設定は変わっていません」を言い、`Refused` は元の版も言うこと（E.6。M.4 の CONFORMANCE-1）。
@@ -3459,6 +3463,14 @@ pub enum InstanceCommand {
     /// change nothing (design m5b D.8, E.4.1; RELIABILITY-1, OPS-UX-TEST-4). The updater's only
     /// command.
     QuitIfIdle,
+    /// `ping\n`: answer `ok` and change nothing — a second start that shows no window
+    /// (`--tray`, `--after-update`) only makes sure the instance runs (design m5b D.13 step 5;
+    /// M.5 MECHANICS-1). `apps/mklm/src/single_instance.rs::command_for` sends it for those two.
+    Ping,
+}
+impl InstanceCommand {
+    /// False for `Ping`: `send_to_instance` then does not call `AllowSetForegroundWindow`.
+    pub fn may_take_foreground(self) -> bool;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4065,7 +4077,7 @@ JSON の例（形を固定するテストの期待値に使う）:
 | 33 | WP-H | H.1: `classify_run` | `Liveness::Alive` だけを「生きている」と数え、`Unknown` は `Interrupted` | H.1 のドキュメント コメント（「所有者が死んだか不明」）に従った |
 | 34 | WP-H | D.4: H1 | 手順 3 と 9 の間に機械の `Trust` が変わった（ほかのセッションの `RecordTrust`）ら、ロックの下で検証し直す。H1 と通常のセッションは、JSON として解析できない `Run` の値を（ログに残して）ないものとして扱い、H1 は上書きする。`wait_until_ready`（手順 19）: runner の起動の後に `Run` が消えたら引き渡し済みとみなす（H2 は `ready` の後にしか消さない） | D.4 が決めていなかった。壊れた `Run` で更新が止まり続けないように |
 | 35 | WP-H | D.3: `receive_installer` | `CHUNK_WAIT` か `STAGE_TOTAL` を過ぎても黙っている呼び出し元には `Refused(CallerLeft)`。順序の違うメッセージには `HelperMessage::Error`（プロトコル）を送ってから `CallerLeft` で終える | `UpdateRefusal` にタイムアウトの列挙子がない |
-| 36 | WP-H | D.7、D.8: H2 | `SessionEnding` では GUI を起動し直さない（`gui_relaunch_attempted = false`）。`LastResult` を書けなければ `Run` を残す（次の起動が中断として報告する）。`STAGER_EXIT_WAIT` の後も H1 が生きていれば進み、60 秒のロックの待ちに任せる。D.8 の 3 では、1 つが終わらなければほかを待つのをやめる。`RunnerEnv` は、動いているプログラムの一覧やファイルの使用の確認の誤りを「なし」として扱い（ログに残す）、NSIS の検査（22〜24、戻しを伴う 26）を最後の守りにする | サインアウトの後に GUI は残らない。結果を失わないため。待ちを重ねないため |
+| 36 | WP-H | D.7、D.8: H2 | `SessionEnding` では GUI を起動し直さない（`gui_relaunch_attempted = false`）。`LastResult` を書けなければ `Run` を残す（H2 が終わった後の次の起動が中断として報告する。そのとき GUI は起動し直さない。K の 59）。`STAGER_EXIT_WAIT` の後も H1 が生きていれば進み、60 秒のロックの待ちに任せる。D.8 の 3 では、1 つが終わらなければほかを待つのをやめる。`RunnerEnv` は、動いているプログラムの一覧やファイルの使用の確認の誤りを「なし」として扱い（ログに残す）、NSIS の検査（22〜24、戻しを伴う 26）を最後の守りにする | サインアウトの後に GUI は残らない。結果を失わないため。待ちを重ねないため |
 | 37 | WP-H | G.4: `pipe.rs` の変更は `check_pipe_path` だけ | `quit_idle_instances` は既存の `pipe::PipeConnection::connect_any`（非公開の `open_client`、SQOS の識別のレベル）を使い、公開の `open_client` を足さない。`connect_any` は、まだないパイプもパイプごとの 5 秒の中で試し直す。`check_pipe_path` は空白を含む印字できる ASCII を許し、`\`、`/`、`.`、`..`、ASCII 以外、制御文字、NUL を拒む（SECURITY-7） | G.4 のファイルの範囲を守るため |
 | 38 | WP-H | D.11 の 3: 通常のセッションの後片付け | エンジンのホストを包む（`TidyingHost`）。セッションごとに 1 回、エンジンが最初にロックを取った直後に走る。`mklm-engine` は変えない | エンジンを変えずにロックの中で片付けるため |
 | 39 | WP-H | D.9: `mklm.nsi` | `MKLM_EXIT_BAD_INSTALL_DIR 25` に `; uninstaller-only` のコメント（`nsis_exit_codes.rs` が確かめる）。アンインストールも `.new` / `.old` の残りを消す。対話のアンインストールでだけ出る `ASK_RESTORE` の 2 つの MessageBox にも `/SD IDYES` と `/SD IDNO` | D.9.3 の規則 1 を例外なしに守るため |
@@ -4087,6 +4099,9 @@ JSON の例（形を固定するテストの期待値に使う）:
 | 55 | 実装のレビュー | D.8 の 4、H.1、H.3: `holders` の名前は Restart Manager の `strAppName` | プロセスの表のイメージのファイル名（`proc_identity::image_file_names` を足した。PID と開始時刻で照らす）。見つからなければ空 | `strAppName` は相手の `FileDescription` か窓の題で、更新を止める相手が管理者に見せる名前を選べたため（M.3 の SECURITY-2） |
 | 56 | 設計適合のレビュー | E.6: `NotInstalled(Refused(…))` の文は中の `UpdateRefusal` の行の文だけ | その後に「MKLM は 0.2.0 のままで、キーボードの設定も変わっていません。」（`i18n::update::with_version_kept`）。結果のオーバーレイは、どの文でも `NotInstalled` と `Failed` にキーボードの文を確かめて足す | E.6 の「必ず添える」が、H2 の拒否（D.7 の 8〜10、16）で抜けていたため（M.4 の CONFORMANCE-1） |
 | 57 | 設計適合のレビュー | H.4: 起動の門の効果は `app.rs` の中 | `state::update::start_gate_effects` を足し、RunOnce と `closed_by_update` の判断を純粋な関数にした。`app.rs` は `AfterUpdateRunOnce` と `SaveSettings` を行うだけ | F.4 の FIX-VERIFICATION-9 のテストが、判断の半分（`start_gate`）しか試していなかったため（M.4 の CONFORMANCE-3） |
+| 58 | 仕組みのレビュー | D.10、D.13 の 5: 結果を表示した起動は RunOnce の値を残す。2 つ目の起動はどれも `activate` | 昇格していない GUI は、表示したかどうかによらず起動のたびに値を消す。2 つ目の `--tray` と `--after-update` は `activate` ではなく `ping`（H.3 の `InstanceCommand::Ping`。m3 F.1 のコマンドは 4 つ） | ふつうの成功の後の次のサインインで、Run と RunOnce の 2 つの起動の後の方の `activate` が、表示するもののない窓を出していたため。ほかの利用者の失敗の後も同じ（M.5 の MECHANICS-1） |
+| 59 | 仕組みのレビュー | D.7 の 19、21: `Run` が残っても GUI を起動し直す（K の 36 は「次の起動が中断として報告する」） | `Run` を消せたときだけ起動し直し、残ったときは起動せず、書けていた `LastResult` を `gui_relaunch_attempted = false` で書き直す | 起動し直した GUI は、まだ生きている H2 を指す `Run` を見て窓を出さずに終わり、利用者の手元に MKLM がなくなっていたため（M.5 の MECHANICS-2） |
+| 60 | 仕組みのレビュー | D.9.3 の 3〜5: 同じビルドを入れ直して「ビルド ID が変わっていない」を確かめる | 3〜5 の前に直前のリリースを入れ直し、ID が直前のリリースのまま（3 つそろっている）ことを確かめる。その後に新しいビルドを入れ直してから 6、7 | 同じビルドでは置き換えを ID で見分けられず、戻しの後退を見逃すため（M.5 の MECHANICS-3） |
 
 ---
 
@@ -4274,3 +4289,15 @@ JSON の例（形を固定するテストの期待値に使う）:
 | CONFORMANCE-4 | minor | 採用（文書を直す案） | `install-guide.ja.md` は `update --status` の 1 を「読めなかった」としていたが、コードは読めなかった記録を `warning:` の行（JSON では `warnings`）で知らせて 0 で終わる。これは `main.rs` の読み取りのコマンドの約束（個々の読めないものは警告）と同じで、コードを変えると、キャッシュのない利用者などで監視のスクリプトが 1 を受け取ることになる。そこで文書（`install-guide.ja.md` の日本語の表と英語のまとめ、`FAILED` の説明、`update.rs` の先頭の表、D.14）を「0（読めなかったものは警告）、1（表示を書き出せなかった）、2」に直し、テストに JSON の終了コードと `warnings` の確認を足した |
 | CONFORMANCE-5 | minor | 採用 | `recovery.md` の 9.1 が、画面に出ない文「インストーラーが時間内に終わりませんでした」と 15 分を引いていた。実際の動き（15 分で記録、60 分まで待つ、終われば本当の結果、60 分を過ぎれば `Run` を残し、インストーラーが動いている間は MKLM が開かない、その後は 9.1 の表）と、E.6 の `upd-timeout` の文が出たときにすることに書き直した。**調べて分かったこと**: 60 分を過ぎて `Run` が残ると、後で見た GUI は `Run` から中断の結果（D.13 の表）を出し、同じ `run_id` の `LastResult`（`Failed(InstallerTimedOut)`）は表示済みとして出さない。helper の片付けも `LastResult` を中断の結果で上書きする（D.11、D.13）。つまり `upd-timeout` の文が GUI に出る経路はふつうない（D.12 の表の「次の GUI の表示: D.13 の表」のとおり）。`update --status` は 15〜60 分の間 `failed: the installer did not end in time` と `in-progress (installing)` を出す。設計の変更はしていない |
 | CONFORMANCE-6 | minor | 採用 | `crates/mklm-ipc/tests/messages.rs` に M2 の骨組みの `op_id()`（`OpId::parse` の `catch_unwind` と、早い `return`）が残っていて、`PROTOCOL_VERSION` 3 の JSON の形のテストを含む 4 つのテストが、`OpId::parse` が panic すると黙って通るようになっていた（K の 53 で消した M5b の検出と同じ種類）。`OpId::parse(…).unwrap_or_else(panic)` にして、早い戻りを消した |
+
+### M.5 実装の Windows の仕組みと信頼性のレビュー（2026-09-29。3 件）
+
+M.4 の後の実装（7f96a6b）への、H1 / H2、NSIS、D.7〜D.13 の失敗の表、GUI の引き継ぎとセッションの終わりの仕組みのレビュー。ID はこのレビューの番号。不採用の指摘はない。
+
+| ID | 重さ | 対応 | 何を変えたか |
+|---|---|---|---|
+| MECHANICS-1 | minor | 採用 | ふつうの成功（H2 の起動し直しが動いた）の後、起動し直した GUI は結果を表示して `result_seen` に書くが、`--after-update` の RunOnce の値を残していた（表示するものがないときだけ消していた）。次のサインインで Run の `--tray` と RunOnce の `--after-update` が並んで起動し、後の方の `activate` で表示するもののない窓が出た（サインインの起動を切った利用者でも 1 回起動した）。昇格していない GUI は、表示したかどうかによらず起動のたびに値を消す。加えて、2 つ目の `--tray` と `--after-update` は `activate` ではなく新しい `ping` を送る（`InstanceCommand::Ping`。返事 `ok`、何も変えず、前面に出る権利も与えない）。これで、`quit-if-idle` や起動の門で登録した RunOnce が、ほかの利用者の更新の失敗（その利用者には出さない）の後に空の窓を出すこともなくなる。`ping` に答えがなければ今までどおり自分が 1 つ目になる。回帰テスト: 表示する 5 種類（この利用者の成功、ほかの利用者の成功、失敗、中断、そろっていない）で値を消し、昇格していれば触れない。`command_for` の対応。`ping` の wire、parse、本物のパイプでの往復（F.2、F.4）。修正前のコードでは 2 つのテストが落ちることを確かめた。D.10、D.13 の 5、E.5、H.3、K の 58。m3 F.1 と F.2 にも反映した |
+| MECHANICS-2 | minor | 採用 | `conclude` が、`LastResult` を書けずに `Run` を残したとき（K の 36）や `Run` を消せなかったときにも GUI を起動し直していた。そのとき `Run` はまだ生きている H2 を指し、段階は `ready`〜`finishing` なので、起動した GUI は同じセッションの更新の途中と見て窓を出さずに終わり（D.13 の 1。`QuitQuietly`）、利用者の手元に MKLM がなくなっていた。`Run` を消せたときだけ起動し直し、残ったときは起動せずにログに書き、書けていた `LastResult` を `gui_relaunch_attempted = false` で書き直す。回復は、引き継ぎで伝えた「2 分たっても開かない場合はスタート メニューから」、呼び出し元の RunOnce、Run キー（そのとき H2 は終わっていて、`Run` は中断として報告される）。`Run` を `runner` なしで書き直して起動する案は、同じキーへの書き込みが続けて失敗しやすく、得るものが小さいので採らなかった。回帰テスト: `Installed` と `NotInstalled` で `Run` を消せないとき、`LastResult` を書けないとき、消せたとき（対照）。残った `Run` が H2 の生きている間 `InProgress`、死んだ後 `Interrupted` であること。修正前のコードでは 2 つのテストが落ちることを確かめた。D.7 の 19、21、D.10、F.2、K の 36、59 |
+| MECHANICS-3 | minor | 採用 | 煙の試験の 3〜5 が、1〜2 で入れた同じビルドを入れ直していたので、「何も置き換えていない」のビルド ID の比べ方が、置き換えられても通っていた。戻し（`SwapFailed` / `UNSWAP`）が `.old` の名前を戻さずに消す後退は、ID が同じで `.new` も `.old` も残らないので見逃す（本当の上書きでは、新しい helper と CLI が残る版の混ざったインストール）。3〜5 の前に直前のリリースを入れ直し、ID が直前のリリースのまま（3 つともあってそろっている）ことを確かめる（`Test-NothingReplaced`。5 にも足した）。直前のリリースと新しいビルドの ID が同じなら `WARN` で知らせる。その後、新しいビルドを入れ直してから 6、7（アンインストーラーも新しい版のもの）。回帰テスト（Pester 3.4）: 比べ方の関数の表（途中まで置き換えられた、全部置き換えられた、欠けた、同じビルド）と、スクリプトの順序（3 の前に直前のリリース、3 回の比較、7 の前の入れ直し）。修正前のスクリプトでは 2 つのテストが落ちる。煙の試験そのものは CI だけで動く（開発機では実行しない）。D.9.3、K の 60 |
+
+**m3 への反映**: `docs/design/m3-gui.md` の A 章のスレッドの表、B.18 の状態遷移の表、F.1（コマンドの一覧と 2 つ目の起動の送るもの）、F.2（`--tray` と、足した `--after-update` の行）に `ping` を足した（MECHANICS-1）。
