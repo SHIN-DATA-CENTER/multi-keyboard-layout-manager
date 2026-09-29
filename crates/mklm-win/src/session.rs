@@ -1,10 +1,19 @@
 //! Machine- and session-level actions of M2: boot ID, randomness, PC restart and the post-reboot
 //! RunOnce entry; and the GUI's autostart Run value (M3). The two HKCU values are the only
 //! registry values MKLM writes outside HKLM, and this module is the only one that writes them.
+//!
+//! The boot ID (design review C2, docs/design/m2-engine.md H.2 R9/R10) is the counter
+//! `KUSER_SHARED_DATA.BootId` ([`boot_id`]): "same boot" is decided by equality, and "restarted"
+//! must mean that the OS loader started the kernel again since the write phase. 0.1.0 used the
+//! loader's boot GUID ([`legacy_boot_guid`]), which a desktop PC kept across full restarts
+//! (docs/research/boot-id.md); it is still read, together with the boot time
+//! ([`boot_time_hint`]), to judge the ids 0.1.x recorded ([`current_boot`],
+//! `mklm_core::boot`). The boot time also backs the counter up: it can only add "same boot"
+//! answers.
 
 use std::path::Path;
 
-use mklm_core::BootId;
+use mklm_core::{BootId, CurrentBoot};
 use windows::Wdk::System::SystemInformation::{
     NtQuerySystemInformation, SYSTEM_INFORMATION_CLASS, SystemTimeOfDayInformation,
 };
@@ -37,6 +46,15 @@ const RUN_ONCE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
 /// Longest command line Windows runs from a Run / RunOnce value.
 const RUN_ONCE_MAX_CHARS: usize = 260;
 
+/// Where the kernel maps `KUSER_SHARED_DATA` (read-only) in every Win32 process, x64 and ARM64
+/// alike (`MM_SHARED_USER_DATA_VA` in ntddk.h).
+const KUSER_SHARED_DATA_VA: usize = 0x7FFE_0000;
+
+/// Offset of `ULONG BootId` in `KUSER_SHARED_DATA` (ntddk.h: "Boot sequence, incremented for each
+/// boot attempt by the OS loader"; Windows 10 and later). Checked against the `windows` crate's
+/// layout in the tests.
+const KUSER_BOOT_ID_OFFSET: usize = 0x2C4;
+
 /// `SystemBootEnvironmentInformation`.
 const SYSTEM_BOOT_ENVIRONMENT_INFORMATION: SYSTEM_INFORMATION_CLASS = SYSTEM_INFORMATION_CLASS(90);
 
@@ -44,7 +62,7 @@ const SYSTEM_BOOT_ENVIRONMENT_INFORMATION: SYSTEM_INFORMATION_CLASS = SYSTEM_INF
 #[repr(C)]
 #[allow(dead_code, reason = "the kernel's layout; only some fields are read")]
 struct SystemBootEnvironmentInformation {
-    /// A GUID the boot loader generates for every boot.
+    /// A GUID the boot loader provides (not a new one for every boot on every machine).
     boot_identifier: GUID,
     /// `FIRMWARE_TYPE`.
     firmware_type: i32,
@@ -92,18 +110,57 @@ unsafe fn query_fixed<T>(
     nt_check(function, status)
 }
 
-/// The current boot: `NtQuerySystemInformation(SystemBootEnvironmentInformation = 90)`
-/// `.BootIdentifier`, a GUID the loader creates for every boot. Unlike the kernel boot time it
-/// does not move with clock corrections, resume from sleep or `w32tm /resync` (design review C2).
-/// Required properties, verified on the machine by H.2 R9/R10 before M2 is done: unchanged across
-/// sleep, hibernation, a Fast Startup "shutdown" and a clock resync; changed by a full restart.
-/// If the Fast Startup property fails, M2 falls back to `KUSER_SHARED_DATA.BootId` (a per-boot
-/// counter) with the same tests. `SYSTEM_BOOT_ENVIRONMENT_INFORMATION` is defined in this module
-/// with `#[repr(C)]` because the `windows` crate lacks it.
+/// `KUSER_SHARED_DATA.BootId`: the boot sequence number that the OS loader (winload) reads from
+/// `\Windows\bootstat.dat`, increments and hands to the kernel on every boot attempt; also
+/// mirrored in `PrefetchParameters\BootId`.
+///
+/// Expected properties (design H.2 MT-2..MT-7, R9/R10; checked before a release and again after
+/// Windows feature updates): unchanged by sleep, by a resume from hibernation and by a Fast
+/// Startup "shutdown" (the hibernated kernel, this page included, is restored), and by clock
+/// changes; higher after a restart or a full shutdown (the drivers re-read their values). MKLM
+/// only needs "different": the step is 1 when the loader counted nothing in between, more if a
+/// resume was counted in `bootstat.dat` without reaching this page. It only goes back when
+/// `bootstat.dat` is recreated (a repair or in-place upgrade); a collision with a counter an open
+/// entry recorded then reads as "not restarted" for one boot, the safe side. Should the counter
+/// ever move without a new boot, the boot time ([`boot_time_hint`]) still says "same boot"
+/// (`mklm_core::JournalEntry::counter_boot_is_current`).
+///
+/// A value of 0 is refused ([`Error::UnexpectedData`]): the loader always counts the boot.
+pub fn boot_counter() -> Result<u32, Error> {
+    let address = KUSER_SHARED_DATA_VA + KUSER_BOOT_ID_OFFSET;
+    // SAFETY: the kernel maps KUSER_SHARED_DATA read-only at 0x7FFE0000 in every Win32 process
+    // for the process's whole life, on x64 and ARM64 alike (ntdll and kernel32 read their time
+    // fields there; it is user-mode ABI, and only the kernel's own writable alias is randomized).
+    // `BootId` is a u32 at offset 0x2C4: 4-aligned and inside the 4 KiB page. The read is
+    // volatile because the kernel owns the page, and no reference to the structure is formed (it
+    // has bool fields whose bit patterns this code does not vouch for).
+    let counter = unsafe { core::ptr::with_exposed_provenance::<u32>(address).read_volatile() };
+    match counter {
+        0 => Err(Error::UnexpectedData {
+            path: "KUSER_SHARED_DATA.BootId".to_string(),
+        }),
+        counter => Ok(counter),
+    }
+}
+
+/// The current boot, as every journal entry, history line and `apply_pending` records it: the
+/// counter form of [`boot_counter`] ([`BootId::from_boot_counter`], text
+/// `0000000N-0000-8000-8000-000000000000`). Unlike the kernel boot time it does not move with
+/// clock corrections, resume from sleep or `w32tm /resync` (design review C2).
+pub fn boot_id() -> Result<BootId, Error> {
+    boot_counter().map(BootId::from_boot_counter)
+}
+
+/// What 0.1.x recorded as the boot ID:
+/// `NtQuerySystemInformation(SystemBootEnvironmentInformation = 90).BootIdentifier`, a GUID the
+/// loader provides. It is **not** per boot on every machine (a desktop PC kept one across full
+/// restarts, docs/research/boot-id.md), so it only serves to judge the legacy ids 0.1.x wrote
+/// (`mklm_core::boot`). `SYSTEM_BOOT_ENVIRONMENT_INFORMATION` is defined in this module with
+/// `#[repr(C)]` because the `windows` crate lacks it.
 ///
 /// The GUID maps to [`BootId`] as `GUID::to_u128`, so that `BootId`'s text form is the GUID's
 /// usual text form. An all-zero identifier is refused ([`Error::UnexpectedData`]).
-pub fn boot_id() -> Result<BootId, Error> {
+pub fn legacy_boot_guid() -> Result<BootId, Error> {
     let mut info = SystemBootEnvironmentInformation {
         boot_identifier: GUID::zeroed(),
         firmware_type: 0,
@@ -126,9 +183,25 @@ pub fn boot_id() -> Result<BootId, Error> {
 }
 
 /// Kernel boot time minus `BootTimeBias`
-/// (`NtQuerySystemInformation(SystemTimeOfDayInformation)`), FILETIME units. A diagnostic for the
-/// journal's history only; never used to decide anything.
+/// (`NtQuerySystemInformation(SystemTimeOfDayInformation)`), FILETIME units: the boot's RTC
+/// second plus about 0.5 s, whatever the clock did since (the bias records every change).
+/// Recorded in the journal's history lines; the boot ID never depends on it. It decides whether a
+/// legacy (0.1.x) boot ID is the current boot (`mklm_core::JournalEntry::legacy_boot_is_current`),
+/// and it can make a counter boot ID count as the current boot, never as an earlier one
+/// (`mklm_core::JournalEntry::counter_boot_is_current`).
 pub fn boot_time_hint() -> Result<u64, Error> {
+    let info = time_of_day()?;
+    boot_time_without_bias(info.boot_time, info.boot_time_bias).ok_or_else(|| {
+        Error::UnexpectedData {
+            path: "SystemTimeOfDayInformation.BootTime".to_string(),
+        }
+    })
+}
+
+/// `NtQuerySystemInformation(SystemTimeOfDayInformation)` as the kernel returns it (the manual
+/// boot-ID tests print every field: which of `BootTime`, `BootTimeBias` and `SleepTimeBias`
+/// moved, design H.2).
+fn time_of_day() -> Result<SystemTimeOfDay, Error> {
     let mut info = SystemTimeOfDay::default();
     // SAFETY: `SystemTimeOfDay` is the plain-data layout of SystemTimeOfDayInformation.
     unsafe {
@@ -138,11 +211,7 @@ pub fn boot_time_hint() -> Result<u64, Error> {
             &mut info,
         )
     }?;
-    boot_time_without_bias(info.boot_time, info.boot_time_bias).ok_or_else(|| {
-        Error::UnexpectedData {
-            path: "SystemTimeOfDayInformation.BootTime".to_string(),
-        }
-    })
+    Ok(info)
 }
 
 /// `boot_time - boot_time_bias` with the bias signed: the boot time before any clock change since
@@ -151,6 +220,17 @@ fn boot_time_without_bias(boot_time: i64, boot_time_bias: i64) -> Option<u64> {
     u64::try_from(boot_time)
         .ok()
         .and_then(|boot_time| boot_time.checked_sub_signed(boot_time_bias))
+}
+
+/// The current boot as a journal reader needs it: [`boot_id`] (required), and the boot time and
+/// the legacy GUID that judge the boot IDs 0.1.x recorded (each `None` when it cannot be read;
+/// `mklm_core::JournalEntry::adopt_current_boot` then takes the safe side).
+pub fn current_boot() -> Result<CurrentBoot, Error> {
+    Ok(CurrentBoot {
+        id: boot_id()?,
+        boot_time: boot_time_hint().ok(),
+        legacy_guid: legacy_boot_guid().ok(),
+    })
 }
 
 /// Fills `buf` from `BCryptGenRandom(BCRYPT_USE_SYSTEM_PREFERRED_RNG)`.
@@ -487,24 +567,100 @@ mod tests {
             && groups[3].starts_with(['8', '9', 'a', 'b'])
     }
 
+    /// The windows crate's `KUSER_SHARED_DATA` (ntddk.h) puts `BootId` where [`boot_counter`]
+    /// reads it, 4-aligned and inside the page. The type needs two more `windows` features,
+    /// enabled for tests only. Checked at compile time, so that `cargo clippy --all-targets
+    /// --target aarch64-pc-windows-msvc` checks the ARM64 build too (its tests never run in CI).
+    const _: () = {
+        use windows::Wdk::System::SystemServices::KUSER_SHARED_DATA;
+        assert!(std::mem::offset_of!(KUSER_SHARED_DATA, BootId) == KUSER_BOOT_ID_OFFSET);
+        assert!(KUSER_BOOT_ID_OFFSET.is_multiple_of(align_of::<u32>()));
+        assert!(KUSER_BOOT_ID_OFFSET + size_of::<u32>() <= 0x1000);
+    };
+
     #[test]
-    fn boot_id_is_stable_across_calls() {
-        let first = boot_id();
-        assert!(matches!(first, Ok(BootId(id)) if id != 0), "{first:?}");
-        assert_eq!(boot_id(), first);
-        assert_eq!(boot_id(), first);
+    fn boot_counter_is_stable_across_calls() {
+        let first = boot_counter();
+        assert!(matches!(first, Ok(counter) if counter != 0), "{first:?}");
+        assert_eq!(boot_counter(), first);
+        assert_eq!(boot_counter(), first);
     }
 
-    /// Design H.2 R10 (and R9): prints the boot ID so that the orchestrator can compare it across
-    /// sleep, hibernation, a Fast Startup shutdown, a clock resync and a restart. Harmless, but it
-    /// is only meaningful as part of that manual procedure.
     #[test]
-    #[ignore = "H.2 R9/R10: run by hand around sleep, hibernation, shutdown and restart"]
+    fn boot_id_is_the_counter_form() {
+        let counter = boot_counter().expect("boot counter");
+        let id = boot_id().expect("boot id");
+        assert_eq!(id, BootId::from_boot_counter(counter));
+        assert!(!id.is_legacy());
+        assert_eq!(id.boot_counter(), Some(counter));
+        assert_eq!(boot_id(), Ok(id));
+    }
+
+    #[test]
+    fn legacy_boot_guid_is_stable_across_calls() {
+        let first = legacy_boot_guid();
+        assert!(matches!(first, Ok(BootId(id)) if id != 0), "{first:?}");
+        assert_eq!(legacy_boot_guid(), first);
+        assert_eq!(legacy_boot_guid(), first);
+    }
+
+    #[test]
+    fn current_boot_agrees_with_its_parts() {
+        let current = current_boot().expect("current boot");
+        assert_eq!(Ok(current.id), boot_id());
+        assert_eq!(current.boot_time, boot_time_hint().ok());
+        assert_eq!(current.legacy_guid, legacy_boot_guid().ok());
+        assert!(current.boot_time.is_some());
+        assert!(current.legacy_guid.is_some());
+    }
+
+    /// Design H.2 MT-1..MT-9 (R9/R10): prints what decides "same boot" (the counter and its id)
+    /// and what backs it up and judges 0.1.x's ids (the boot time without its bias, the loader
+    /// GUID), with the raw `SystemTimeOfDayInformation` fields, so that they can be compared
+    /// across sleep, hibernation, a Fast Startup shutdown, a clock change and a restart, and a
+    /// change of the difference traced to `BootTime`, `BootTimeBias` or `SleepTimeBias`:
+    /// `cargo test -p mklm-win print_boot_id -- --ignored --nocapture`. Read-only, but only
+    /// meaningful as part of that manual procedure.
+    #[test]
+    #[ignore = "H.2 MT-1..MT-9: run by hand around sleep, hibernation, shutdown and restart"]
     fn print_boot_id() {
+        let counter = boot_counter();
         let id = boot_id();
         let hint = boot_time_hint();
-        println!("boot_id = {id:?}, boot_time_hint = {hint:?}");
-        assert!(id.is_ok());
+        let guid = legacy_boot_guid();
+        println!("KUSER_SHARED_DATA.BootId = {counter:?}");
+        println!(
+            "boot_id = {}",
+            id.map_or_else(|error| format!("{error:?}"), BootId::to_text)
+        );
+        // FILETIME (100 ns since 1601) to Unix milliseconds, for the local time.
+        let local = |time: u64| {
+            let unix_ms = time.checked_sub(116_444_736_000_000_000)? / 10_000;
+            crate::time::local_time(mklm_core::Timestamp(unix_ms))
+                .ok()
+                .map(|local| local.to_iso_text())
+        };
+        match time_of_day() {
+            Ok(info) => {
+                let at = |time: i64| u64::try_from(time).ok().and_then(local);
+                println!("BootTime = {} ({:?})", info.boot_time, at(info.boot_time));
+                println!(
+                    "CurrentTime = {} ({:?})",
+                    info.current_time,
+                    at(info.current_time)
+                );
+                println!("BootTimeBias = {} (signed)", info.boot_time_bias);
+                println!("SleepTimeBias = {}", info.sleep_time_bias);
+            }
+            Err(error) => println!("SystemTimeOfDayInformation = {error:?}"),
+        }
+        let hint_local = hint.as_ref().ok().copied().and_then(local);
+        println!("BootTime - BootTimeBias = {hint:?} ({hint_local:?})");
+        println!(
+            "legacy boot GUID = {}",
+            guid.map_or_else(|error| format!("{error:?}"), BootId::to_text)
+        );
+        assert!(counter.is_ok());
     }
 
     #[test]

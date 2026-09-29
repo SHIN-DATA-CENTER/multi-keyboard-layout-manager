@@ -29,19 +29,20 @@ use std::time::Duration;
 
 use mklm_core::{
     ApplyOptions, ApplyPending, BASELINE_SCHEMA_VERSION, BaselineRecord, BootId, ConflictInfo,
-    ConflictPolicy, ContextValue, Countdown, DN_STARTED, Decision, DeviceOverrides, Event, Expect,
-    ExpectedKeyboard, ExpectedPlan, FailureReason, GlobalSettings, InputMethods, InvPs2Violation,
-    Journal, JournalEntry, JournalError, KeyboardDevice, KeyboardDriver, KeyboardType,
-    LayoutChoice, MAX_HISTORY, Observation, OpId, OpKind, OpState, OperationError, OperationPlan,
-    OperationResult, OsInfo, Outcome, PendingAction, PlanError, PlanStep, PlannedWrite,
-    ProcessIdentity, RESTORE_ON_UNINSTALL_VALUE, RecoveredOp, RecoveryContext, RecoveryDecision,
-    RegValue, ResolutionChoice, RestoreError, RestorePlan, RestoreScope, RestoreTo, RevertMode,
-    STORE_VERSION, STORE_VERSION_VALUE, SkipReason, SystemSnapshot, Timestamp, TransitionRecord,
-    Transport, UnreadableEntry, ValueKey, ValueOp, ValueRecord, WriteTarget, apply_method,
-    apply_pending_cleared, apply_pending_on_close, assess, check_cleanup, check_inv_ps2,
-    check_restore_record, decide_recovery_with_removed, is_unread_value, live_reset_bans, observe,
-    physical_device_members, plan_migration, plan_restore, plan_set_layout, render_recovery_assets,
-    state_after_resolution, structural_reset_bans, value_eq, value_names,
+    ConflictPolicy, ContextValue, Countdown, CurrentBoot, DN_STARTED, Decision, DeviceOverrides,
+    Event, Expect, ExpectedKeyboard, ExpectedPlan, FailureReason, GlobalSettings, InputMethods,
+    InvPs2Violation, Journal, JournalEntry, JournalError, KeyboardDevice, KeyboardDriver,
+    KeyboardType, LayoutChoice, MAX_HISTORY, Observation, OpId, OpKind, OpState, OperationError,
+    OperationPlan, OperationResult, OsInfo, Outcome, PendingAction, PlanError, PlanStep,
+    PlannedWrite, ProcessIdentity, RESTORE_ON_UNINSTALL_VALUE, RecoveredOp, RecoveryContext,
+    RecoveryDecision, RegValue, ResolutionChoice, RestoreError, RestorePlan, RestoreScope,
+    RestoreTo, RevertMode, STORE_VERSION, STORE_VERSION_VALUE, SkipReason, SystemSnapshot,
+    Timestamp, TransitionRecord, Transport, UnreadableEntry, ValueKey, ValueOp, ValueRecord,
+    WriteTarget, apply_method, apply_pending_cleared, apply_pending_on_close, assess,
+    check_cleanup, check_inv_ps2, check_restore_record, decide_recovery_with_removed,
+    is_unread_value, live_reset_bans, observe, physical_device_members, plan_migration,
+    plan_restore, plan_set_layout, render_recovery_assets, state_after_resolution,
+    structural_reset_bans, value_eq, value_names,
 };
 
 use crate::backend::{BackendError, JournalSlot, RegistryBackend};
@@ -1325,7 +1326,12 @@ where
         Ok(empty_result(None, Outcome::Confirmed, &[]))
     }
 
-    /// The parsed journal, without the lock (read-only; what `mklm-cli journal` shows).
+    /// The parsed journal as stored, without the lock (read-only), with a newer store layout
+    /// counted as unreadable. The boot IDs are the stored ones: nothing is judged against the
+    /// current boot here (only [`Self::open`] adopts them,
+    /// `mklm_core::Journal::adopt_current_boot`). So this is **not** what `mklm-cli journal`
+    /// shows (it reads through `mklm_client::journal::read_journal`, which adopts), and its
+    /// `boot_id` and `apply_pending.since` must not be compared with a boot ID.
     pub fn read_journal(&self) -> Result<Journal, EngineError> {
         let dump = self.registry.read_journal()?;
         let mut journal = Journal::parse(&dump.ops, &dump.baselines);
@@ -1358,12 +1364,25 @@ where
     }
 
     /// D.1 steps 2-7.
+    ///
+    /// The recorded boot IDs are judged first, in memory
+    /// (`mklm_core::Journal::adopt_current_boot`): those judged to be this boot (0.1.x's loader
+    /// GUIDs by the boot time of their history, counter ids by the safety net) become this boot's
+    /// counter ID, every other one reads as an earlier boot. Every decision below compares with
+    /// `current.id` by equality; an adopted entry is stored in the new form only when this session
+    /// writes it for its own reasons.
     fn open<'s>(
         &mut self,
         sink: &'s mut dyn EventSink,
         gate: Gate,
     ) -> Result<Session<'s>, EngineError> {
-        let journal = self.read_journal()?;
+        let current = CurrentBoot {
+            id: self.host.boot_id()?,
+            boot_time: self.host.boot_time_hint(),
+            legacy_guid: self.host.legacy_boot_guid(),
+        };
+        let mut journal = self.read_journal()?;
+        journal.adopt_current_boot(&current);
         if let Some(bad) = journal.unreadable.first() {
             return Err(EngineError::JournalUnreadable(bad.error.clone()));
         }
@@ -1387,14 +1406,13 @@ where
             });
         }
         let inventory = self.devices.keyboards()?;
-        let boot = self.host.boot_id()?;
         let process = self.host.current_process()?;
         let mut s = Session {
             sink,
             journal,
             keyboards: inventory.keyboards,
             global: GlobalSettings::default(),
-            boot,
+            boot: current.id,
             process,
             warnings: Vec::new(),
             inv_ps2: None,
@@ -1773,8 +1791,18 @@ where
         entry: &mut JournalEntry,
         reason: &str,
     ) -> Result<(), EngineError> {
-        entry.take_over(self.host.now(), s.boot, s.process, reason);
+        self.take_over_in_memory(s, entry, reason);
         self.save(s, entry)
+    }
+
+    /// [`JournalEntry::take_over`] with this boot's `boot_time_hint` on the new line, as
+    /// [`Self::move_to`] records it: `boot_id` becomes this boot, and the hint lets the safety net
+    /// of the counter recognise the boot (`mklm_core::JournalEntry::counter_boot_is_current`).
+    fn take_over_in_memory(&self, s: &Session<'_>, entry: &mut JournalEntry, reason: &str) {
+        entry.take_over(self.host.now(), s.boot, s.process, reason);
+        if let Some(line) = entry.history.last_mut() {
+            line.boot_time_hint = self.host.boot_time_hint();
+        }
     }
 
     /// Like [`Self::take_over`] (owner and a history line), but `boot_id` keeps the boot of the
@@ -3398,7 +3426,7 @@ where
                 if entry.state == to {
                     // A restore found counting down: drop the countdown, the user decides (C14).
                     entry.countdown = None;
-                    entry.take_over(self.host.now(), s.boot, s.process, "recover:drop-countdown");
+                    self.take_over_in_memory(s, entry, "recover:drop-countdown");
                     entry.apply_pending = self.close_pending(s, entry, &[], false)?;
                     self.commit(s, entry)?;
                 } else {

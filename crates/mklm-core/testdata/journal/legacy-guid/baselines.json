@@ -1,0 +1,34 @@
+[
+  [
+    "device|ACPI\\PNP0303\\0|OverrideKeyboardType",
+    {"schema_version":1,"key":{"target":{"kind":"device","instance_id":"ACPI\\PNP0303\\0"},"name":"OverrideKeyboardType"},"key_path":"Enum\\ACPI\\PNP0303\\0\\Device Parameters","value":{"kind":"absent"},"captured_at":1790615031540,"captured_by":"c10d2d38-ec81-4c57-a7d6-9592199945ff"}
+  ],
+  [
+    "device|ACPI\\PNP0303\\0|OverrideKeyboardSubtype",
+    {"schema_version":1,"key":{"target":{"kind":"device","instance_id":"ACPI\\PNP0303\\0"},"name":"OverrideKeyboardSubtype"},"key_path":"Enum\\ACPI\\PNP0303\\0\\Device Parameters","value":{"kind":"absent"},"captured_at":1790615031540,"captured_by":"c10d2d38-ec81-4c57-a7d6-9592199945ff"}
+  ],
+  [
+    "global|OverrideKeyboardType",
+    {"schema_version":1,"key":{"target":{"kind":"global"},"name":"OverrideKeyboardType"},"key_path":"Services\\i8042prt\\Parameters","value":{"kind":"dword","value":7},"captured_at":1790615031540,"captured_by":"c10d2d38-ec81-4c57-a7d6-9592199945ff"}
+  ],
+  [
+    "global|OverrideKeyboardSubtype",
+    {"schema_version":1,"key":{"target":{"kind":"global"},"name":"OverrideKeyboardSubtype"},"key_path":"Services\\i8042prt\\Parameters","value":{"kind":"dword","value":0},"captured_at":1790615031540,"captured_by":"c10d2d38-ec81-4c57-a7d6-9592199945ff"}
+  ],
+  [
+    "global|LayerDriver JPN",
+    {"schema_version":1,"key":{"target":{"kind":"global"},"name":"LayerDriver JPN"},"key_path":"Services\\i8042prt\\Parameters","value":{"kind":"sz","value":"kbd101.dll"},"captured_at":1790615031540,"captured_by":"c10d2d38-ec81-4c57-a7d6-9592199945ff"}
+  ],
+  [
+    "global|OverrideKeyboardIdentifier",
+    {"schema_version":1,"key":{"target":{"kind":"global"},"name":"OverrideKeyboardIdentifier"},"key_path":"Services\\i8042prt\\Parameters","value":{"kind":"sz","value":"PCAT_101KEY"},"captured_at":1790615031540,"captured_by":"c10d2d38-ec81-4c57-a7d6-9592199945ff"}
+  ],
+  [
+    "device|HID\\VID_04D9&PID_1818&MI_00\\7&183DDD3D&0&0000|KeyboardTypeOverride",
+    {"schema_version":1,"key":{"target":{"kind":"device","instance_id":"HID\\VID_04D9&PID_1818&MI_00\\7&183DDD3D&0&0000"},"name":"KeyboardTypeOverride"},"key_path":"Enum\\HID\\VID_04D9&PID_1818&MI_00\\7&183DDD3D&0&0000\\Device Parameters","value":{"kind":"absent"},"captured_at":1790649395706,"captured_by":"d724c149-9bee-4348-9481-a544f9980f4b"}
+  ],
+  [
+    "device|HID\\VID_04D9&PID_1818&MI_00\\7&183DDD3D&0&0000|KeyboardSubtypeOverride",
+    {"schema_version":1,"key":{"target":{"kind":"device","instance_id":"HID\\VID_04D9&PID_1818&MI_00\\7&183DDD3D&0&0000"},"name":"KeyboardSubtypeOverride"},"key_path":"Enum\\HID\\VID_04D9&PID_1818&MI_00\\7&183DDD3D&0&0000\\Device Parameters","value":{"kind":"absent"},"captured_at":1790649395706,"captured_by":"d724c149-9bee-4348-9481-a544f9980f4b"}
+  ]
+]

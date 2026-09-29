@@ -313,4 +313,57 @@ mod tests {
             PendingAction::ResetKeyboard
         )));
     }
+
+    /// The journal 0.1.0 left on the desktop PC of the boot-ID bug, as `read_journal`
+    /// (`mklm_client::journal::read_journal`) adopts it for a boot with `boot_time`, and the
+    /// answers `keep`, `post-reboot`, `reboot` and the write commands take from it. `keep` and
+    /// `post-reboot` stop with "not restarted" exactly when
+    /// `entry.state == PendingReboot && entry.boot_id == boot`.
+    #[test]
+    fn the_legacy_journal_of_the_boot_id_bug() {
+        use mklm_core::fixtures;
+
+        let (ops, baselines) = fixtures::legacy_guid_journal();
+        let read = |boot_time| {
+            let current = fixtures::legacy_pc_boot(boot_time);
+            let journal =
+                mklm_client::journal::parse_journal(&ops, &baselines, Some(1), Some(&current))
+                    .journal;
+            (journal, current.id)
+        };
+        let not_restarted = |entry: &JournalEntry, boot| {
+            entry.state == OpState::PendingReboot && entry.boot_id == boot
+        };
+
+        // After the restart (the reported case): the check asks, Keep goes on.
+        let (journal, boot) = read(fixtures::LEGACY_PC_BOOT_TIME_AFTER_RESTART);
+        let entries = post_reboot_entries(&journal);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].op_id.as_str(), fixtures::LEGACY_PENDING_OP);
+        assert!(takes_effect_at_restart(entries[0]));
+        assert!(!not_restarted(entries[0], boot));
+        assert!(restart_reasons(&journal, boot).is_empty(), "reboot: none");
+        for gate in [Gate::NewOp, Gate::Existing] {
+            let blocked = blocker(&journal, boot, &dead, gate).unwrap();
+            assert!(
+                blocked.message.contains("mklm-cli post-reboot"),
+                "{}",
+                blocked.message
+            );
+            assert_eq!(blocked.exit_code, exit_code::BLOCKED);
+        }
+        assert_eq!(blocker(&journal, boot, &dead, Gate::Recover), None);
+
+        // In the boot of the writes: not restarted, and `reboot` lists both.
+        let (journal, boot) = read(fixtures::LEGACY_PC_BOOT_TIME_OF_WRITES);
+        let entries = post_reboot_entries(&journal);
+        assert!(not_restarted(entries[0], boot));
+        assert_eq!(restart_reasons(&journal, boot).len(), 2);
+        let blocked = blocker(&journal, boot, &dead, Gate::NewOp).unwrap();
+        assert!(
+            blocked.message.contains("mklm-cli reboot"),
+            "{}",
+            blocked.message
+        );
+    }
 }

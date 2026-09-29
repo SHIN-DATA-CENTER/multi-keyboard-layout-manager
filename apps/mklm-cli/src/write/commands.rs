@@ -133,8 +133,10 @@ fn liveness(process: &ProcessIdentity) -> Liveness {
     mklm_client::journal::liveness(process)
 }
 
-/// The journal as stored, read unelevated, with a newer store layout counted as unreadable (as
-/// the engine does); and the stored `StoreVersion` (`mklm_client::journal::read_journal`).
+/// The journal read unelevated, with a newer store layout counted as unreadable (as the engine
+/// does) and the recorded boot IDs judged against this boot (those judged to be this boot read as
+/// its counter id; the history keeps the stored ones); and the stored `StoreVersion`
+/// (`mklm_client::journal::read_journal`).
 fn read_journal() -> Result<(Journal, Option<u32>)> {
     let read = mklm_client::journal::read_journal().context("reading the journal failed")?;
     Ok((read.journal, read.store_version))

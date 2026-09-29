@@ -267,6 +267,91 @@ fn ps2_set_waits_for_a_restart() {
     assert_eq!(result.pending_action, None);
 }
 
+/// `BootTime - BootTimeBias` of the boots in the tests of the counter's safety net.
+const BOOT_TIME: u64 = 134_351_230_275_000_000;
+
+/// The safety net of the counter (design C.10): should a resume from hibernation or a Fast
+/// Startup boot ever move `KUSER_SHARED_DATA.BootId`, the unchanged boot time still says "not
+/// restarted", and nothing is written. A real restart starts at another time and confirms.
+#[test]
+fn a_counter_that_moves_without_a_new_boot_time_is_not_a_restart() {
+    let mut w = World::dev_machine();
+    w.host.set_boot_time(Some(BOOT_TIME));
+    let result = World::ok(w.set(PS2, LayoutChoice::Us, LIVE, &mut ScriptedSink::default()));
+    assert_eq!(result.outcome, Outcome::PendingReboot);
+    let op = op_of(&result);
+    let written = w.entry(&op);
+    assert!(
+        written
+            .history
+            .iter()
+            .all(|h| h.boot_time_hint == Some(BOOT_TIME))
+    );
+
+    // The counter moves; the kernel, its boot time and the drivers stay (the host only).
+    w.host.reboot();
+    assert_ne!(w.host.current_boot(), written.boot_id);
+    let before = w.registry.contents();
+    assert!(matches!(
+        w.confirm(&op),
+        Err(EngineError::InvalidState {
+            state: OpState::PendingReboot,
+            ..
+        })
+    ));
+    let recovered = World::ok(w.recover());
+    assert!(recovered.recovered.is_empty(), "{recovered:?}");
+    assert_eq!(w.registry.contents(), before, "nothing was written");
+    assert_eq!(w.entry(&op), written);
+    assert_eq!(w.devices.running_type(PS2), Some(KeyboardType::JIS));
+
+    // A real restart: another boot time.
+    w.reboot();
+    w.host.set_boot_time(Some(BOOT_TIME + 1_200_000_000));
+    let result = World::ok(w.confirm(&op));
+    assert_eq!(result.outcome, Outcome::Confirmed);
+    assert_eq!(w.devices.running_type(PS2), Some(KeyboardType::US));
+    let confirmed = w.entry(&op);
+    assert_eq!(confirmed.boot_id, written.boot_id, "no write phase since");
+    assert_eq!(
+        confirmed.history.last().map(|h| h.boot_time_hint),
+        Some(Some(BOOT_TIME + 1_200_000_000))
+    );
+}
+
+/// Recovery's take-over line records this boot's time, like every transition line: the safety
+/// net of the counter reads the lines under an entry's `boot_id`.
+#[test]
+fn a_take_over_line_carries_the_boot_time() {
+    let (mut base, op) = migrated_confirmed();
+    base.host.set_boot_time(Some(BOOT_TIME));
+    let mut dry = base.fork();
+    World::ok(dry.revert(&op, NO_RESET));
+    let total = dry.registry.mutating_calls();
+    let mut seen = 0;
+    for n in 0..total {
+        let mut crashed = base.fork();
+        crashed.registry.set_faults(FaultPlan {
+            crash_after: Some(n),
+            ..FaultPlan::default()
+        });
+        assert!(crashed.revert(&op, NO_RESET).is_err(), "crash_after {n}");
+        let mut world = crashed.after_crash(mklm_engine::memory::CrashImage::ProcessKill, false);
+        World::ok(world.recover());
+        let entry = world.entry(&op);
+        for line in entry
+            .history
+            .iter()
+            .filter(|h| h.reason == "recover:take-over")
+        {
+            assert_eq!(line.boot_time_hint, Some(BOOT_TIME), "crash_after {n}");
+            assert_eq!(line.boot, world.host.current_boot(), "crash_after {n}");
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "no crash point left the revert to recovery");
+}
+
 #[test]
 fn migrate_restart_recover_confirm() {
     let (mut w, op) = migrated_pending();

@@ -590,6 +590,41 @@ mod tests {
         assert!(needs_apply(&journal, boot, &summary, &snapshot).is_empty());
     }
 
+    /// The journal 0.1.0 left on the desktop PC of the boot-ID bug, adopted as
+    /// `mklm_client::journal::read_journal` does. After the restart nothing asks for another
+    /// restart; in the boot of the writes both entries do (the migration covers every keyboard).
+    #[test]
+    fn the_legacy_journal_asks_for_a_restart_only_before_it() {
+        let (ops, baselines) = fixtures::legacy_guid_journal();
+        let snapshot = fixtures::dev_machine();
+        let read = |boot_time| {
+            let current = fixtures::legacy_pc_boot(boot_time);
+            let journal =
+                mklm_client::journal::parse_journal(&ops, &baselines, Some(1), Some(&current))
+                    .journal;
+            let summary = mklm_client::startup::summarize(&journal, current.id, &|_| {
+                mklm_core::Liveness::Dead
+            });
+            (journal, current.id, summary)
+        };
+
+        let (journal, boot, summary) = read(fixtures::LEGACY_PC_BOOT_TIME_AFTER_RESTART);
+        assert!(needs_apply(&journal, boot, &summary, &snapshot).is_empty());
+        assert_eq!(restart_waits(&journal, boot), RestartWaits::default());
+
+        let (journal, boot, summary) = read(fixtures::LEGACY_PC_BOOT_TIME_OF_WRITES);
+        assert_eq!(
+            needs_apply(&journal, boot, &summary, &snapshot),
+            NeedsApply {
+                restart: true,
+                ..NeedsApply::default()
+            }
+        );
+        let waits = restart_waits(&journal, boot);
+        assert!(waits.all, "{waits:?}");
+        assert!(waits.covers(r"HID\VID_04D9&PID_1818&MI_00\7&183DDD3D&0&0000"));
+    }
+
     #[test]
     fn blocked_reasons_name_the_blocking_attention() {
         let summary = |attention| StartupSummary {

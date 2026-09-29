@@ -65,7 +65,9 @@ MKLM は、まだコード署名をしていません。そのため、次のよ
 
 すでにインストールしてある場合は、新しいインストーラーを実行するだけで上書き更新できます。動いている MKLM は自動的に終了します。設定と変更の記録は、そのまま引き継がれます。
 
-v0.1.0 には自動更新がありません。v0.2.0（自動更新に対応した最初の版）は、この手順で手でインストールしてください。v0.2.0 からは、次の「自動更新」で新しい版を入れられます。
+古い版のインストーラーで入れ直す（ダウングレードする）のは、PC の再起動を待っている変更がないときだけにしてください。再起動を待っている間に古い版に戻すと、古い版は、まだ反映されていない変更を「再起動した後」と誤って扱うことがあります。
+
+v0.1.x には自動更新がありません。v0.2.0（自動更新に対応した最初の版）は、この手順で手でインストールしてください。v0.2.0 からは、次の「自動更新」で新しい版を入れられます。
 
 ## 自動更新（v0.2.0 以降）
 
@@ -187,7 +189,7 @@ Start-Process .\MKLM-Setup-0.2.1-x64.exe -ArgumentList '/S' -Verb RunAs -Wait -P
 - Requires Windows 11 24H2 (build 26100) or later, x64 or ARM64, and administrator rights.
 - Download `MKLM-Setup-<version>-x64.exe` (Intel/AMD) or `-arm64.exe` from GitHub Releases. Optionally compare it with `SHA256SUMS`.
 - MKLM is not code-signed yet. Keep the download in the browser, choose "More info → Run anyway" in SmartScreen, and "Yes" in UAC ("Unknown publisher"). It cannot run where Smart App Control is on.
-- It installs into `C:\Program Files\SHIN DATA CENTER\MKLM` with a Start menu entry. Running a newer installer upgrades in place and keeps your settings.
+- It installs into `C:\Program Files\SHIN DATA CENTER\MKLM` with a Start menu entry. Running a newer installer upgrades in place and keeps your settings. Do not go back to an older version while a change waits for a PC restart: the older version may take it for already restarted.
 - Uninstall from Settings → Apps. You are asked whether to put the keyboard settings back to how they were before MKLM; the journal and the recovery files stay.
 - **Automatic updates (from v0.2.0; install v0.2.0 by hand once).** MKLM checks GitHub once a day (it sends only its version and x64/ARM64; you can turn this off in Settings), downloads a new installer automatically and verifies it against the maintainer's offline minisign signature of `latest.json` and its SHA-256. It installs **only when you press "Update now"**. The UAC prompt shows "Unknown publisher": click "Show more details" and check that the program location is `C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe`; MKLM asks for permission only right after you press a button. MKLM closes and reopens by itself; keyboard settings are not touched. It stays on the same architecture (no automatic x64 → ARM64 switch).
 - Manifests expire 180 days after they are issued; an expired one only shows a notice. Behind a proxy that needs Windows integrated authentication, automatic updates do not work (MKLM never sends Windows credentials); download from the release page instead.

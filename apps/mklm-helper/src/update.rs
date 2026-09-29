@@ -696,6 +696,10 @@ impl Host for TidyingHost {
         self.inner.boot_time_hint()
     }
 
+    fn legacy_boot_guid(&self) -> Option<BootId> {
+        self.inner.legacy_boot_guid()
+    }
+
     fn current_process(&self) -> Result<ProcessIdentity, HostError> {
         self.inner.current_process()
     }

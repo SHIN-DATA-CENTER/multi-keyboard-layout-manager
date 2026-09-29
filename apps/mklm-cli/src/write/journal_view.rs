@@ -521,4 +521,47 @@ mod tests {
         assert_eq!(json["entries"][0]["updated_at"], 1_790_516_010_637_u64);
         assert_eq!(json["baselines"][0]["captured_at"], 1_790_515_162_813_u64);
     }
+
+    /// The journal 0.1.0 left on the desktop PC of the boot-ID bug, adopted as `read_journal`
+    /// does. The JSON's `boot_id` is this boot's counter form; an entry's `boot_id` is the
+    /// adopted one when it is of this boot, and the stored GUID otherwise (history lines keep it).
+    #[test]
+    fn the_legacy_journal_shows_the_counter_form_boot() {
+        use mklm_core::fixtures;
+
+        let (ops, baselines) = fixtures::legacy_guid_journal();
+        let dead = |_: &ProcessIdentity| Liveness::Dead;
+        let document_of = |boot_time| {
+            let current = fixtures::legacy_pc_boot(boot_time);
+            let journal =
+                mklm_client::journal::parse_journal(&ops, &baselines, Some(1), Some(&current))
+                    .journal;
+            let text = journal_text(&journal, Some(current.id), &dead, None, &utc_timestamp_text);
+            let document = journal_document(&journal, Some(1), Some(current.id), &dead);
+            (serde_json::to_value(&document).unwrap(), text)
+        };
+        let counter = "00000007-0000-8000-8000-000000000000";
+        let guid = "9845bda6-baa7-11f1-adca-ca988d513a4f";
+
+        let (json, text) = document_of(fixtures::LEGACY_PC_BOOT_TIME_AFTER_RESTART);
+        assert_eq!(json["boot_id"], counter);
+        assert_eq!(json["entries"][0]["op_id"], fixtures::LEGACY_REVERTED_OP);
+        assert_eq!(json["entries"][0]["attention"], "none");
+        assert_eq!(json["entries"][0]["boot_id"], guid);
+        assert_eq!(json["entries"][1]["op_id"], fixtures::LEGACY_PENDING_OP);
+        assert_eq!(json["entries"][1]["attention"], "recover");
+        assert_eq!(json["entries"][1]["boot_id"], guid);
+        assert_eq!(json["entries"][1]["apply_pending"]["since"], guid);
+        assert!(!text.contains("waits for a PC restart"), "{text}");
+
+        let (json, text) = document_of(fixtures::LEGACY_PC_BOOT_TIME_OF_WRITES);
+        assert_eq!(json["boot_id"], counter);
+        assert_eq!(json["entries"][0]["attention"], "needs-apply");
+        assert_eq!(json["entries"][0]["boot_id"], counter);
+        assert_eq!(json["entries"][1]["attention"], "waiting-for-reboot");
+        assert_eq!(json["entries"][1]["boot_id"], counter);
+        assert_eq!(json["entries"][1]["apply_pending"]["since"], counter);
+        assert_eq!(json["entries"][1]["history"][0]["boot"], guid);
+        assert!(text.contains("Attention: waits for a PC restart"), "{text}");
+    }
 }

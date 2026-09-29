@@ -109,7 +109,7 @@
 | `values` | `model_value`、`op_value` | 非昇格のスナップショットから読んだ値 |
 | `describe` | `reset_phase`、`reset_phase_from`、`ResetPhase` | 文言を正しく選ぶための事実（G.2） |
 | `launch`（Windows） | `LaunchConfig`（`current`）、`start`、`checked_helper_path`、`HelperSession`、`HelperLauncher` | helper の起動とハンドシェイク（m2 E.1〜E.3）。起動の失敗は Win32 のエラー コードを `LaunchFailure::StartFailed(Option<u32>)` に残す（B.17） |
-| `journal`（Windows） | `read_journal`、`JournalRead`、`liveness`、`boot_id`、`LiveJournal` | 非昇格でのジャーナルの読み取り |
+| `journal`（Windows） | `read_journal`、`JournalRead`、`liveness`、`boot_id`、`LiveJournal` | 非昇格でのジャーナルの読み取り。0.1.1 から、0.1.x が記録した起動 ID をここで判定して読み替える（m2 C.10「起動 ID」）ので、GUI の「同じ起動か」（B.9 の「まだ反映されていません」など）はすべて `entry.boot_id == boot` のままでよい |
 | `inventory`（Windows） | `read_inventory`、`Inventory`、`InventoryError`、`read_display_snapshot` | 計画用の列挙（書き込みを止める読み取りの問題を区別）と、表示用の列挙 |
 | `run_once`（Windows） | `apply_run_once_rule`、`run_request`、`RequestOutcome`、`PostRebootCommand`（`Cli`、`Gui`）、`RunOnceOutcome`、`RunOnceError`、`GUI_EXE` | RunOnce の規則（m2 F.4、C17）。`run_request` は要求の直後に同じスレッドで規則を適用する |
 

@@ -54,6 +54,12 @@ features = [
     "Win32_UI_WindowsAndMessaging",
 ]
 
+# Test builds only: `KUSER_SHARED_DATA` (Wdk_System_SystemServices) is defined only with these two
+# features, and a test checks `session::boot_counter`'s offset against it.
+[dev-dependencies.windows]
+workspace = true
+features = ["Win32_System_Diagnostics_Debug", "Win32_System_Kernel"]
+
 [lints]
 workspace = true
 

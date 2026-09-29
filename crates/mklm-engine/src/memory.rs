@@ -1014,12 +1014,23 @@ impl FakeClock {
     }
 }
 
+/// The loader GUID [`FakeHost`] reports in its first boot (one more in each later boot, unless a
+/// test sets another with [`FakeHost::set_legacy_guid`]): what its boot ID was before 0.1.1.
+const FAKE_FIRST_LEGACY_GUID: u128 = 0x9b1c_0d6e_2f4a_4c8b_a1d3_5e6f_0000_0001;
+
 /// In-memory [`Host`] with a manual clock, settable boot ID and process table.
 #[derive(Debug, Clone)]
 pub struct FakeHost {
     lock: FakeLockCell,
     clock: FakeClock,
-    boot: BootId,
+    /// `KUSER_SHARED_DATA.BootId`: 1 in the first boot, one more after each [`FakeHost::reboot`].
+    boot_counter: u32,
+    /// What [`Host::legacy_boot_guid`] answers when a test set it (kept across reboots, like the
+    /// GUID of the desktop PC that 0.1.0 never saw restart); the default sequence otherwise.
+    legacy_guid: Option<Option<BootId>>,
+    /// What [`Host::boot_time_hint`] answers (`None` unless a test sets it, so that the history
+    /// lines the tests compare stay as they were).
+    boot_time: Option<u64>,
     process: ProcessIdentity,
     /// Processes that run, besides `process`.
     alive: Vec<ProcessIdentity>,
@@ -1039,7 +1050,9 @@ impl FakeHost {
         Self {
             lock,
             clock: FakeClock::new(1_790_000_000_000),
-            boot: BootId(0x9b1c_0d6e_2f4a_4c8b_a1d3_5e6f_0000_0001),
+            boot_counter: 1,
+            legacy_guid: None,
+            boot_time: None,
             process: ProcessIdentity {
                 pid: 1000,
                 creation_time: 1,
@@ -1074,10 +1087,11 @@ impl FakeHost {
         self.assets_moved = true;
     }
 
-    /// A new boot: new boot ID, no process of the old boot runs, and this host continues as a
-    /// new process of the new boot.
+    /// A new boot: the boot counter goes up by one (a new boot ID), no process of the old boot
+    /// runs, and this host continues as a new process of the new boot. A boot time or legacy GUID
+    /// a test set stays as it was.
     pub fn reboot(&mut self) {
-        self.boot = BootId(self.boot.0.wrapping_add(1));
+        self.boot_counter = self.boot_counter.wrapping_add(1);
         self.alive.clear();
         self.process = ProcessIdentity {
             pid: self.process.pid.wrapping_add(1),
@@ -1119,9 +1133,23 @@ impl FakeHost {
         self.clock.clone()
     }
 
-    /// The current boot's ID.
+    /// The current boot's ID: the counter form of the fake `KUSER_SHARED_DATA.BootId`.
     pub fn current_boot(&self) -> BootId {
-        self.boot
+        BootId::from_boot_counter(self.boot_counter)
+    }
+
+    /// Makes [`Host::legacy_boot_guid`] answer `guid` from now on, reboots included (`None`: it
+    /// cannot be read).
+    pub fn set_legacy_guid(&mut self, guid: Option<BootId>) {
+        self.legacy_guid = Some(guid);
+    }
+
+    /// Makes [`Host::boot_time_hint`] answer `boot_time` (`BootTime - BootTimeBias`) from now on;
+    /// a reboot does not change it. So a [`FakeHost::reboot`] alone, with a boot time set, is a
+    /// counter that moved without a new boot (what the counter's safety net catches); a test of a
+    /// real restart sets another boot time after it.
+    pub fn set_boot_time(&mut self, boot_time: Option<u64>) {
+        self.boot_time = boot_time;
     }
 
     /// The process this host runs as.
@@ -1184,11 +1212,19 @@ impl Host for FakeHost {
     }
 
     fn boot_id(&self) -> Result<BootId, HostError> {
-        Ok(self.boot)
+        Ok(self.current_boot())
     }
 
     fn boot_time_hint(&self) -> Option<u64> {
-        None
+        self.boot_time
+    }
+
+    fn legacy_boot_guid(&self) -> Option<BootId> {
+        self.legacy_guid.unwrap_or_else(|| {
+            Some(BootId(
+                FAKE_FIRST_LEGACY_GUID.wrapping_add(u128::from(self.boot_counter.wrapping_sub(1))),
+            ))
+        })
     }
 
     fn current_process(&self) -> Result<ProcessIdentity, HostError> {
@@ -1813,8 +1849,15 @@ mod tests {
             }),
             Liveness::Alive
         );
+        assert_eq!(boot, BootId::from_boot_counter(1));
+        assert_eq!(c.boot_id(), Ok(boot));
+        assert_eq!(c.boot_time_hint(), None);
+        let first_guid = BootId(0x9b1c_0d6e_2f4a_4c8b_a1d3_5e6f_0000_0001);
+        assert_eq!(c.legacy_boot_guid(), Some(first_guid));
         c.reboot();
         assert_ne!(c.current_boot(), boot);
+        assert_eq!(c.current_boot(), BootId::from_boot_counter(2));
+        assert_eq!(c.legacy_boot_guid(), Some(BootId(first_guid.0 + 1)));
         assert_eq!(
             c.liveness(&ProcessIdentity {
                 pid: 3000,
@@ -1823,6 +1866,15 @@ mod tests {
             Liveness::Dead
         );
         assert_eq!(c.liveness(&c.process()), Liveness::Alive);
+        // Set values stay across a reboot.
+        c.set_legacy_guid(Some(first_guid));
+        c.set_boot_time(Some(134_351_230_275_000_000));
+        c.reboot();
+        assert_eq!(c.current_boot(), BootId::from_boot_counter(3));
+        assert_eq!(c.legacy_boot_guid(), Some(first_guid));
+        assert_eq!(c.boot_time_hint(), Some(134_351_230_275_000_000));
+        c.set_legacy_guid(None);
+        assert_eq!(c.legacy_boot_guid(), None);
 
         c.remove_system32_file("KBD101.DLL");
         assert_eq!(c.system32_file_exists("kbd101.dll"), Ok(false));
