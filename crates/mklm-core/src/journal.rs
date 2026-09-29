@@ -122,20 +122,62 @@ impl From<OpId> for String {
     }
 }
 
-/// Identifies one boot of Windows: the boot identifier GUID the loader generates for every boot
-/// (`NtQuerySystemInformation(SystemBootEnvironmentInformation).BootIdentifier`), which no clock
-/// adjustment moves (design review C2; the kernel boot *time* shifts with time corrections and is
-/// only recorded as a diagnostic, [`TransitionRecord::boot_time_hint`]). A Fast Startup "shutdown"
-/// must keep it, which is what MKLM needs: the drivers were not re-initialized either. Both
-/// properties are verified on the machine (design H.2, R9 and R10) before M2 is done.
+/// Identifies one boot of Windows. "Same boot" is decided by equality everywhere, and "restarted"
+/// must mean that a full kernel boot happened since the write phase (design review C2): a false
+/// "different boot" would let the user keep a change that is not in effect yet.
 ///
-/// JSON form: the lower-case hyphenated GUID without braces. The `u128` is the 32 hex digits of
-/// that text read as one big-endian number (see [`BootId::from_guid`]).
+/// Since 0.1.1 it is the **counter form** of `KUSER_SHARED_DATA.BootId`
+/// ([`BootId::from_boot_counter`]): the boot sequence number that the OS loader increments on
+/// every boot attempt (`\Windows\bootstat.dat`). Sleep, resume from hibernation and a Fast
+/// Startup "shutdown" do not run the loader and keep it, which is what MKLM needs: the drivers
+/// did not re-read their values either. No clock adjustment moves it (the kernel boot *time*
+/// shifts with time corrections and is only recorded in [`TransitionRecord::boot_time_hint`]).
+///
+/// 0.1.0 recorded the loader's boot identifier GUID
+/// (`NtQuerySystemInformation(SystemBootEnvironmentInformation).BootIdentifier`) instead, which is
+/// not per boot on every machine (a desktop PC kept the same GUID across full restarts, so its
+/// `PendingReboot` never ended). Such ids are **legacy** ([`BootId::is_legacy`]): they never equal
+/// a counter id, so every comparison reads them as an earlier boot, unless
+/// [`crate::JournalEntry::adopt_legacy_boots`] judged them to be the current boot (see
+/// [`crate::boot`]).
+///
+/// JSON form: the lower-case hyphenated UUID text without braces, for both forms (0.1.0's parser
+/// reads the counter form). The `u128` is the 32 hex digits of that text read as one big-endian
+/// number (see [`BootId::from_guid`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct BootId(pub u128);
 
 impl BootId {
+    /// Every bit of a counter-form id except the counter: an RFC 9562 version-8 UUID with variant
+    /// `10` and every other bit zero. Loader GUIDs are version 1 or 4, so they never have it.
+    pub const COUNTER_FORM: u128 = 0x0000_0000_0000_8000_8000_0000_0000_0000;
+
+    /// Bits of the counter in a counter-form id (the first group of the text).
+    const COUNTER_BITS: u128 = 0xffff_ffff << 96;
+
+    /// The id of the boot whose `KUSER_SHARED_DATA.BootId` is `counter`: the text is
+    /// `cccccccc-0000-8000-8000-000000000000` with the counter in hex (for example
+    /// `00000007-0000-8000-8000-000000000000`).
+    pub const fn from_boot_counter(counter: u32) -> BootId {
+        BootId(((counter as u128) << 96) | Self::COUNTER_FORM)
+    }
+
+    /// The boot counter of a counter-form id; `None` for any other id (a legacy one).
+    pub const fn boot_counter(self) -> Option<u32> {
+        if self.0 & !Self::COUNTER_BITS == Self::COUNTER_FORM {
+            Some((self.0 >> 96) as u32)
+        } else {
+            None
+        }
+    }
+
+    /// True for an id that is not in the counter form: the loader GUID 0.1.0 recorded (or a
+    /// test's arbitrary number). See [`crate::boot`] for how such ids are judged.
+    pub const fn is_legacy(self) -> bool {
+        self.boot_counter().is_none()
+    }
+
     /// Accepts exactly `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`.
     pub fn parse(text: &str) -> Result<Self, JournalError> {
         let bad = || JournalError::Malformed {
@@ -430,6 +472,7 @@ pub struct ApplyPending {
     /// Keyboards whose running type may differ from their stored values.
     pub instance_ids: Vec<String>,
     /// Boot in which it was recorded. A later boot clears it (every driver re-reads its values).
+    /// Adopted like [`JournalEntry::boot_id`] when it is a legacy id of the current boot.
     pub since: BootId,
 }
 
@@ -711,8 +754,10 @@ pub struct TransitionRecord {
     /// Short machine-readable reason, e.g. `"countdown-expired"`, `"recover:roll-forward"`.
     /// Transitions made by recovery start with [`crate::RECOVERY_REASON_PREFIX`].
     pub reason: String,
-    /// Kernel boot time minus its bias (`SYSTEM_TIMEOFDAY_INFORMATION`, FILETIME units), for
-    /// support only: it moves with clock corrections, so no decision reads it (design review C2).
+    /// Kernel boot time minus its bias (`SYSTEM_TIMEOFDAY_INFORMATION`, FILETIME units) of the
+    /// boot this line was written in. A diagnostic, with one exception: it tells whether a legacy
+    /// (0.1.x) `boot` is the current boot ([`JournalEntry::legacy_boot_is_current`]). The boot
+    /// ID itself never depends on it (design review C2).
     #[serde(default)]
     pub boot_time_hint: Option<u64>,
 }
@@ -737,7 +782,9 @@ pub struct JournalEntry {
     pub seq: u64,
     pub kind: OpKind,
     pub state: OpState,
-    /// Boot of the most recent write phase (set at `Planned` and again at `RevertPending`).
+    /// Boot of the most recent write phase (set at `Planned` and again at `RevertPending`). A
+    /// legacy (0.1.x) id judged to be the current boot is replaced in memory when the journal is
+    /// read ([`JournalEntry::adopt_legacy_boots`]).
     pub boot_id: BootId,
     /// Process that performs the current write phase (set together with `boot_id`).
     pub owner: ProcessIdentity,
@@ -1219,6 +1266,66 @@ mod tests {
         assert_eq!(serde_json::from_str::<BootId>(&json).unwrap(), id);
         // The earlier numeric form is not accepted.
         assert!(serde_json::from_str::<BootId>("134036748000000000").is_err());
+    }
+
+    /// The counter form of `KUSER_SHARED_DATA.BootId` (0.1.1): a version-8 UUID whose first
+    /// group is the counter, which 0.1.0's parser (the same `is_uuid_text`) reads.
+    #[test]
+    fn boot_id_counter_form() {
+        let seven = BootId::from_boot_counter(7);
+        assert_eq!(seven.to_text(), "00000007-0000-8000-8000-000000000000");
+        assert_eq!(
+            BootId::from_boot_counter(0xffff_ffff).to_text(),
+            "ffffffff-0000-8000-8000-000000000000"
+        );
+        for n in [1, 7, 0x0001_0000, 0xffff_ffff] {
+            let id = BootId::from_boot_counter(n);
+            assert_eq!(id.boot_counter(), Some(n));
+            assert!(!id.is_legacy());
+            let text = id.to_text();
+            assert!(is_uuid_text(&text), "{text}");
+            assert_eq!(BootId::parse(&text), Ok(id));
+            let json = serde_json::to_string(&id).unwrap();
+            assert_eq!(json, format!("\"{text}\""));
+            assert_eq!(serde_json::from_str::<BootId>(&json).unwrap(), id);
+        }
+        assert_eq!(
+            BootId::parse("00000007-0000-8000-8000-000000000000"),
+            Ok(seven)
+        );
+        assert_eq!(
+            BootId::COUNTER_FORM,
+            BootId::from_boot_counter(0).0,
+            "the form is the id of counter 0"
+        );
+    }
+
+    /// Loader GUIDs (version 1 or 4) and arbitrary test numbers are legacy; so is a counter id
+    /// with any other bit set.
+    #[test]
+    fn legacy_boot_ids() {
+        for text in [
+            "9845bda6-baa7-11f1-adca-ca988d513a4f",
+            "4c703377-b861-11f1-a1dd-d9f1d0b3ec70",
+            "9b1c0d6e-2f4a-4c8b-a1d3-5e6f7a8b9c0d",
+        ] {
+            let id = BootId::parse(text).unwrap();
+            assert!(id.is_legacy(), "{text}");
+            assert_eq!(id.boot_counter(), None, "{text}");
+        }
+        assert!(BootId(0).is_legacy());
+        assert!(BootId(1).is_legacy());
+        assert!(BootId(u128::MAX).is_legacy());
+        let seven = BootId::from_boot_counter(7);
+        for bit in 0..96 {
+            let flipped = BootId(seven.0 ^ (1u128 << bit));
+            assert!(flipped.is_legacy(), "bit {bit}: {}", flipped.to_text());
+        }
+        // The counter bits are not part of the form.
+        for bit in 96..128 {
+            let flipped = BootId(seven.0 ^ (1u128 << bit));
+            assert!(!flipped.is_legacy(), "bit {bit}");
+        }
     }
 
     #[test]

@@ -11,6 +11,7 @@
 //! - [`operation`]: the writes of "set layout" and "migrate", and how a change takes effect (M2).
 //! - [`journal`], [`recovery`], [`restore`]: journal entries, their state machine, recovery
 //!   decisions and restore plans (M2, see docs/design/m2-engine.md).
+//! - [`boot`]: the current boot ([`CurrentBoot`]) and how the boot IDs of 0.1.x are judged.
 //! - [`recovery_assets`]: the offline recovery files (M2).
 //! - [`report`]: request options, events, decisions and results shared by the engine, the pipe
 //!   protocol and the UIs (M2).
@@ -19,6 +20,7 @@
 
 pub mod allowlist;
 pub mod assess;
+pub mod boot;
 pub mod device;
 pub mod global;
 pub mod group;
@@ -42,6 +44,7 @@ mod test_support;
 
 pub use allowlist::*;
 pub use assess::*;
+pub use boot::*;
 pub use device::*;
 pub use global::*;
 pub use group::*;

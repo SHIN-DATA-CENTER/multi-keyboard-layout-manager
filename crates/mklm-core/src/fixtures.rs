@@ -1,9 +1,13 @@
 //! Test fixtures reproducing the development machine after M0 (see `docs/research/m0-results.md`),
-//! and the schema-1 journal it holds after the M2 real-machine tests (`testdata/journal/`).
+//! the schema-1 journal it holds after the M2 real-machine tests (`testdata/journal/schema-1`),
+//! and the journal of the boot-ID bug that 0.1.0 left on a desktop PC
+//! (`testdata/journal/legacy-guid`, docs/research/boot-id.md).
 //!
 //! Compiled for this crate's tests and, with the `test-fixtures` feature, for other crates' tests
 //! (`mklm-engine` drives its fakes with them). Never enable the feature in a shipped binary.
 
+use crate::boot::CurrentBoot;
+use crate::journal::BootId;
 use crate::model::*;
 
 fn ids(list: &[&str]) -> Vec<String> {
@@ -235,6 +239,68 @@ pub fn schema_1_journal() -> (StoredDocuments, StoredDocuments) {
         .map(|(name, json)| (name, json.to_string()))
         .collect();
     (ops, baselines)
+}
+
+/// The loader boot GUID that 0.1.0 recorded on the desktop PC of the boot-ID bug (2026-09-29):
+/// the same value in every boot from 2026-09-28 13:29 to at least 11:37 the next day, full
+/// restarts included (docs/research/boot-id.md).
+pub const LEGACY_PC_GUID: BootId = BootId(0x9845_bda6_baa7_11f1_adca_ca98_8d51_3a4f);
+/// `KUSER_SHARED_DATA.BootId` of that PC after its 11:37:07 restart.
+pub const LEGACY_PC_BOOT_COUNTER: u32 = 7;
+/// `BootTime - BootTimeBias` of the 11:37:07 boot (the one after both entries were written).
+pub const LEGACY_PC_BOOT_TIME_AFTER_RESTART: u64 = 134_351_230_275_000_000;
+/// `BootTime - BootTimeBias` of the 11:34:20 boot, in which both entries were last written.
+pub const LEGACY_PC_BOOT_TIME_OF_WRITES: u64 = 134_351_228_605_000_000;
+/// `BootTime - BootTimeBias` of the 2026-09-28 13:29 boot, in which the first entry was created.
+pub const LEGACY_PC_BOOT_TIME_OF_FIRST_WRITE: u64 = 134_350_433_725_000_000;
+/// The migration to JIS that was reverted before any restart (`reverted-pending-reboot`).
+pub const LEGACY_REVERTED_OP: &str = "c10d2d38-ec81-4c57-a7d6-9592199945ff";
+/// The migration to US that waits for the restart (`pending-reboot`, `apply_pending` restart).
+pub const LEGACY_PENDING_OP: &str = "d724c149-9bee-4348-9481-a544f9980f4b";
+
+/// The two operations and eight baselines of the boot-ID bug, exactly as 0.1.0 stored them on
+/// the desktop PC (`HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Journal`, schema 1, copied value by value
+/// on 2026-09-29 after the 11:37 restart): `c10d2d38` ([`LEGACY_REVERTED_OP`]) and `d724c149`
+/// ([`LEGACY_PENDING_OP`]), both with the boot ID [`LEGACY_PC_GUID`] and history lines that
+/// carry `boot_time_hint`. `(value name, JSON)` of `Ops` and of `Baselines`.
+pub fn legacy_guid_journal() -> (StoredDocuments, StoredDocuments) {
+    let ops = [
+        (
+            LEGACY_REVERTED_OP,
+            include_str!(
+                "../testdata/journal/legacy-guid/c10d2d38-ec81-4c57-a7d6-9592199945ff.json"
+            ),
+        ),
+        (
+            LEGACY_PENDING_OP,
+            include_str!(
+                "../testdata/journal/legacy-guid/d724c149-9bee-4348-9481-a544f9980f4b.json"
+            ),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, json)| (name.to_string(), json.trim().to_string()))
+    .collect();
+    let baselines: Vec<(String, serde_json::Value)> = serde_json::from_str(include_str!(
+        "../testdata/journal/legacy-guid/baselines.json"
+    ))
+    .unwrap_or_default();
+    let baselines = baselines
+        .into_iter()
+        .map(|(name, json)| (name, json.to_string()))
+        .collect();
+    (ops, baselines)
+}
+
+/// The current boot of that PC as the fixed build reads it, with `boot_time` as
+/// `BootTime - BootTimeBias` ([`LEGACY_PC_BOOT_TIME_AFTER_RESTART`] after the restart,
+/// [`LEGACY_PC_BOOT_TIME_OF_WRITES`] as if the fix had been installed before it).
+pub fn legacy_pc_boot(boot_time: u64) -> CurrentBoot {
+    CurrentBoot {
+        id: BootId::from_boot_counter(LEGACY_PC_BOOT_COUNTER),
+        boot_time: Some(boot_time),
+        legacy_guid: Some(LEGACY_PC_GUID),
+    }
 }
 
 /// The development machine as verified at the end of M0.
