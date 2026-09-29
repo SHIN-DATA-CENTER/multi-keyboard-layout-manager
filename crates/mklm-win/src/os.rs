@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 
-use mklm_core::OsInfo;
+use mklm_core::{KeyboardType, OsInfo};
 use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::SystemInformation::{
@@ -11,6 +11,7 @@ use windows::Win32::System::SystemInformation::{
     IMAGE_FILE_MACHINE_ARMNT, IMAGE_FILE_MACHINE_I386, IMAGE_FILE_MACHINE_UNKNOWN, OSVERSIONINFOW,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardType;
 use windows::Win32::UI::Shell::{FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
 use windows_registry::LOCAL_MACHINE;
@@ -25,13 +26,29 @@ const CURRENT_VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
 /// Reads the OS facts. Only a failing `RtlGetVersion` is an error; a missing UBR is `None` and an
 /// unknown architecture falls back to the one this binary was built for, with an issue.
 pub fn read_os_info(issues: &mut Vec<ReadIssue>) -> Result<OsInfo, Error> {
+    // SAFETY: GetSystemMetrics has no preconditions.
+    let remote_session = unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0;
     Ok(OsInfo {
         build: build_number()?,
         ubr: ubr(issues),
         native_arch: native_arch(issues),
-        // SAFETY: GetSystemMetrics has no preconditions.
-        remote_session: unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0,
+        remote_session,
+        client_keyboard_type: remote_session.then(session_keyboard_type).flatten(),
     })
+}
+
+/// The keyboard type the Remote Desktop client reported (`OsInfo::client_keyboard_type`):
+/// `GetKeyboardType` type and subtype, `None` when the type is 0 (the call failed). Read only in
+/// a remote session: on the console it describes no particular keyboard among several.
+fn session_keyboard_type() -> Option<KeyboardType> {
+    // SAFETY: GetKeyboardType has no preconditions; 0 asks for the type.
+    let ty = u32::try_from(unsafe { GetKeyboardType(0) }).ok()?;
+    if ty == 0 {
+        return None;
+    }
+    // SAFETY: as above; 1 asks for the subtype, for which 0 is a valid answer.
+    let subtype = u32::try_from(unsafe { GetKeyboardType(1) }).unwrap_or(0);
+    Some(KeyboardType::new(ty, subtype))
 }
 
 /// Build number from `RtlGetVersion`, which, unlike `GetVersionEx`, is not affected by manifests.

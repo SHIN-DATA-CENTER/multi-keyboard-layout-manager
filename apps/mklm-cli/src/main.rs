@@ -335,12 +335,18 @@ fn warn_os(os: &mklm_core::OsInfo) {
         );
     }
     if os.remote_session {
-        eprintln!(
-            "warning: this is a Remote Desktop session; the remote client's keyboard layout \
-             applies to the whole session."
-        );
+        eprintln!("{REMOTE_SESSION_NOTE}");
     }
 }
+
+/// The note of a Remote Desktop session (docs/research/rdp-keyboard.md). Whether a new session
+/// follows the client's keyboard or the PC's standard layout is not known, so it says neither:
+/// only when the table is fixed and when a change that waits for a restart reaches it.
+const REMOTE_SESSION_NOTE: &str = "note: this is a Remote Desktop session. Keys typed here come \
+    from the Remote Desktop keyboard; its key table is fixed when the session starts and MKLM \
+    cannot read which one it is. A change that waits for a restart reaches it only after the \
+    restart and a new sign-in. MKLM's per-keyboard layouts apply to the keyboards attached to this \
+    PC.";
 
 #[cfg(windows)]
 fn warn_issues(issues: &[mklm_win::ReadIssue]) {
@@ -368,6 +374,24 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// Accurate whether a new Remote Desktop session follows the client or the PC's standard
+    /// layout (not yet known): no claim that it normally follows the client.
+    #[test]
+    fn the_remote_session_note_says_only_what_is_known() {
+        let note = REMOTE_SESSION_NOTE;
+        assert!(note.starts_with("note: this is a Remote Desktop session. "));
+        assert!(note.contains("its key table is fixed when the session starts"));
+        assert!(note.contains("reaches it only after the restart and a new sign-in"));
+        for unverified in [
+            "follow the client",
+            "console",
+            "applies to the whole session",
+        ] {
+            assert!(!note.contains(unverified), "{unverified:?} in {note}");
+        }
+        assert!(!note.contains("  "), "{note}");
     }
 
     #[test]

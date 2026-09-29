@@ -108,8 +108,8 @@ fn write_list(
                 n.to_string(),
                 ka.display_name.clone(),
                 driver_name(&ka.driver).to_string(),
-                transport_short(ka.transport).to_string(),
-                yes_no(ka.is_internal).to_string(),
+                transport_short(kb, ka.transport).to_string(),
+                internal_short(kb, ka.is_internal).to_string(),
                 vid_pid(kb),
                 type_text(ka.stored_type),
                 reported_text(ka),
@@ -181,7 +181,7 @@ fn write_status(
     field(
         out,
         "Remote Desktop session",
-        yes_no(snapshot.os.remote_session),
+        remote_session_text(&snapshot.os),
     )?;
     writeln!(out)?;
 
@@ -294,10 +294,32 @@ fn write_keyboard(
         or_dash(kb.device_description.as_deref()),
     )?;
     item(out, "Container", or_dash(kb.container_id.as_deref()))?;
-    item(out, "Internal", yes_no(ka.is_internal))?;
+    item(
+        out,
+        "Internal",
+        if kb.is_remote_desktop() {
+            "no (Remote Desktop; Windows lists it in the built-in container)"
+        } else {
+            yes_no(ka.is_internal)
+        },
+    )?;
     item(out, "Connected", yes_no(kb.present))?;
     item(out, "Driver", driver_name(&kb.driver))?;
-    item(out, "Transport", transport_name(kb.transport))?;
+    if kb.is_remote_desktop() {
+        item(
+            out,
+            "Transport",
+            &format!("Remote Desktop ({})", transport_name(kb.transport)),
+        )?;
+        item(
+            out,
+            "Remote Desktop",
+            "types the keys the Remote Desktop client sends, with the key table fixed when the \
+             session started; read-only",
+        )?;
+    } else {
+        item(out, "Transport", transport_name(kb.transport))?;
+    }
     item(out, "VID:PID", &vid_pid(kb))?;
     item(out, "USB serial", or_dash(kb.usb_serial.as_deref()))?;
     item(out, "Device values", &overrides_text(&kb.overrides))?;
@@ -499,8 +521,18 @@ fn driver_name(driver: &KeyboardDriver) -> &str {
     }
 }
 
-/// Short name for the `list` table (the plan's UI terms: USB / BT / BLE / PS/2 / I2C).
-fn transport_short(transport: Transport) -> &'static str {
+/// The `list` table's "Internal": "no" for the Remote Desktop keyboard, which Windows puts in the
+/// built-in container although it is not built in (as the GUI, which gives it no "内蔵" badge).
+fn internal_short(kb: &KeyboardDevice, is_internal: bool) -> &'static str {
+    yes_no(is_internal && !kb.is_remote_desktop())
+}
+
+/// Short name for the `list` table (the plan's UI terms: USB / BT / BLE / PS/2 / I2C), and
+/// "Remote Desktop" for the keyboard of a Remote Desktop session.
+fn transport_short(kb: &KeyboardDevice, transport: Transport) -> &'static str {
+    if kb.is_remote_desktop() {
+        return "Remote Desktop";
+    }
     match transport {
         Transport::BluetoothClassic => "BT",
         Transport::BluetoothLe => "BLE",
@@ -626,6 +658,16 @@ fn devnode_text(status: Option<u32>, problem: Option<u32>) -> String {
     }
     text.push(')');
     text
+}
+
+/// "yes (client reports keyboard type 0x7/0x2)": what the client said, never the table the session
+/// types with (`OsInfo::client_keyboard_type`).
+fn remote_session_text(os: &OsInfo) -> String {
+    match (os.remote_session, os.client_keyboard_type) {
+        (false, _) => "no".to_string(),
+        (true, Some(ty)) => format!("yes (client reports keyboard type {ty})"),
+        (true, None) => "yes".to_string(),
+    }
 }
 
 fn os_text(os: &OsInfo) -> String {
@@ -837,6 +879,7 @@ mod tests {
                 ubr: Some(9550),
                 native_arch: "x64".into(),
                 remote_session: false,
+                client_keyboard_type: None,
             },
         }
     }
@@ -977,6 +1020,74 @@ mod tests {
             line_with(&present_only, "INV-PS2")
                 .contains("unknown, holds (checked on connected keyboards only")
         );
+    }
+
+    /// The development machine seen from a Remote Desktop session: the session's keyboard is
+    /// listed too, and the client reported `client`.
+    fn remote_session(client: Option<KeyboardType>) -> SystemSnapshot {
+        let mut snapshot = dev_machine();
+        snapshot.keyboards.push(mklm_core::fixtures::rdp_keyboard());
+        snapshot.os.remote_session = true;
+        snapshot.os.client_keyboard_type = client;
+        snapshot
+    }
+
+    #[test]
+    fn remote_desktop_keyboard_and_session() {
+        let snapshot = remote_session(Some(KeyboardType::JIS));
+        let assessment = assess(&snapshot);
+        let text = list(&snapshot, &assessment, true);
+        let row = line_with(&text, "リモート")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Read-only and no layout: the client's type is not what the session types with. Not
+        // built in, although Windows puts it in the built-in container.
+        assert!(row.starts_with("5 リモート"), "{text}");
+        assert!(
+            row.ends_with(" terminpt Remote Desktop no - - unknown - - -"),
+            "{text}"
+        );
+        // The PC's own keyboard is still built in.
+        let ps2 = line_with(&text, " i8042prt ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(ps2.contains(" i8042prt PS/2 yes "), "{text}");
+        assert!(line_with(&text, "Problems").ends_with("none"));
+
+        let text = status(&snapshot, &assessment, true);
+        assert!(
+            line_with(&text, "Remote Desktop session")
+                .ends_with("yes (client reports keyboard type 0x7/0x2)")
+        );
+        assert!(text.contains("    Transport        Remote Desktop (virtual)\n"));
+        assert!(text.contains(
+            "    Internal         no (Remote Desktop; Windows lists it in the built-in container)\n"
+        ));
+        assert_eq!(
+            text.matches("    Internal         yes\n").count(),
+            1,
+            "{text}"
+        );
+        assert!(
+            line_with(&text, "the Remote Desktop client sends")
+                .ends_with("session started; read-only")
+        );
+        assert!(line_with(&text, r"TERMINPUT_BUS\UMB").contains("Instance ID"));
+        assert!(text.contains(r"UMB\UMB\1&841921D&0&TERMINPUT_BUS"));
+        assert!(text.contains("0x0180200A (started)"));
+        // No other keyboard gets the Remote Desktop lines.
+        assert_eq!(text.matches("Remote Desktop (virtual)").count(), 1);
+
+        // Nothing reported by the client, or no remote session at all.
+        let silent = remote_session(None);
+        let text = status(&silent, &assess(&silent), true);
+        assert!(line_with(&text, "Remote Desktop session").ends_with(" yes"));
+        let console = dev_machine();
+        let text = status(&console, &assess(&console), true);
+        assert!(line_with(&text, "Remote Desktop session").ends_with(" no"));
+        assert!(!text.contains("Remote Desktop ("));
     }
 
     #[test]

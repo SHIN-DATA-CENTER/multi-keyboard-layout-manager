@@ -145,7 +145,7 @@
 | `Status`、`Container` | DevNodeStatus / ProblemCode、ContainerId | 続ける。そのフィールドが `None` になり、そのキーボードのその場でのリセットは `StatusUnknown` / `UnknownContainer` で禁止される |
 | `Topology` | 親の系列、バスのサービス | 続ける。接続方式が `Unknown` になれば、リセットは禁止される |
 | `Values` | override の値や全体の値（型違い、キーが開けない） | 続ける。エンジンは値をすべて `RegistryBackend` で読み直し、想定外の型は `RegValue::Other` として扱う |
-| `Descriptive`、`RawInput`、`Environment` | 表示名とハードウェア ID、Raw Input、入力方式と OS の情報 | 続ける（警告）。Raw Input が読めなければ、確認の表示は「未確認」になる |
+| `Descriptive`、`RawInput`、`Environment` | 表示名とハードウェア ID、Raw Input、入力方式と OS の情報 | 続ける（警告）。Raw Input が読めなければ、確認の表示は「未確認」になる。名前のない Raw Input のキーボード（`RIDI_DEVICENAME` が終端の 1 文字だけ。リモート デスクトップのセッションに現れ、devnode と対応づけられない）は、issue にせず読み飛ばす |
 
 `windows` クレートの feature は、実装する人が必要な分だけ足す。見込みは `Win32_Security`、`Win32_Security_Authorization`、`Win32_Security_Cryptography`、`Win32_Storage_FileSystem`（`GetFileVersionInfoW` もここ）、`Win32_System_Pipes`、`Win32_System_IO`、`Win32_System_Threading`、`Win32_System_Shutdown`、`Win32_System_Console`、`Win32_UI_Shell`、`Wdk_System_SystemInformation`。`SystemBootEnvironmentInformation`（= 90）と `SYSTEM_BOOT_ENVIRONMENT_INFORMATION`、`SystemProcessIdInformation`（= 88）と `SYSTEM_PROCESS_ID_INFORMATION` が `windows` クレートにない場合は、`#[repr(C)]` で自前に定義する。
 
@@ -768,7 +768,7 @@ C15 の指摘: 計画 2.2 は、サービスが再適用し直すループを防
    - 対象は `physical_device_members`: 外付けで ContainerId が分かっていれば、同じコンテナのすべての kbdhid コレクション（phantom を含む。計画 3.4）。i8042prt、内蔵、ContainerId が不明なら、そのキーボードだけ。
    - 書き込み内容は `device_layout_writes(driver, choice.layout())`。i8042prt に `standard` は `StandardNotAllowed`。
    - `check_plan(keyboards, global, writes, [])` → `CheckedPlan`（許可リスト、INV-PS2、順序）。
-   - 反映方法: `apply = apply_method(members, false, only_usable, apply.allow_live_reset)`。`only_usable` は、`apply.other_input_available == false` のとき、または対象のコンテナ以外に「接続中で、`DN_STARTED` で、仮想でないキーボード」が 1 台もないときに true。
+   - 反映方法: `apply = apply_method(members, false, only_usable, apply.allow_live_reset)`。`only_usable` は、`apply.other_input_available == false` のとき、または対象のコンテナ以外に「接続中で、`DN_STARTED` で、仮想でないキーボード」が 1 台もないときに true。リモート デスクトップのキーボード（`TERMINPUT_BUS\…`、ハードウェア ID `TS_INPT\TS_KBD`）は仮想なので数えない。
 3. D.1 の 8（`expected` との比較）。
 4. 記録を作る: 各書き込みについて、`before` = 現在の値、`intended` = `RegValue::from(op)`、`baseline` = 既存の記録、なければ `before`。`value_eq(before, intended)` の書き込みは記録にも書き込みにも含めない。何も残らなければ `NoChange`（ジャーナルに書かない）。
 5. 復旧用ファイル（C.5 の 2。HID だけなので、失敗しても警告して続ける）。

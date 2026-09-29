@@ -430,6 +430,7 @@ mod tests {
                         layout_after: Some(LayoutTable::Jis),
                         changes: true,
                     },
+                    // Synthetic ID (not what Windows uses); only the JSON shape matters here.
                     ExpectedKeyboard {
                         instance_id: r"TS_INPT\TS_KBD\1".into(),
                         display_name: "RDP".into(),

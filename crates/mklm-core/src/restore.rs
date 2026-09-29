@@ -747,6 +747,7 @@ mod tests {
             dword(4),
             dword(7),
         ));
+        // Synthetic ID and service (the real one is `fixtures::rdp_keyboard`): another driver.
         let rdp = KeyboardDevice {
             instance_id: r"TS_INPT\TS_KBD\1".into(),
             driver: KeyboardDriver::Other("TermDD".into()),

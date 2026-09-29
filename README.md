@@ -31,7 +31,7 @@ JIS 配列（日本語 106/109）と US 配列（英語 101/104）の物理キ�
 | 再起動が必要 | 内蔵の PS/2 キーボードの変更と、PC 全体の設定の変更（Windows の仕様） |
 | できない | 英語（US）の入力方式に切り替えている間のキーボードごとの配列。すべてのキーボードが US になる |
 | できない | Logicool の Unifying / Bolt レシーバーや KVM につないだ複数のキーボードの区別。1 台として扱われる |
-| できない | リモートデスクトップの接続先で、キーボードごとに配列を変えること |
+| できない | リモートデスクトップの接続先で、キーボードごとに配列を変えること。接続中のキーは接続元の PC から届き、キー配列はセッションが始まったときに決まる（再起動を待つ変更は、再起動して新しくサインインするまで反映されない）。英数キーで日本語入力が切り替わらないときは Shift+英数 や Alt+半角/全角 が使える（[docs/research/rdp-keyboard.md](docs/research/rdp-keyboard.md)） |
 
 ## 今の状態
 
@@ -174,7 +174,7 @@ Today this means hand-editing the registry (each device's `Device Parameters` an
 | Needs a restart | Changes to a built-in PS/2 keyboard and to PC-wide settings (a Windows limitation) |
 | Cannot | Per-keyboard layouts while the English (US) input method is active; every keyboard is US then |
 | Cannot | Tell apart several keyboards behind one Logitech Unifying / Bolt receiver or a KVM; they count as one |
-| Cannot | Per-keyboard layouts inside a Remote Desktop session |
+| Cannot | Per-keyboard layouts inside a Remote Desktop session. Keys there come from the client PC, with a key table fixed when the session starts (a change that waits for a restart reaches Remote Desktop only after the restart and a new sign-in). If the 英数 key does not switch Japanese input there, Shift+英数 and Alt+半角/全角 work ([docs/research/rdp-keyboard.md](docs/research/rdp-keyboard.md), Japanese) |
 
 ### Status
 

@@ -228,6 +228,7 @@ mod tests {
             ..fixtures::keychron()
         };
         assert_eq!(structural_reset_bans(&spi), vec![ResetBan::I2cOrSpi]);
+        // Synthetic service (not what Windows uses), then the real Remote Desktop keyboard.
         let rdp = KeyboardDevice {
             transport: Transport::Virtual,
             driver: KeyboardDriver::Other("TermDD".into()),
@@ -236,6 +237,14 @@ mod tests {
         assert_eq!(
             structural_reset_bans(&rdp),
             vec![ResetBan::UnsupportedDriver, ResetBan::Virtual]
+        );
+        assert_eq!(
+            structural_reset_bans(&fixtures::rdp_keyboard()),
+            vec![
+                ResetBan::UnsupportedDriver,
+                ResetBan::InternalContainer,
+                ResetBan::Virtual
+            ]
         );
         let no_container = KeyboardDevice {
             container_id: None,

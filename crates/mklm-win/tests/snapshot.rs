@@ -66,7 +66,12 @@ fn check_keyboard(kb: &KeyboardDevice) {
             "{id}: parent chain repeats {a}"
         );
     }
-    if kb.driver == KeyboardDriver::I8042prt {
+    // Every Remote Desktop keyboard is virtual (read-only, plan 3.2), whatever serves it. The
+    // `--all` listing checks this on any host that has served Remote Desktop: the keyboard of a
+    // disconnected session stays as a non-present `…SESSIONnKEYBOARD0` devnode.
+    if kb.is_remote_desktop() {
+        assert_eq!(kb.transport, Transport::Virtual, "{id}");
+    } else if kb.driver == KeyboardDriver::I8042prt {
         assert_eq!(kb.transport, Transport::Ps2, "{id}");
     }
     if !kb.present {
@@ -121,6 +126,10 @@ fn snapshot_is_well_formed() {
     }
     assert!(snap.os.build > 0);
     assert!(!snap.os.native_arch.is_empty());
+    // What a Remote Desktop client reported is read only in a remote session.
+    if !snap.os.remote_session {
+        assert_eq!(snap.os.client_keyboard_type, None);
+    }
 
     // The core evaluation must accept whatever the live system looks like.
     let assessment = assess(snap);

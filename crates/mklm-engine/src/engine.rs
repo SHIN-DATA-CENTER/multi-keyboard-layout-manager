@@ -436,6 +436,7 @@ fn snapshot(keyboards: Vec<KeyboardDevice>, global: GlobalSettings) -> SystemSna
             ubr: None,
             native_arch: String::new(),
             remote_session: false,
+            client_keyboard_type: None,
         },
     }
 }

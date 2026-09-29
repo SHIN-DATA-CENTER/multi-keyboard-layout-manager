@@ -1,12 +1,62 @@
 //! Driver and transport classification from PnP IDs.
 
 use crate::ids::split_instance_id;
-use crate::model::{KeyboardDriver, Transport};
+use crate::model::{KeyboardDevice, KeyboardDriver, Transport};
 
 /// GATT HID service (HOGP) UUID that Windows embeds in Bluetooth LE HID IDs.
 const HOGP_SERVICE: &str = "{00001812-0000-1000-8000-00805F9B34FB}";
 /// Bluetooth Classic HID profile UUID that Windows embeds in BTHENUM HID IDs.
 const BT_HID_SERVICE: &str = "{00001124-0000-1000-8000-00805F9B34FB}";
+
+/// Hardware ID of the Remote Desktop keyboard ("リモート デスクトップ キーボード デバイス", service
+/// `terminpt`). It is a hardware ID, not an instance ID: the devnode itself is enumerated by
+/// [`TERMINPUT_BUS`] (see `docs/research/rdp-keyboard.md`).
+pub const RDP_KEYBOARD_HARDWARE_ID: &str = r"TS_INPT\TS_KBD";
+
+/// Enumerator of the Remote Desktop input devices: one keyboard devnode per session,
+/// `TERMINPUT_BUS\UMB\2&2C22BCC9&0&SESSION1KEYBOARD0` on 26200, below `UMB\…&TERMINPUT_BUS` and
+/// `ROOT\UMBUS\0000`, in the built-in container.
+pub const TERMINPUT_BUS: &str = "TERMINPUT_BUS";
+
+/// True for the Remote Desktop keyboard of a session: enumerated by [`TERMINPUT_BUS`], or carrying
+/// the hardware ID [`RDP_KEYBOARD_HARDWARE_ID`] (both case-insensitive). Such a keyboard types
+/// what the Remote Desktop client sends; MKLM only shows it (plan 3.2).
+pub fn is_remote_desktop_keyboard(instance_id: &str, hardware_ids: &[String]) -> bool {
+    let (enumerator, _, _) = split_instance_id(instance_id);
+    enumerator.eq_ignore_ascii_case(TERMINPUT_BUS)
+        || hardware_ids
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(RDP_KEYBOARD_HARDWARE_ID))
+}
+
+impl KeyboardDevice {
+    /// See [`is_remote_desktop_keyboard`]. The reader gives it [`Transport::Virtual`]
+    /// ([`classify_keyboard_transport`]), and the allowlist refuses to write it whatever its
+    /// transport says (`crate::allowlist::check_device_writes`).
+    pub fn is_remote_desktop(&self) -> bool {
+        is_remote_desktop_keyboard(&self.instance_id, &self.hardware_ids)
+    }
+}
+
+/// Classifies how a keyboard is attached, from what the reader knows of its devnode: the Remote
+/// Desktop keyboard ([`is_remote_desktop_keyboard`], by its enumerator or its hardware ID) is
+/// [`Transport::Virtual`] whatever enumerates it and whichever driver serves it, so it is
+/// read-only wherever MKLM decides by transport (plan 3.2). Every other keyboard is classified by
+/// [`classify_transport_with_bus_service`]. Rules that go by driver still hold: an i8042prt
+/// devnode keeps its PS/2 reset ban and INV-PS2.
+pub fn classify_keyboard_transport(
+    instance_id: &str,
+    hardware_ids: &[String],
+    parent_chain: &[String],
+    driver: &KeyboardDriver,
+    bus_service: Option<&str>,
+) -> Transport {
+    if is_remote_desktop_keyboard(instance_id, hardware_ids) {
+        Transport::Virtual
+    } else {
+        classify_transport_with_bus_service(instance_id, parent_chain, driver, bus_service)
+    }
+}
 
 impl KeyboardDriver {
     /// Maps a devnode's service name (`DEVPKEY_Device_Service`) to a driver, case-insensitively.
@@ -40,10 +90,11 @@ pub fn classify_transport(
 /// 2. `bus_service` `hidi2c` → I2C; `hidspi` / `hidspicx` → SPI.
 /// 3. Walk the device and its ancestors, skipping `HID\` nodes; the first other node decides:
 ///    `USB\` → USB, `BTHLEDevice\` / `BTHLE\` → Bluetooth LE, `BTHENUM\` → Bluetooth Classic,
-///    `ROOT\`, `SWD\`, `HTREE\`, `VMBUS\`, `TS_*\`, `RDP*\` → virtual, `ACPI\` → I2C or SPI when an
-///    ID carries the HID-over-I2C/SPI compatible ID (`PNP0C50` / `PNP0C51`) or an `I2C` / `SPI`
-///    token, else unknown. Physical buses sit below `ROOT\ACPI_HAL`, so the virtual prefixes only
-///    match software-enumerated devices.
+///    `ROOT\`, `SWD\`, `HTREE\`, `VMBUS\`, `TERMINPUT_BUS\` (the Remote Desktop keyboard),
+///    `TS_*\`, `RDP*\` → virtual, `ACPI\` → I2C or SPI when an ID carries the HID-over-I2C/SPI
+///    compatible ID (`PNP0C50` / `PNP0C51`) or an `I2C` / `SPI` token, else unknown. Physical
+///    buses sit below `ROOT\ACPI_HAL`, so the virtual prefixes only match software-enumerated
+///    devices.
 /// 4. Only HID nodes known (e.g. a phantom without a parent): the HOGP / BT HID service UUID or a
 ///    USB-style `HID\VID_` ID decides.
 pub fn classify_transport_with_bus_service(
@@ -76,7 +127,7 @@ pub fn classify_transport_with_bus_service(
             "USB" => return Transport::Usb,
             "BTHLEDEVICE" | "BTHLE" => return Transport::BluetoothLe,
             "BTHENUM" => return Transport::BluetoothClassic,
-            "ROOT" | "SWD" | "HTREE" | "VMBUS" => return Transport::Virtual,
+            "ROOT" | "SWD" | "HTREE" | "VMBUS" | TERMINPUT_BUS => return Transport::Virtual,
             e if e.starts_with("TS_") || e.starts_with("RDP") || device.starts_with("RDP_") => {
                 return Transport::Virtual;
             }
@@ -154,6 +205,11 @@ mod tests {
         assert_eq!(
             KeyboardDriver::from_service("TermDD"),
             KeyboardDriver::Other("TermDD".to_string())
+        );
+        // The real Remote Desktop keyboard's service.
+        assert_eq!(
+            KeyboardDriver::from_service("terminpt"),
+            KeyboardDriver::Other("terminpt".to_string())
         );
     }
 
@@ -248,6 +304,136 @@ mod tests {
         );
     }
 
+    #[test]
+    fn remote_desktop_keyboard_as_windows_enumerates_it() {
+        let rdp = crate::fixtures::rdp_keyboard();
+        assert_eq!(
+            classify_transport(&rdp.instance_id, &rdp.parent_chain, &rdp.driver),
+            Transport::Virtual
+        );
+        // The bus service `umbus` decides nothing.
+        assert_eq!(
+            classify_transport_with_bus_service(
+                &rdp.instance_id,
+                &rdp.parent_chain,
+                &rdp.driver,
+                Some("umbus")
+            ),
+            Transport::Virtual
+        );
+        assert!(rdp.is_remote_desktop());
+        // By the enumerator alone, in any case, and by the hardware ID alone.
+        assert!(is_remote_desktop_keyboard(
+            &rdp.instance_id.to_ascii_lowercase(),
+            &[]
+        ));
+        assert!(is_remote_desktop_keyboard(
+            r"SOMEBUS\KBD\1",
+            &[r"ts_inpt\ts_kbd".to_string()]
+        ));
+        // A hardware ID that only starts like it, or a parent on the bus, is not enough.
+        assert!(!is_remote_desktop_keyboard(
+            r"SOMEBUS\KBD\1",
+            &[r"TS_INPT\TS_KBD_OTHER".to_string()]
+        ));
+        assert!(!is_remote_desktop_keyboard(
+            r"UMB\UMB\1&841921D&0&TERMINPUT_BUS",
+            &[]
+        ));
+        for kb in crate::fixtures::dev_machine().keyboards {
+            assert!(!kb.is_remote_desktop(), "{}", kb.instance_id);
+        }
+    }
+
+    /// The reader's decision (`mklm_win::devices::read_keyboard`): a Remote Desktop keyboard is
+    /// virtual whatever the other heuristics would say, so writability never depends on them.
+    #[test]
+    fn the_remote_desktop_keyboard_is_always_virtual_to_the_reader() {
+        let rdp = crate::fixtures::rdp_keyboard();
+        let strings = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let rdp_hwid = strings(&[RDP_KEYBOARD_HARDWARE_ID]);
+        let kbdhid = KeyboardDriver::Kbdhid;
+        let on_somebus = |driver: &KeyboardDriver, bus_service: Option<&str>| {
+            classify_keyboard_transport(r"SOMEBUS\KBD\1", &rdp_hwid, &[], driver, bus_service)
+        };
+        // As Windows enumerates it (TERMINPUT_BUS, bus service umbus), and by the enumerator alone.
+        assert_eq!(
+            classify_keyboard_transport(
+                &rdp.instance_id,
+                &rdp.hardware_ids,
+                &rdp.parent_chain,
+                &rdp.driver,
+                Some("umbus")
+            ),
+            Transport::Virtual
+        );
+        assert_eq!(
+            classify_keyboard_transport(&rdp.instance_id, &[], &[], &rdp.driver, None),
+            Transport::Virtual
+        );
+        // The hardware ID alone, on a bus the other heuristics call unknown, or I2C through its
+        // bus service, or PS/2 through its driver (its PS/2 reset ban and INV-PS2 go by driver).
+        assert_eq!(on_somebus(&kbdhid, None), Transport::Virtual);
+        assert_eq!(on_somebus(&kbdhid, Some("hidi2c")), Transport::Virtual);
+        assert_eq!(
+            on_somebus(&KeyboardDriver::I8042prt, None),
+            Transport::Virtual
+        );
+        let ps2 = crate::fixtures::internal_ps2();
+        assert_eq!(
+            crate::safety::structural_reset_bans(&KeyboardDevice {
+                instance_id: r"SOMEBUS\KBD\1".into(),
+                hardware_ids: rdp_hwid.clone(),
+                transport: on_somebus(&KeyboardDriver::I8042prt, None),
+                ..ps2.clone()
+            }),
+            vec![
+                crate::safety::ResetBan::Ps2Driver,
+                crate::safety::ResetBan::InternalContainer,
+                crate::safety::ResetBan::Virtual
+            ]
+        );
+
+        // Any other keyboard is classified as before.
+        for kb in crate::fixtures::dev_machine().keyboards {
+            assert_eq!(
+                classify_keyboard_transport(
+                    &kb.instance_id,
+                    &kb.hardware_ids,
+                    &kb.parent_chain,
+                    &kb.driver,
+                    None
+                ),
+                kb.transport,
+                "{}",
+                kb.instance_id
+            );
+        }
+        let other_hwid = strings(&[r"HID\VID_1234&PID_5678"]);
+        assert_eq!(
+            classify_keyboard_transport(
+                r"SOMEBUS\KBD\1",
+                &other_hwid,
+                &[],
+                &kbdhid,
+                Some("hidi2c")
+            ),
+            Transport::I2c
+        );
+        assert_eq!(
+            classify_keyboard_transport(
+                &ps2.instance_id,
+                &ps2.hardware_ids,
+                &ps2.parent_chain,
+                &ps2.driver,
+                None
+            ),
+            Transport::Ps2
+        );
+    }
+
+    /// Synthetic IDs (not what Windows uses; the real Remote Desktop keyboard is
+    /// `fixtures::rdp_keyboard`): virtual enumerators and prefixes still classify as virtual.
     #[test]
     fn virtual_keyboards() {
         let other = KeyboardDriver::Other("TermDD".to_string());

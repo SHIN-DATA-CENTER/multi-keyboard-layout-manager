@@ -31,6 +31,13 @@ pub struct RawKeyboard {
 
 /// Lists every keyboard Raw Input knows in this session. A device that cannot be queried (for
 /// example because it vanished while the list was read) is skipped with an issue.
+///
+/// A device without a name is skipped silently: Remote Desktop sessions list their keyboards
+/// without one (build 26200: the size query of `RIDI_DEVICENAME` reports only the terminating
+/// null, and reading the name then fails), and such an entry cannot be matched to a devnode.
+/// Microsoft documents that input devices of a Remote Desktop connection are not in the list at
+/// all, so these entries say nothing about the Remote Desktop keyboard
+/// (`docs/research/rdp-keyboard.md`).
 pub fn raw_keyboards(issues: &mut Vec<ReadIssue>) -> Result<Vec<RawKeyboard>, Error> {
     let mut keyboards = Vec::new();
     for entry in device_list()? {
@@ -38,7 +45,8 @@ pub fn raw_keyboards(issues: &mut Vec<ReadIssue>) -> Result<Vec<RawKeyboard>, Er
             continue;
         }
         let interface_path = match device_name(entry.hDevice) {
-            Ok(name) => normalize_interface_path(&name),
+            Ok(Some(name)) => normalize_interface_path(&name),
+            Ok(None) => continue,
             Err(error) => {
                 issues.push(ReadIssue::new(
                     ReadIssueKind::RawInput,
@@ -132,13 +140,23 @@ fn device_list() -> Result<Vec<RAWINPUTDEVICELIST>, Error> {
     })
 }
 
-/// `RIDI_DEVICENAME` (sizes are in characters for this command).
-fn device_name(device: HANDLE) -> Result<String, Error> {
+/// True when the `RIDI_DEVICENAME` size query reports no name: no characters, or only the
+/// terminating null (what Remote Desktop sessions report for their keyboards).
+fn is_unnamed(chars: u32) -> bool {
+    chars <= 1
+}
+
+/// `RIDI_DEVICENAME` (sizes are in characters for this command); `None` for a device without a
+/// name ([`is_unnamed`], or an empty name).
+fn device_name(device: HANDLE) -> Result<Option<String>, Error> {
     let mut chars = 0u32;
     // SAFETY: without a buffer the call only stores the required length in `chars`.
     let result = unsafe { GetRawInputDeviceInfoW(Some(device), RIDI_DEVICENAME, None, &mut chars) };
-    if result != 0 || chars == 0 {
+    if result != 0 {
         return Err(last_error("GetRawInputDeviceInfoW"));
+    }
+    if is_unnamed(chars) {
+        return Ok(None);
     }
     let mut name = vec![0u16; chars as usize + 1];
     let mut capacity = name.len() as u32;
@@ -154,12 +172,7 @@ fn device_name(device: HANDLE) -> Result<String, Error> {
     if copied == 0 || copied == u32::MAX {
         return Err(last_error("GetRawInputDeviceInfoW"));
     }
-    Some(from_wide(&name))
-        .filter(|name| !name.is_empty())
-        .ok_or(Error::Win32 {
-            function: "GetRawInputDeviceInfoW",
-            code: ERROR_INVALID_DATA.0,
-        })
+    Ok(Some(from_wide(&name)).filter(|name| !name.is_empty()))
 }
 
 /// `RIDI_DEVICEINFO` of a keyboard.
@@ -235,6 +248,17 @@ mod tests {
         assert_eq!(instance_id_from_path_text(r"HID#VID_1#2#{x}"), None);
         assert_eq!(instance_id_from_path_text(r"\\?\HID##2#{x}"), None);
         assert_eq!(instance_id_from_path_text(""), None);
+    }
+
+    #[test]
+    fn unnamed_devices() {
+        // The size query of a Remote Desktop session's keyboards reports just the terminator.
+        assert!(is_unnamed(0));
+        assert!(is_unnamed(1));
+        // A real name (`\\?\HID#…#{GUID}`) is far longer; anything more than the terminator
+        // is read and reported if reading it fails.
+        assert!(!is_unnamed(2));
+        assert!(!is_unnamed(98));
     }
 
     #[test]

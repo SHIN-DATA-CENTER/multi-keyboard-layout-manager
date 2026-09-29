@@ -2,7 +2,7 @@
 
 use mklm_core::{
     DeviceOverrides, INTERNAL_CONTAINER_ID, KeyboardAnomaly, KeyboardDevice, KeyboardDriver,
-    classify_transport_with_bus_service, non_keyboard_anomaly, usb_serial_from_chain,
+    classify_keyboard_transport, non_keyboard_anomaly, usb_serial_from_chain,
     vendor_product_from_ids,
 };
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
@@ -170,8 +170,10 @@ pub fn read_keyboard(
         .unwrap_or_else(|| instance_id.to_string());
 
     let vendor_product = vendor_product_from_ids(instance_id, &hardware_ids);
-    let transport = classify_transport_with_bus_service(
+    // The Remote Desktop keyboard is virtual whatever enumerates or serves it (plan 3.2).
+    let transport = classify_keyboard_transport(
         instance_id,
+        &hardware_ids,
         &ancestors.chain,
         &driver,
         ancestors.bus_service.as_deref(),
