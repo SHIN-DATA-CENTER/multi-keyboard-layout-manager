@@ -110,8 +110,9 @@
 
 | モジュール | 主な公開 API | 役割 |
 |---|---|---|
-| `journal` | `JournalEntry`（`transition`、`take_over`）、`ValueRecord`、`RegValue`、`value_eq`、`ValueKey`、`OpId`、`BootId`（起動ごとの GUID）、`ProcessIdentity`、`Liveness`、`OpKind`、`LayoutChoice`、`RestoreScope`、`OpState`（`is_open`、`is_in_flight`、`can_transition_to`）、`RevertMode`、`ApplyPending`、`SkipReason`、`Countdown`、`FailureReason`、`TransitionRecord`、`BaselineRecord`、`Journal`（`parse`、`open_entries`、`latest_record`、`baseline`、`next_seq`、`prunable`、`resolve_prefix`、`needs_post_reboot_check`）、`JournalError`、保存場所の定数 | ジャーナルの型と状態機械（C 章） |
+| `journal` | `JournalEntry`（`transition`、`take_over`）、`ValueRecord`、`RegValue`、`value_eq`、`ValueKey`、`OpId`、`BootId`（0.1.1 から `KUSER_SHARED_DATA.BootId` のカウンター形式。`from_boot_counter`、`boot_counter`、`is_legacy`。C.10）、`ProcessIdentity`、`Liveness`、`OpKind`、`LayoutChoice`、`RestoreScope`、`OpState`（`is_open`、`is_in_flight`、`can_transition_to`）、`RevertMode`、`ApplyPending`、`SkipReason`、`Countdown`、`FailureReason`、`TransitionRecord`、`BaselineRecord`、`Journal`（`parse`、`open_entries`、`latest_record`、`baseline`、`next_seq`、`prunable`、`resolve_prefix`、`needs_post_reboot_check`）、`JournalError`、保存場所の定数 | ジャーナルの型と状態機械（C 章） |
 | `recovery` | `decide_recovery`、`RecoveryDecision`、`RecoveryContext`、`observe`、`attention`（`Attention::blocks_writes`）、`state_after_resolution`、`apply_pending_on_close`、`apply_pending_cleared` | 回復の判定表（C.7） |
+| `boot`（0.1.1） | `CurrentBoot`、`LEGACY_BOOT_TIME_TOLERANCE`、`JournalEntry::{legacy_boot_is_current, adopt_legacy_boots}`、`Journal::adopt_legacy_boots` | 0.1.x が記録した GUID の起動 ID の判定と、メモリ上での読み替え（C.10「起動 ID」） |
 | `restore` | `plan_restore`、`check_restore_record`、`RestorePlan`、`RestoreStep`、`RestorePhase`、`RestoreWrite`、`Expect`、`RestoreTo`、`RestoreError` | 戻す書き込みの検査と、変化の向きで決める順序（C.5） |
 | `operation` | `plan_set_layout`、`plan_migration`、`OperationPlan`、`set_layout_writes`、`migration_writes`、`physical_device_members`、`apply_method`、`OperationError`、`DeviceWrites` | `set` と `migrate` の計画、書き込み内容、反映方法。下見とエンジンが同じ関数を使う |
 | `report` | `ApplyOptions`、`ExpectedPlan`、`ConflictPolicy`、`ResolutionChoice`、`ValueChoice`、`Decision`、`Event`、`ExpectedKeyboard`、`Outcome`、`ConflictInfo`、`RecoveredOp`、`OperationResult`、`ErrorCode`、`ErrorInfo` | エンジン、パイプ、UI が共有する語彙 |
@@ -132,7 +133,7 @@
 | `elevation` | `is_elevated()`、`launch_elevated(exe, params, owner_window)`、`spawn_from_elevated(exe, params)`、`ElevatedProcess::{pid, exit_code, wait}`、`helper_path()`、`file_build_id(exe)`、`BUILD_ID_VERSION_KEY` | `GetTokenInformation(TokenElevation)`、`ShellExecuteExW("runas")`（`lpDirectory` = System32。`ERROR_CANCELLED` なら `Error::Cancelled`）、昇格済みなら `CreateProcessW`（UAC なし。C8）、`GetExitCodeProcess`、`WaitForSingleObject`、`GetFileVersionInfoW`＋`VerQueryValueW`（ビルド ID。S11） |
 | `proc_identity` | `current_process_identity()`、`process_liveness(&ProcessIdentity)`、`process_image_nt_path(pid)`、`same_image_directory(pid)` | **`OpenProcess` を使わない**（S3）。`NtQuerySystemInformation(SystemProcessInformation)` で PID と `CreateTime` の組を、`SystemProcessIdInformation` で NT 形式の実行ファイルのパスを読む。別ユーザーのプロセスでも読める。自分の作成時刻は `GetProcessTimes` |
 | `protected_dir` | `program_data_dir()`、`ensure_protected_dir(DataDir)`、`ProtectedDir::{path, quarantined, replace_file}`、`FileLock::acquire`、各 SDDL 定数 | `SHGetKnownFolderPath(FOLDERID_ProgramData)`、`CreateDirectoryW`＋SA、`CreateFileW(FILE_FLAG_BACKUP_SEMANTICS \| FILE_FLAG_OPEN_REPARSE_POINT)`、`GetFileInformationByHandleEx(FileAttributeTagInfo)`、`GetSecurityInfo`、`GetSecurityDescriptorControl`、`GetAce`、`SetFileInformationByHandle(FileRenameInfo)`（先回りして作られたフォルダーの隔離。S1）、`FlushFileBuffers`（一時ファイルとフォルダー）、`MoveFileExW(REPLACE_EXISTING \| WRITE_THROUGH)`（C10）、`LockFileEx`（D.9） |
-| `session` | `boot_id()`、`boot_time_hint()`、`random_bytes()`、`new_uuid()`、`restart_pc()`、`register_post_reboot()`、`unregister_post_reboot()`、`RUN_ONCE_VALUE` | `NtQuerySystemInformation(SystemBootEnvironmentInformation = 90)` の `BootIdentifier`（起動ごとの GUID。C2）、診断用に `SystemTimeOfDayInformation` の `BootTime - BootTimeBias`、`BCryptGenRandom(BCRYPT_USE_SYSTEM_PREFERRED_RNG)`、`AdjustTokenPrivileges(SE_SHUTDOWN_NAME)` → `InitiateShutdownW`、HKCU の `RunOnce` |
+| `session` | `boot_counter()`、`boot_id()`、`legacy_boot_guid()`、`boot_time_hint()`、`current_boot()`、`random_bytes()`、`new_uuid()`、`restart_pc()`、`register_post_reboot()`、`unregister_post_reboot()`、`RUN_ONCE_VALUE` | **0.1.1 から**起動 ID は `KUSER_SHARED_DATA.BootId`（0x7FFE0000 + 0x2C4 の u32 を volatile で読む。ローダーが起動のたびに 1 増やす。C2、C.10）。0.1.0 の `NtQuerySystemInformation(SystemBootEnvironmentInformation = 90)` の `BootIdentifier` は、0.1.x の記録を判定するためだけに `legacy_boot_guid()` で読む（起動ごとに変わらない PC があった。`docs/research/boot-id.md`）。`SystemTimeOfDayInformation` の `BootTime - BootTimeBias`（履歴の診断用。0.1.x の記録の判定にも使う）、`BCryptGenRandom(BCRYPT_USE_SYSTEM_PREFERRED_RNG)`、`AdjustTokenPrivileges(SE_SHUTDOWN_NAME)` → `InitiateShutdownW`、HKCU の `RunOnce` |
 
 `Error` に次のバリアントを足した: `NotKeyboard`、`Cancelled`、`Timeout`、`Insecure`、`PeerMismatch`、`ValueNotAllowed`。
 
@@ -263,6 +264,7 @@ pub trait Host {
     fn new_op_id(&mut self) -> Result<OpId, HostError>;
     fn boot_id(&self) -> Result<BootId, HostError>;
     fn boot_time_hint(&self) -> Option<u64>;
+    fn legacy_boot_guid(&self) -> Option<BootId>; // 0.1.1
     fn current_process(&self) -> Result<ProcessIdentity, HostError>;
     fn liveness(&self, process: &ProcessIdentity) -> Liveness;
     fn system32_file_exists(&self, file_name: &str) -> Result<bool, HostError>;
@@ -273,7 +275,7 @@ pub trait Host {
 
 - `now()` は表示と整理にだけ使う。判定は壁時計に頼らない。
 - カウントダウンは `EventSink::wait_decision(1 秒)` の呼び出し回数で数え、あわせて `monotonic()` で「秒数＋`countdown_slack`（5 秒）」を上限にする。シンクが 1 秒を守らずに待ち続けても、カウントダウンは終わる（C18）。テストの偽物の単調時計は、テストが進めたときだけ進む。
-- `boot_id()` は起動ごとの GUID（C2）。`boot_time_hint()` は診断用で、履歴に記録するだけ。
+- `boot_id()` は起動ごとの ID（C2）。**0.1.1 から** `KUSER_SHARED_DATA.BootId` のカウンター形式（C.10「起動 ID」）。`boot_time_hint()` は履歴に記録する診断用の値で、判断に使うのは 0.1.x の記録の判定だけ。`legacy_boot_guid()`（0.1.1）は 0.1.x が起動 ID にしていたローダーの GUID で、その判定にだけ使う。既定の実装は持たせない（どのホストも転送しなければならない）。エンジンは `open()` の最初にこの 3 つから `CurrentBoot` を作り、ジャーナルを読んだ直後に `adopt_legacy_boots` を行う（D.1）。
 - `liveness()` は、ロックを持つエンジンの判断には使わない（C3。C.7）。履歴と結果の表示のため。
 - `system32_file_exists()` は計画 1.5 の「`LayerDriver JPN` の DLL が System32 に実在すること」の確認（S8）。
 - `write_recovery_assets()` は耐久的に書く（G.1。C10）。
@@ -303,7 +305,7 @@ pub trait Host {
 **FakeHost**
 
 - `FakeLockCell` を複数の `FakeHost` で共有し、ロックの競合を再現する。
-- `reboot()` で起動 ID を変え、それまでのプロセスを全部死んだことにする。`become_process()` で別のプロセス（例: 回復を行う GUI）として動く。`kill()` で特定のプロセスを死んだことにする。`advance()` で壁時計と単調時計を進める。
+- `reboot()` で起動 ID を変え（0.1.1 から、カウンター形式の ID のカウンターを 1 増やす。最初は 1）、それまでのプロセスを全部死んだことにする。`legacy_boot_guid()` は既定では 0.1.0 のころの偽の GUID の列を返し、`set_legacy_guid()` で固定できる（再起動しても変わらない PC の再現）。`boot_time_hint()` は `set_boot_time()` で決める（既定は `None`）。`become_process()` で別のプロセス（例: 回復を行う GUI）として動く。`kill()` で特定のプロセスを死んだことにする。`advance()` で壁時計と単調時計を進める。
 - `set_fail_assets(true)` で復旧用ファイルの書き込みを失敗させる（起動時の値を変える操作は `RecoveryAssetsUnavailable` で何も書かずに止まり、HID だけの操作は警告付きで続く）。`remove_system32_file()` で DLL の欠落を再現する。`push_warning()` でホストの警告を積む。
 
 **ScriptedSink**
@@ -365,7 +367,7 @@ HKLM\SOFTWARE\SHIN DATA CENTER\MKLM               （MSI のコンポーネン�
 | `seq` | u64 | 作成順（既存の最大値＋1）。値ごとの「最新の操作」を決める |
 | `kind` | `OpKind` | `SetLayout { requested, instance_ids, layout }`、`Migrate { standard, assignments }`、`RestoreBaseline { scope, silent, supersedes }`（`supersedes` は D.5）。M3 で `Cleanup { instance_id, names }`（D.11） |
 | `state` | `OpState` | C.4 |
-| `boot_id` | `BootId` | 直近の書き込みフェーズ（`Planned` と `RevertPending`）の起動 ID（起動ごとの GUID。C2） |
+| `boot_id` | `BootId` | 直近の書き込みフェーズ（`Planned` と `RevertPending`）の起動 ID（C2）。0.1.1 からは `KUSER_SHARED_DATA.BootId` のカウンター形式（`00000007-0000-8000-8000-000000000000`）。0.1.0 はローダーの GUID を書いた（C.10「起動 ID」） |
 | `owner` | `ProcessIdentity` | 直近の書き込みフェーズを行ったプロセス（PID と作成時刻）。表示用。判断はロックで行う（C3） |
 | `created_at`、`updated_at` | `Timestamp` | 表示と整理用（UTC ミリ秒） |
 | `apply` | `Option<PendingAction>` | 変更の反映方法（`ResetKeyboard`、`Reconnect`、`RestartPc`） |
@@ -375,7 +377,7 @@ HKLM\SOFTWARE\SHIN DATA CENTER\MKLM               （MSI のコンポーネン�
 | `failure` | `Option<FailureReason>` | 利用者が求めたとおりに終わらなかった理由。`Failed` と、ロールバックで終わった `Reverted` / `RevertedPendingReboot` に付く |
 | `revert_mode` | `Option<RevertMode>` | `RevertPending` の間だけ設定する。`Revert`、`Rollback`、`Resolution`（C5） |
 | `apply_pending` | `Option<ApplyPending>` | 保存値がまだ効いていないかもしれないこと。`{ action, instance_ids, since }`（C1、C.11） |
-| `history` | `Vec<TransitionRecord>` | 遷移の記録（最大 64 行）。各行に診断用の `boot_time_hint` を持つ |
+| `history` | `Vec<TransitionRecord>` | 遷移の記録（最大 64 行）。各行に診断用の `boot_time_hint` を持つ（0.1.1 からは、0.1.x の起動 ID の判定にも使う。C.10）。書き換えない |
 
 **ValueRecord**
 
@@ -407,7 +409,7 @@ HKLM\SOFTWARE\SHIN DATA CENTER\MKLM               （MSI のコンポーネン�
     "layout": "jis"
   },
   "state": "awaiting-confirm",
-  "boot_id": "9b1c0d6e-2f4a-4c8b-a1d3-5e6f7a8b9c0d",
+  "boot_id": "00000007-0000-8000-8000-000000000000",
   "owner": { "pid": 12345, "creation_time": 134036790000000000 },
   "created_at": 1790500000000,
   "updated_at": 1790500004000,
@@ -433,14 +435,14 @@ HKLM\SOFTWARE\SHIN DATA CENTER\MKLM               （MSI のコンポーネン�
   "revert_mode": null,
   "apply_pending": null,
   "history": [
-    { "from": null, "to": "planned", "at": 1790500000000, "boot": "9b1c0d6e-2f4a-4c8b-a1d3-5e6f7a8b9c0d",
+    { "from": null, "to": "planned", "at": 1790500000000, "boot": "00000007-0000-8000-8000-000000000000",
       "by": { "pid": 12345, "creation_time": 134036790000000000 }, "reason": "set-layout",
       "boot_time_hint": 134036748000000000 }
   ]
 }
 ```
 
-（`KeyboardSubtypeOverride` の記録（0 → 2）と、`written`、`restarting`、`awaiting-confirm` の履歴は省略した。）
+（`KeyboardSubtypeOverride` の記録（0 → 2）と、`written`、`restarting`、`awaiting-confirm` の履歴は省略した。起動 ID は 0.1.1 のカウンター形式。0.1.0 が書いたエントリでは、`9b1c0d6e-2f4a-4c8b-a1d3-5e6f7a8b9c0d` のような GUID になっている。）
 
 ### C.4 状態と遷移
 
@@ -577,7 +579,7 @@ open な状態の操作がある間は、`set` と `migrate`、更新（M5）、
 **対象にする条件**（計画 2.3、C3）
 
 - 回復はロックを取ってから行う。所有者は、エントリが書き込み中の間とカウントダウンの間、ずっとロックを持っている。したがって、**ロックを取れた時点で見つかった書き込み中の状態（`Planned`、`Written`、`Restarting`、`RevertPending`）と `countdown` 付きの `AwaitingConfirm` は、所有者の生死によらず放棄されたもの**として回復する。同じ helper のセッションで、自分が直前の要求で残したエントリも同じ（エンジンがエラーで返った後の `Recover` が `Leave(OwnerAlive)` で何もしない、ということは起きない）。
-- `PendingReboot` と `RevertedPendingReboot` は、起動 ID が今と違うときだけ先へ進める。
+- `PendingReboot` と `RevertedPendingReboot` は、起動 ID が今と違うときだけ先へ進める。「同じ起動」は `entry.boot_id == 今の起動 ID` の等しさだけで決める。0.1.x が書いた GUID の起動 ID は、ジャーナルを読んだときに判定済み（今の起動と判定したものは今の ID に読み替え、それ以外は前の起動として残す。C.10「起動 ID」）なので、この表は形式を区別しない。
 - プロセスの生死（`Liveness`）は、ロックを取れない非昇格の GUI と CLI の判断（`attention`）にだけ使う。
 
 **値の観測**（`observe`）: 各記録について、現在の値が `AtBefore`（`before` と同じ）、`AtIntended`（`intended` と同じ）、`Unchanged`（`before` = `intended` = 現在）、`Elsewhere`（どれとも違う）のどれかを決める。比較は `value_eq`（`LayerDriver JPN` と `OverrideKeyboardIdentifier` は大文字小文字を区別しない。C16）。devnode が消えた記録は観測から外す。
@@ -669,6 +671,31 @@ open な状態の操作がある間は、`set` と `migrate`、更新（M5）、
 - 更新（M5）の新しい版は、それ以前のすべてのスキーマを読めなければならない。MSI はジャーナルのキーを持たない。open な操作がある間は更新を始めない（計画 4.2 の手順 1）ので、更新の時点で残っているのは closed な操作だけになる。
 - **M3 の版 2**（m3 A.5、K.13）: `JOURNAL_SCHEMA_VERSION = 2` は `OpKind::Cleanup`（D.11）を足しただけ。版 2 で書くのは `Cleanup` のエントリだけで、ほかの種類は版 1 で書き続ける（`OpKind::schema_version`）。M2 のビルドは `Cleanup` のエントリを `NewerSchema` として扱い（書き込みを止めて「更新してください」）、ほかのエントリは読み続ける。版 1 の文書は変換なしにそのまま読める（開発機に M2 の実機テストで残ったエントリと baseline を `mklm_core::fixtures::schema_1_journal` に写し、core と engine のテストで読み書きを確かめる）。`BaselineRecord` と `StoreVersion` は 1 のまま。
 
+**起動 ID（0.1.1。C2 の続き）**
+
+0.1.0 は起動 ID に `SystemBootEnvironmentInformation.BootIdentifier`（ローダーの GUID）を使っていた。デスクトップ PC で、この GUID が完全な再起動を 3 回しても変わらず、`PendingReboot` の操作がいつまでも「再起動していない」と判定された（確認画面の「このままにする」が押せない、helper が確定も新しい変更も断る。`docs/research/boot-id.md`）。R9/R10 を行わないまま出荷したため。
+
+- **今の起動 ID は `KUSER_SHARED_DATA.BootId`**（`mklm_win::session::boot_counter`）。ローダー（winload）が `\Windows\bootstat.dat` の値を起動のたびに 1 増やしてカーネルに渡す。スリープ、休止からの復帰、高速スタートアップの起動ではローダーが数えないので変わらず、再起動と完全なシャットダウンで 1 増える（H.2 R9/R10、MT-2〜MT-7 で確かめる）。
+- **記録の形**: `BootId::from_boot_counter(n)` = `nnnnnnnn-0000-8000-8000-000000000000`（最初の組がカウンター。RFC 9562 のバージョン 8、バリアント 10、ほかのビットは 0）。ローダーの GUID はバージョン 1 か 4 なので、この形にはならない。この形でない ID を legacy と呼ぶ（`BootId::is_legacy`）。JSON の型は変えないので、**版は上げない**（エントリは 1、`Cleanup` は 2、`BaselineRecord` と `StoreVersion` は 1、IPC と M5b の Run 記録も同じ）。0.1.x の `BootId::parse` もこの形を読める。
+- **カウンターだけを使う理由**: 「同じ起動か」は等しさで決める。危険なのは「違う起動」と誤ること（反映されていない変更を確定させてしまう。C2）。カウンターは起動ごとに 1 回だけ書かれる。GUID（高速スタートアップでの性質は未確認で、この PC では役に立たない）や起動時刻（休止をまたいで `BootTime - BootTimeBias` が動かないことは未確認）を足しても、「違う起動」の誤りが増えるだけ。カウンターが戻る（`bootstat.dat` の作り直し）と「同じ起動」と誤るが、それは安全な側で、次の再起動で直る。しかも、未解決のエントリが記録したちょうどその値に戻った場合だけ。
+- **legacy の起動 ID の判定**（`JournalEntry::legacy_boot_is_current`）。対象は `boot_id` と `apply_pending.since` だけ。
+  1. 今の ID と等しければ今の起動（テストでだけ起きる）。
+  2. その ID の下で書いた履歴行のうち `boot_time_hint` を持つものがあり、今の起動の `BootTime - BootTimeBias` が読めれば、どれかのヒントとの差が 10 秒（`LEGACY_BOOT_TIME_TOLERANCE` = 100,000,000。FILETIME の単位）以内のときだけ今の起動。
+  3. それ以外（ヒントのある行がない M2 のころのエントリや、エンジンの引き継ぎ行だけの場合、起動時刻が読めない場合）は 0.1.x と同じ: 今の GUID と等しければ今の起動、違えば前の起動、GUID が読めなければ今の起動（再起動していない。安全な側）。
+- **ヒントで判定してよい理由**: ヒントも今の値も、その起動の中で読んだ `BootTime - BootTimeBias` で、時刻の変更はバイアスが吸収する（この PC では RTC の起動時刻の秒＋0.5 秒。旧開発機では 1.2 秒の時刻合わせの後も一致した）。2 つの起動の開始は、サインイン、変更、再起動、ファームウェアの分だけ少なくとも数十秒離れる。「どれかの行」で判定するのは保守的な側: 今の起動のヒントを持つ行があれば、その ID の下の書き込みがこの起動で行われたことになる。
+- **読み替え（adopt）はメモリの上だけ**（`Journal::adopt_legacy_boots`）。今の起動と判定した legacy の ID は今のカウンターの ID に置き換え、前の起動と判定したものはそのまま残す（カウンターの ID と等しくならないので、どの比較も「前の起動」と読む）。エントリごとに判定する（この PC では、同じ GUID がエントリによって違う起動を指す）。何度行っても同じで、カウンターの ID と履歴は触らない。
+  - 行う場所は 2 つ。エンジンの `open()`（ジャーナルを読んだ直後、関門、セッション、掃除より前。`Engine::read_journal` はそのまま）と、非昇格の `mklm_client::journal::read_journal`（GUI の `reader`、RunOnce の規則、`LiveJournal`、CLI の `start`、`keep`、`reboot`、`post-reboot`、`journal`）。
+  - 判定のためだけにジャーナルを書くことはない。読み替えたエントリは、エンジンが別の理由（遷移、`apply_pending` の掃除）で書くときに新しい形で保存される。`history[].boot` は監査の記録で、判定にも使うので書き換えない。
+  - `mklm-cli journal --json` は、今の起動と判定したエントリについて読み替えた `boot_id` を表示する（履歴行は保存された GUID のまま）。
+- **この PC での結果**（今 = カウンター 7、`BootTime - BootTimeBias` = 134351230275000000）: `c10d2d38`（`RevertedPendingReboot`）はヒントとの差が 22 時間と 167 秒で前の起動 → 次のセッションの掃除で `Reverted`（`reboot-observed`）。`d724c149`（`PendingReboot`、`apply_pending` は再起動）は差 167 秒で前の起動 → `attention` は `Recover`、確認画面は「このままにする」を押せ、`RebootObserved` → `AwaitingConfirm` → `Confirmed`。`restart_reasons` は空。11:37 の再起動より前に修正版を入れていれば、どちらも今の起動と判定され、読み替えたうえで再起動を待ち続ける（どちらも正しい）。
+- **0.1.0 の操作が、修正版を入れた起動の中で作られていた場合**: ヒントが今の起動時刻と等しいので、再起動待ちのまま。スリープ、休止、高速スタートアップのシャットダウンでは起動時刻が変わらないので、まだ待つ。再起動すると変わるので、再起動したと判定する。GUID が本当に起動ごとに変わる PC でも、ヒントが決めるので結果は同じ。
+- **互換性**
+  - 0.1.x は、修正版が書いたジャーナルもそのまま読める（`NewerSchema` にも `Malformed` にもならない）。
+  - **ダウングレード**（修正版の上に 0.1.x を入れる）: NSIS のインストーラーは拒否しない（M5b の更新は `NotNewer` で拒否する）。0.1.x は GUID とカウンターの ID を比べて等しくならないので、新しい形のエントリをすべて前の起動のものと扱う。再起動の後なら正しいが、同じ起動の中だと、`PendingReboot` の操作の「このままにする」を押せてしまい、「再起動が必要」も消える（危険な側。その起動の中だけで、確認画面には Raw Input と Shift+2 のテストが残る）。**再起動待ちの変更がある間はダウングレードしない**こと。版を上げる案は採らなかった: 0.1.x が修正版の書くすべてのエントリを拒否し、何も待っていなくても書き込みが止まる（「更新してください」）ため。
+  - ダウングレードの後に再びアップグレードした場合、0.1.x が書いた GUID の ID は同じ規則で判定する。
+  - GUI の `settings.toml` の `recovery.prompted[].boot` は形が変わるので、更新の直後に自動の回復の問い合わせがもう一度出ることがある（見た目だけ）。
+- **公開する順序**: 0.1.0 には更新の機能がないので、0.1.1 は NSIS のインストーラーで 0.1.0 の上に入れる（再起動は要らない）。次に GUI を起動したときの読み替えで、止まっていた 2 つの操作が解ける。M5b（更新）の最初の公開版はこの修正を含むこと（含まないと、止まった `PendingReboot` の PC は `check_journal` に断られて更新できない）。
+
 ### C.11 `apply_pending`（保存値がまだ効いていないこと）
 
 C1 の指摘: 戻した値や、確認なしで先へ進めた値がまだドライバーに読まれていないのに、その事実がその場限りの結果にしか載らず、ジャーナルにも表示にも残らなかった。例えば、カウントダウン中に helper が強制終了すると、回復はレジストリを US に戻して `Reverted` にするが、Keychron はリセットで読んだ JIS のまま動き、次に抜き差ししたときに突然 US に変わる。
@@ -695,7 +722,7 @@ C15 の指摘: 計画 2.2 は、サービスが再適用し直すループを防
 ### D.1 共通の前処理（書き込むすべての操作）
 
 1. `Host::acquire_lock(10 秒)`。取れなければ `Busy`。取れたら `Event::Locked`。
-2. `read_journal` → `Journal::parse`。`unreadable` があれば `JournalUnreadable`。
+2. `read_journal` → `Journal::parse`。`unreadable` があれば `JournalUnreadable`。**0.1.1 から**、その前に `CurrentBoot`（`boot_id()`、`boot_time_hint()`、`legacy_boot_guid()`）を作り、読んだ直後に `adopt_legacy_boots` で 0.1.x の起動 ID を判定する（メモリの上だけ。C.10「起動 ID」）。セッションの起動 ID は `CurrentBoot::id`。
 3. 他のエントリの確認:
    - 書き込み中のエントリか `countdown` 付きの `AwaitingConfirm` がある（ロックを持っているので、どれも放棄されたもの。C.7）: `recover` と `undo` はまずそれを回復する。それ以外の要求は `RecoveryNeeded`。
    - `set`、`migrate`: open なエントリがあれば `OpInProgress`。
@@ -704,7 +731,7 @@ C15 の指摘: 計画 2.2 は、サービスが再適用し直すループを防
 4. `DeviceController::keyboards()`。`Incomplete`（書き込みを止める読み取りの問題）なら `InventoryIncomplete`（何も書かない）。`warnings` は結果の警告に入れる。
 5. すべてのキーボードについて 7 つの override 値を `read_value` で読み直し、`overrides` を置き換える。全体の 5 つの値も同様。以降の判断はこの読み直した値だけを使う。型違いの値は `RegValue::Other` として読め、止まらない（S2）。読めない値（クラッシュ以外のエラー）も止めずに警告にする。i8042prt の固定と全体のペアは「ない」とみなし（INV-PS2 を安全側で判断する）、それ以外の値は直前のモデルの値を残す。書く値は書く直前に読み直す（CAS）ので、古い値を書くことはない。この読み直しは書き込み中のエントリがある間にも走るので、ここで失敗して書き込み中のエントリを残してはならない（C3、K の確認事項）。Windows 実装は値を読み取り専用で開く（`regwrite::open_device_key_read` / `open_global_key_read`。書き込みを拒否された鍵も読め、読むだけで "Device Parameters" を作らない。I7）。
 6. `Host::drain_warnings()` を結果の警告に入れる。
-7. 前処理の掃除（それぞれ J → FJ）: 有効でなくなった `apply_pending` を消す（状態は変えない）。起動 ID が変わった `RevertedPendingReboot` を `Reverted` に遷移させる（C.11）。
+7. 前処理の掃除（それぞれ J → FJ）: 有効でなくなった `apply_pending` を消す（状態は変えない）。起動 ID が変わった `RevertedPendingReboot` を `Reverted` に遷移させる（C.11）。0.1.x のエントリで前の起動と判定したものもここで閉じる（読み替えていない GUID のまま保存する）。
 8. 要求に `expected`（`ExpectedPlan`）があれば、自分の計画の `steps` と `apply` の両方と比べる。違えば `PlanChanged`（何も書かない）。反映方法が変わった場合（例: 下見ではリセットだったのに、UAC を待つ間にドングルを挿し直して未開始になり、再起動が必要になった）も止める（S6）。
 
 **INV-PS2 を強制する場所**
@@ -861,7 +888,7 @@ C15 の指摘: 計画 2.2 は、サービスが再適用し直すループを防
 
 **回復を行う場面**
 
-1. GUI と CLI の起動時。非昇格のまま `read_journal_store` → `Journal::parse` → エントリごとに `attention(entry, boot_id(), process_liveness(owner))` を求める（C.7 の表）。
+1. GUI と CLI の起動時。非昇格のまま `read_journal_store` → `Journal::parse` →（0.1.1 から）`adopt_legacy_boots(current_boot())`（`mklm_client::journal::read_journal`。C.10「起動 ID」）→ エントリごとに `attention(entry, boot_id(), process_liveness(owner))` を求める（C.7 の表）。
    - `Recover`: ユーザーに伝えて、helper を `Request::Recover` で起動する。**自動で UAC を出すのは、同じエントリについて 1 回の起動につき 1 回まで**（呼び出し元が HKCU に覚える）。それ以降は「回復」ボタンを出すだけにする。ジャーナル自体に書けないなど、回復が同じ理由で失敗し続ける場合に、起動のたびに UAC が出続けないようにするため（C3）。
    - `Busy`: 「別の MKLM が処理中です」と表示する。
    - `AwaitingUser`、`WaitingForReboot`、`Conflict`、`NeedsApply`: それぞれの画面を出す。
@@ -890,7 +917,7 @@ C15 の指摘: 計画 2.2 は、サービスが再適用し直すループを防
 **再起動後の確認**（CLI の `post-reboot`。GUI では `mklm.exe --post-reboot`、M3）
 
 1. 非昇格でジャーナルを読み、再起動で反映する `PendingReboot` と `AwaitingConfirm` のエントリを探す。
-2. 起動 ID が変わっていなければ、「まだ反映されていません。『シャットダウン』ではなく『再起動』してください」と表示する（高速スタートアップのシャットダウンでは起動 ID が変わらない。R9 で確かめる）。RunOnce を登録し直して終わる。
+2. 起動 ID が変わっていなければ、「まだ反映されていません。『シャットダウン』ではなく『再起動』してください」と表示する（高速スタートアップのシャットダウンでは起動 ID が変わらない。0.1.1 の起動 ID `KUSER_SHARED_DATA.BootId` について R9 と MT-4 で確かめる。0.1.0 の GUID は、完全な再起動でも変わらない PC があった。C.10「起動 ID」）。RunOnce を登録し直して終わる。
 3. 起動 ID が変わっていれば、記録の対象キーボードについて、期待する種類と Raw Input の報告値を並べて示す（例: 内蔵 0x7/0x2 ✓、Keychron 0x4/0x0 ✓）。移行については Raw Input で判別できないことを添え、Shift+2 のテストを案内する。
 4. 「このままにしますか? [y/N]」と尋ねる。**自動では戻さない**（計画 3.6）。
    - `y`: helper に `Confirm`（回復の遷移を含む）。
@@ -1417,6 +1444,7 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 | `operation` | `plan_set_layout`（固定モードで `MigrationRequired`、PS/2 に `standard`、同じコンテナのコレクションへの展開、phantom のコレクション、`other_input_available = false` で `only_usable`、`allow_live_reset = false` で `Reconnect`）。`plan_migration`（phantom の PS/2 も固定する、PS/2 への割り当てが固定値に優先する、全体は違う値だけ書く、固定 US からは US で固定する、`apply = RestartPc`）。`apply_method` の組み合わせ表 |
 | `recovery_assets` | 開発機の baseline から作った出力をゴールデンファイルと比べる。**固定の順序**（PS/2 の設定 → 全体の設定 → HID → 全体の削除 → PS/2 の削除）。`Select\Default` を使い、`Current` と違えば止まる行があること。`is_cmd_safe` の表（`"&calc&"`、`%PATH%`、`^`、`!x!`、非 ASCII など、注入を狙った文字列を含む）。`.reg` が UTF-16LE の BOM 付きであること。削除の書式 |
 | `report` | すべての型の serde の往復 |
+| `boot`（0.1.1） | カウンター形式（`from_boot_counter(7)` の文字列、1、7、0xffff_ffff の往復、0.1.x の形の検査に通ること）。`is_legacy`（ローダーの GUID、`BootId(0)`、`BootId(1)`、カウンター形式の予約・バージョン・バリアントのビットを 1 つ反転したもの）。**デスクトップ PC の 2 つのエントリをそのまま**（`testdata/journal/legacy-guid`）: 再起動の後の起動時刻では前の起動（読み替えなし、`attention` は `Recover` / `None`、`RebootObserved`、`apply_pending_cleared`）、書いた起動の起動時刻では今の起動（読み替え、`WaitingForReboot` / `NeedsApply`、`Leave`）。許容幅の境界（±100,000,000 と ±100,000,001、0 と `u64::MAX` の付近）。ヒントがない場合と起動時刻がない場合の GUID の規則（等しい / 違う / 読めない）。`boot_id` と `since` を別々に、エントリごとに判定すること。履歴を書き換えない、カウンターの ID に触れない、2 回行っても同じ、`to_json` の版とフィールドの順 |
 
 **mklm-ipc**
 
@@ -1486,6 +1514,8 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 - テスト用の DACL（ユーザーの SID を含む）で作ったパイプを、同じプロセス内で往復させ、PID を確認する。PID の違う相手を切って待ち直すこと。
 - `is_elevated()` が通常の `cargo test` では false になる。
 - `boot_id()` が 2 回呼んでも同じ。`new_uuid()` の形。`program_data_dir()`。
+- 0.1.1: `boot_counter()` が 0 でなく、呼ぶたびに同じ。`boot_id()` がそのカウンター形式で legacy ではない。`legacy_boot_guid()` が 0 でなく同じ。`current_boot()` が 3 つの関数と一致する。`KUSER_SHARED_DATA` の `BootId` のオフセットが `windows` クレートの定義（テストだけで有効にする 2 つの feature）と一致する。`print_boot_id`（`#[ignore]`）は、カウンター、ID、`BootTime - BootTimeBias`（現地時刻つき）、GUID を表示する（R9/R10 用: `cargo test -p mklm-win print_boot_id -- --ignored --nocapture`）。
+- 0.1.1（engine）: `WinHost` の `boot_id()` がカウンター形式、`legacy_boot_guid()` と `boot_time_hint()` が `Some`。`FakeHost` はカウンター形式で、既存のテストはそのまま通る。`tests/legacy_boot.rs` がデスクトップ PC のジャーナルで、再起動後の確定と掃除、書いた起動の中での拒否（何も書かない）、今の起動と判定したエントリを取り消したときの保存形式、`read_journal` がそのままの GUID を返すことを確かめる。
 - `process_liveness(current)` が `Alive`、終了した子プロセスが `Dead`。`process_image_nt_path(自分の PID)` がテストの exe で終わる。`same_image_directory(自分の PID)` が true。
 - `ReadIssueKind::blocks_writes` の表。
 - 保護フォルダーの作成と隔離は昇格が必要なので、実機テスト（H.2）で扱う。
@@ -1505,8 +1535,24 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 | R6 | 外部の変更による衝突 | JIS を Keep → ユーザーの同意を得て、昇格したコンソールで `reg add … KeyboardTypeOverride /d 4`（外部の変更）→ `mklm-cli revert <op>` → `Conflict` と値の一覧 → `mklm-cli resolve <op> --all keep-current` → `Failed(ConflictKeptCurrent)` | なし |
 | R7 | 復旧用ファイルと ACL | R2 の後に Recovery のファイルと `*.prev` があり、内容が baseline と一致する。`icacls` で、フォルダーは SY と BA がフル、BU が読み取り。ロックファイルは SY と BA だけ。`restore-offline.cmd` は目で確かめるだけにする（同意があれば `online` で実行してよい。Keychron の baseline は 4/0 なので影響はない） | なし |
 | R8 | 移行の往復（**ユーザーが同意した場合だけ**） | 開発機は M0 #4 ですでにキーボードごとモードなので、先に**ユーザー自身が** `tools\m0\Invoke-M0Migration.ps1 -Undo` を実行して再起動し、固定 JIS に戻す。→ `mklm-cli migrate --standard jis --also <keychron の ID>=us` → `PendingReboot` → `mklm-cli reboot --yes` → サインイン後に RunOnce の `post-reboot` → 内蔵 7/2、Keychron 4/0、Shift+2 のテスト → Keep → `mklm-cli restore --baseline --all --no-reset` → `PendingReboot` → 再起動 → `post-reboot` → 固定 JIS に戻る。途中で一度、`PendingReboot` の状態から `mklm-cli undo` で戻せることも確かめる | 3〜4 回 |
-| R9 | シャットダウンと再起動の違い、起動 ID と高速スタートアップ | `PendingReboot` の状態で「シャットダウン」→ 電源を入れる → `post-reboot` が「まだ反映されていません」と表示する（起動 ID が変わっていない。高速スタートアップが有効な場合。`powercfg /a` で確認）。**起動 ID が変わってしまったら、`KUSER_SHARED_DATA.BootId` に切り替えて同じ試験をする**（C2） | シャットダウン 1 回 |
-| R10 | 起動 ID の安定性 | `boot_id` を読む `#[ignore]` テストを、スリープからの復帰、休止からの復帰、時刻を数分ずらしてからの `w32tm /resync /force`（管理者。同意を得る）のそれぞれの前後で実行し、値が変わらないこと。完全な再起動では変わること（C2） | 1 回 |
+| R9 | シャットダウンと再起動の違い、起動 ID と高速スタートアップ | **0.1.1 で書き直した**（0.1.0 は未実施のまま出荷し、GUID が完全な再起動でも変わらない PC があった。C.10「起動 ID」）。下の MT-4（高速スタートアップのシャットダウンでは変わらない）、MT-6（再起動では 1 増える）、MT-7（完全なシャットダウンでも 1 増える）。Windows の機能更新の後にもやり直す | シャットダウン 2 回、再起動 1 回 |
+| R10 | 起動 ID の安定性 | **0.1.1 で書き直した**。下の MT-2（スリープ）、MT-3（休止）、MT-5（時刻の変更と `w32tm /resync /force`）で、カウンターも `BootTime - BootTimeBias` も変わらないこと。0.1.x の記録の判定は MT-8、MT-9 | 休止 1 回 |
+
+**起動 ID の手動テスト（0.1.1。R9/R10 を置き換える。1 項目ずつ行う）**
+
+毎回、各手順の前後に読み取りだけで記録する: KUSER のカウンター（`[Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]0x7FFE02C4)`）、最新の起動の種類（`Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-Kernel-Boot';Id=27} -MaxEvents 1`。0x0 は完全な起動、0x1 は高速スタートアップ、0x2 は休止からの復帰）、`cargo test -p mklm-win print_boot_id -- --ignored --nocapture`（カウンター、ID、`BootTime - BootTimeBias`、GUID）、`mklm-cli journal`、GUI の再起動後の確認画面（「このままにする」が押せるか）。
+
+| # | 内容 | 手順と期待する結果 |
+|---|---|---|
+| MT-1 | 報告された場合 | 0.1.0 の上に修正版を NSIS のインストーラーで入れ、再起動しない。GUI が `d724c149` の確認画面を開き、「このままにする」が押せ、「まだ反映されていません」の行がない。`c10d2d38` の「再起動が必要」が消える。Shift+2 のテストをしてから Keep か元に戻す。`mklm-cli journal` で `d724c149` が `Confirmed`（履歴に `recover:reboot-observed` と `keep`）か `Reverted`、`c10d2d38` が `Reverted`（`reboot-observed`）。新しい変更を受け付ける。RDP で接続している場合は、TERMINPUT_BUS のセッション用キーボードで Keep が `Conflict` にならないかも見る |
+| MT-2 | スリープ（R10） | 修正版で、再起動で反映する変更を 1 つ行う（例: 内蔵キーボードの配列）→ `PendingReboot`。`journal` の `boot_id` が `0000000N-0000-8000-8000-000000000000`。スリープ（S3）→ 復帰。カウンターも `BootTime - BootTimeBias` も変わらず、確認画面は「まだ反映されていません」、「このままにする」は押せない |
+| MT-3 | 休止（R10） | 同じ操作が残った状態で `shutdown /h` → 電源を入れる。イベント 27 は 0x2。カウンターと `BootTime - BootTimeBias` は変わらず、まだ再起動していない扱い |
+| MT-4 | 高速スタートアップ（R9） | 同じ状態で、スタート → 電源 → シャットダウン → 電源を入れる。イベント 27 は 0x1。カウンターと `BootTime - BootTimeBias` は変わらず、まだ再起動していない扱い。サインインのときに RunOnce がもう一度尋ねる |
+| MT-5 | 時刻（R10） | 同じ状態で、時計を数分進めて戻し、`w32tm /resync /force`（管理者。同意を得る）。カウンターも `BootTime - BootTimeBias` も変わらない（バイアスが吸収する）。まだ再起動していない扱い |
+| MT-6 | 再起動（R9） | スタート → 電源 → 再起動。イベント 27 は 0x0、カウンターは 1 増える。サインインすると確認画面が開き（RDP でも）、「このままにする」が押せる。Keep で `Confirmed` |
+| MT-7 | 完全なシャットダウン | 再起動で反映する変更をもう 1 つ行い、`shutdown /s /full /t 0`（または Shift を押しながらシャットダウン）→ 電源を入れる。0x0、カウンターは 1 増え、再起動した扱い（ドライバーが読み直した）。その後、元に戻す |
+| MT-8 | 0.1.x の記録、再起動していない | 何も open でない状態で、修正版の上に 0.1.0 を入れる（ダウングレード）。0.1.0 で再起動で反映する変更を行う（`PendingReboot`、GUID の形）。再起動せずに修正版を入れ直す。ヒントが今の起動時刻と等しいので「まだ反映されていません」、Keep は押せない。スリープと復帰の後もまだ。再起動すると Keep が押せる。元に戻す |
+| MT-9 | 0.1.x の記録と高速スタートアップ | MT-8 と同じだが、再起動の前に高速スタートアップのシャットダウンをする。0x1 の起動の後も、0.1.x の操作はまだ再起動していない扱い（`BootTime - BootTimeBias` がハイブリッドの起動をまたいで保たれることの確認）。本当の再起動の後は再起動した扱い |
 | R11 | パイプの防御 | セッション中に、通常の PowerShell から `NamedPipeClientStream` でパイプに接続しようとすると拒否される（`WRITE_DAC` だけの指定を含む。S10）。helper を不正な引数で手動起動すると、接続せずに終了コード 2 で終わる | なし |
 | R12 | UAC を断る | `set` で UAC を「いいえ」→ 終了コード 3。何も書かれず、ジャーナルも変わらない | なし |
 | R13 | BLE の再接続の経路 | 本物の BLE キーボードがないので保留 | — |
@@ -1523,7 +1569,14 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 
 ## I. 未解決の問題とリスク
 
-1. **起動 ID の性質の確認**（C2）: 起動 ID を `BootTime`（時刻の補正でずれる）から、起動ごとの GUID（`SystemBootEnvironmentInformation.BootIdentifier`）に改めた。高速スタートアップの「シャットダウン」で変わらないこと、スリープ、休止、時刻の再同期で変わらないことは、まだ実機で確かめていない（R9、R10）。高速スタートアップで変わってしまう場合は、危険な側（再起動していないのに再起動したと判断する）に誤るので、`KUSER_SHARED_DATA.BootId`（起動ごとのカウンター）に切り替えて同じ試験をする。どちらも条件を満たさなければ M2 を完了にしない。
+1. **起動 ID の性質の確認**（C2）: 起動 ID を `BootTime`（時刻の補正でずれる）から、起動ごとの GUID（`SystemBootEnvironmentInformation.BootIdentifier`）に改めた。**0.1.0 は R9、R10 を行わないまま出荷し、デスクトップ PC でこの GUID が完全な再起動でも変わらず、`PendingReboot` が終わらなくなった**（`docs/research/boot-id.md`）。0.1.1 で `KUSER_SHARED_DATA.BootId`（ローダーが起動のたびに増やすカウンター）に切り替え、0.1.x の記録は履歴の起動時刻で判定する（C.10「起動 ID」）。残るリスク:
+   - カウンターの性質は ntddk.h の注釈と解析（phnt/NtDoc: winload が `bootstat.dat` の `LastBootId` を増やす）でしか裏付けがない。休止や高速スタートアップからの復帰で増える Windows があれば、危険な側（再起動していないのに再起動したと判断する）に誤る。MT-3、MT-4 で確かめ、Windows の機能更新の後にも R9/R10 をやり直す。
+   - `bootstat.dat` が書かれない環境（UWF/HORM などの書き込みフィルター、読み取り専用や故障したディスク）では、続く起動が同じカウンターになり、再起動しても「再起動していない」と読む。安全な側（増える再起動まで止まる。取り消しはできる）。
+   - カウンターが戻る（`bootstat.dat` の作り直し）と、未解決のエントリが記録した値と重なった場合だけ、その起動の間「再起動していない」と読む。安全な側で、次の再起動で直る。
+   - 0.1.x の記録の判定は、起動の間 `BootTime - BootTimeBias` が 10 秒以内に保たれることを前提にする。休止からの復帰でバイアスなしに `BootTime` が動くと、修正版を入れた起動の中で作られた 0.1.x の操作を再起動したと読むおそれがある（危険な側。その 1 回の起動だけで、確認画面の Raw Input と Shift+2 のテストは残る）。MT-8、MT-9 で確かめる。
+   - ヒントのない 0.1.x のエントリ（M2 の開発中のものだけ）は GUID で判定するので、GUID が変わらない PC では再起動していない扱いのままになる（取り消しはできる）。v0.1.0 は必ずヒントを記録しているので、公開版を使っている PC には関係しない。
+   - 同じ起動の中で 0.1.x にダウングレードすると、0.1.x は新しい形のエントリを前の起動のものと読む（危険な側。その起動の間だけ）。更新はダウングレードしないが、NSIS のインストーラーはできる。「再起動待ちの変更がある間はダウングレードしない」と案内する（インストーラーでの防止は任意）。
+   - 固定アドレス 0x7FFE0000 の読み取り: ユーザーモードの ABI（kernel32 と ntdll が時刻をここから読む）。ランダム化されたのはカーネル側の書き込み用の別名だけ（MSRC 2022）。「最小」プロセスにはこの割り当てがないが、MKLM のプロセスは最小ではない。ARM64 上の x64 エミュレーションでも同じ。
 2. **フラッシュとハイブの原子性の仮定**: 設計が頼るのは、(a) 各 API 呼び出しが原子的であること、(b) `RegFlushKey` がそれ以前の書き込みを永続化すること、の 2 点だけ。同じハイブの中で順序が入れ替わらないことには頼らない（ステップごとに FT するため。C.5）。インメモリのモデル（B.4）は、これより厳しい条件でテストする。
 3. **phantom の devnode への書き込み**: `CM_Open_DevNode_Key(RegDisposition_OpenAlways)` で phantom のハードウェアキーを書き込み用に開けるかは未検証（M1 では読み取りだけ確かめた）。開発機には phantom の PS/2 がないので、実機では確かめにくい。VM での確認を提案する。
 4. **`DI_NEEDREBOOT` の意味**: kbdhid のリセットで立つことがあるかは未確認。立った場合は安全側（元に戻して PC の再起動を案内）に倒している。
@@ -1565,7 +1618,7 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 | 9 | 移行は、全体と異なる配列を初めて割り当てたときに提案する（1.3） | 固定モードでの `set` は `MigrationRequired` で止め、`migrate --also` を案内する | 固定モードでは値を書いても効かない（M0 #2a）ので、提案の手段として止める |
 | 10 | — | 要求に `expected`（`steps` と `apply`）を持たせ、helper の計画と違えば書かない | ユーザーが確認画面で見た内容（反映方法を含む）と、実際に書く内容を一致させるため（S6） |
 | 11 | — | Conflict の解決で「現在の値を残す」を選んだ場合は `Failed(ConflictKeptCurrent)` で閉じる。INV-PS2 が壊れたままなら閉じない | 新しい状態を増やさずに、操作の意図が実現しなかったことを表すため（C12） |
-| 12 | `boot_id`（カーネルの起動時刻）（2.3） | 起動ごとの GUID（`SystemBootEnvironmentInformation.BootIdentifier`）。起動時刻は診断用に履歴に残すだけ | 起動時刻は時刻の補正でずれ、「再起動した」と誤判定すると、反映されていない移行を確定させてしまう（C2） |
+| 12 | `boot_id`（カーネルの起動時刻）（2.3） | 0.1.0 は起動ごとの GUID（`SystemBootEnvironmentInformation.BootIdentifier`）。**0.1.1 から `KUSER_SHARED_DATA.BootId`（ローダーが起動のたびに増やすカウンター）**。起動時刻は履歴に残し、0.1.x の記録の判定にだけ使う | 起動時刻は時刻の補正でずれ、「再起動した」と誤判定すると、反映されていない移行を確定させてしまう（C2）。GUID は完全な再起動でも変わらない PC があった（C.10「起動 ID」、`docs/research/boot-id.md`） |
 | 13 | 回復は「`boot_id` が違うか、所有者のプロセスがすでにない項目だけ」（2.3） | ロックを取れた時点で見つかった書き込み中のエントリは、所有者の生死によらず回復する。生死は非昇格の表示にだけ使う | 所有者は書き込み中ずっとロックを持つので、ロックが取れれば放棄されている。生死の判定に頼ると、エラーで返った同じ helper の回復が何もしない、生死が分からないと回復しない、といった行き止まりが生まれる（C3） |
 | 14 | —（回復の対象の区別はない） | 「導入前に戻す」は回復で逆向きにせず、前へ書き切る。サイレントはロールバックしない | 利用者の「MKLM を外したい」という意図と逆の値を書き戻さないため（C14） |
 | 15 | セーフモードでは、昇格したコンソールで直接実行する（2.1） | 昇格していても helper を別プロセスとして起動する（`CreateProcessW`、UAC なし）。同じプロセスで動かすのは隠しオプションの `--in-process` だけ | 同じプロセスだと、Ctrl+C やウィンドウを閉じる操作でカウントダウンの安全網が働かない（C8） |
@@ -1584,7 +1637,7 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 |---|---|---|---|---|
 | WP1 | core の規則 | `journal.rs`、`recovery.rs`、`restore.rs`（段階の順）、`operation.rs`（`plan_set_layout`、`plan_migration`）、`recovery_assets.rs`（固定の順序、`Select\Default`）、`report.rs` | なし | H.1 の core のテストが通る |
 | WP2 | ipc | `args.rs`、`frame.rs`（`FrameHeader`）、`handshake.rs`（ビルド ID）、`message.rs` | なし | H.1 の ipc のテストが通る |
-| WP3 | win の書き込み用モジュール | `regwrite`（名前の関所）、`journal_store`、`devctl`、`protected_dir`（隔離、耐久的な置き換え）、`session`（起動 ID の GUID）、`proc_identity`（`NtQuerySystemInformation`）、`elevation`（`spawn_from_elevated`、`file_build_id`）、`pipe`（待ち直し）、feature の追加 | なし | 非昇格でできる H.1 の win のテストが通る。unsafe ブロックにはすべて `// SAFETY:` を書く |
+| WP3 | win の書き込み用モジュール | `regwrite`（名前の関所）、`journal_store`、`devctl`、`protected_dir`（隔離、耐久的な置き換え）、`session`（起動 ID。0.1.1 から `KUSER_SHARED_DATA.BootId`）、`proc_identity`（`NtQuerySystemInformation`）、`elevation`（`spawn_from_elevated`、`file_build_id`）、`pipe`（待ち直し）、feature の追加 | なし | 非昇格でできる H.1 の win のテストが通る。unsafe ブロックにはすべて `// SAFETY:` を書く |
 | WP4a | engine の偽物 | `memory.rs`（`MemoryRegistry` の故障注入と `crash_images`、`deny_target`、`remove_devnode`、`FakeDevices::reboot` などの追加、`FakeHost` の単調時計と System32、`ScriptedSink::cancel_after`） | WP1 の型 | 偽物そのもののテスト（クラッシュ状態の列挙が正しいこと） |
 | WP4b | engine の本体 | `engine.rs`、`error.rs` | WP1、WP4a | H.1 の engine のテスト。とくにクラッシュの網羅テスト（I1〜I7） |
 | WP4c | engine の Windows 実装 | `win.rs`（リセットの別スレッドと期限、`join_pending`、`ReadIssueKind` による振り分け） | WP3 | 実機テスト R1 |
@@ -1613,7 +1666,7 @@ M2 設計の 1 回目のレビュー（2 つの観点）への対応。すべて
 | # | 指摘 | 採否 | 変更 / 理由 |
 |---|---|---|---|
 | C1 | 戻した値がまだ効いていないのに閉じた状態で終わり、必要な対処がその場限りの結果にしか残らない。再接続前の Keep で `Confirmed` になる | 採用（一部変更） | `JournalEntry::apply_pending`（`ApplyPending { action, instance_ids, since }`）を追加し、閉じるときに `apply_pending_on_close` で求めて永続化する。`Attention::NeedsApply`（書き込みを止めない）を追加し、起動の変化か Raw Input の一致で `apply_pending_cleared` が消す。ロールバックの終わりを `Failed` から `Reverted` / `RevertedPendingReboot`（`failure` 付き）に改め、起動時の値を含めば再起動を求める。再接続前の Keep は、確定を拒むと open なエントリがほかの操作を止め続けるので、**拒まずに** `Confirmed` と `apply_pending = Reconnect` にした。対話的な回復は `ApplyOptions` でリセットを提案する。I1 に報告値の条件を加えた（0.2、C.4、C.7、C.11、D.2、D.6、D.7、H.1） |
-| C2 | `BootTime` は時刻の補正でずれ、再起動なしに `PendingReboot` から進んでしまう。`keep <op>` は Raw Input を見ずに確定する | 採用（一部変更） | `BootId` を `SystemBootEnvironmentInformation.BootIdentifier`（起動ごとの GUID）に変え、`BootTime - BootTimeBias` は `TransitionRecord::boot_time_hint` として診断にだけ残す。R9 と R10 を、スリープ、休止、高速スタートアップ、`w32tm /resync /force`、完全な再起動に広げ、高速スタートアップで変わる場合の代案（`KUSER_SHARED_DATA.BootId`）を決めた。`keep <op>` は、エンジンでは利用者が見たかを確かめられないので、CLI の `keep` が再起動で反映する操作に `post-reboot` と同じ確認画面を出す形にした（A.3、C.3、D.6、H.2、I.1、J.12） |
+| C2 | `BootTime` は時刻の補正でずれ、再起動なしに `PendingReboot` から進んでしまう。`keep <op>` は Raw Input を見ずに確定する | 採用（一部変更） | `BootId` を `SystemBootEnvironmentInformation.BootIdentifier`（起動ごとの GUID）に変え、`BootTime - BootTimeBias` は `TransitionRecord::boot_time_hint` として診断にだけ残す。R9 と R10 を、スリープ、休止、高速スタートアップ、`w32tm /resync /force`、完全な再起動に広げ、高速スタートアップで変わる場合の代案（`KUSER_SHARED_DATA.BootId`）を決めた。`keep <op>` は、エンジンでは利用者が見たかを確かめられないので、CLI の `keep` が再起動で反映する操作に `post-reboot` と同じ確認画面を出す形にした（A.3、C.3、D.6、H.2、I.1、J.12）。**後日**: R9/R10 を行わないまま 0.1.0 を出荷し、GUID が完全な再起動でも変わらない PC で `PendingReboot` が終わらなくなった。0.1.1 で代案の `KUSER_SHARED_DATA.BootId` に切り替えた（下の「0.1.0 の不具合」、C.10「起動 ID」） |
 | C3 | クラッシュ以外の恒常的な失敗で回復が無限に繰り返され、すべての操作が止まる。見た目だけの ReadIssue、同じ helper の再回復、生死不明でも止まる | 採用 | (a) ロックを取れた時点の書き込み中のエントリは、生死によらず回復する（`RecoveryContext` から生死を外し、`LeaveReason::OwnerAlive` をなくした）。(b) クラッシュ以外のエラーは 1 回やり直した後、`ValueRecord::write_error` に残して `Conflict` にする（原則 6）。(c) `BackendError::DeviceRemoved` と `SkipReason::DeviceRemoved` を追加し、「値なし」と区別する。(d) `ReadIssueKind` を追加し、書き込みを止めるのは devnode の特定、ID、ドライバー、present だけにした（M1 の呼び出し箇所を分類済み）。(e) `FaultPlan::deny_target` と I7 のテストを追加。自動の UAC は 1 回の起動につき 1 回までにした（A.3、B.1、B.4、C.5、C.7、D.1、D.7、H.1、I.22） |
 | C4 | `plan_restore` の固定順序（全体 → その他 → i8042prt）では、キーボードごとモードへ向かう戻しが必ず拒否され、行き止まりになる | 採用 | 順序を変化の向きで決める 5 段階（`RestorePhase`: 固定を足す → ペアのある全体 → HID → ペアのない全体 → 固定を外す）にした。取り消しとロールバックでは結果として前向きの逆順になり、「導入前に戻す」と解決にも同じ規則が使える。復旧用ファイルは現在の値を知らないので、どこから始めても安全な固定の順（設定してから削除）にした。移行済みの状態からの `restore --baseline --all` をすべての `crash_after` で試すテストを追加（C.5、G.2、G.3、H.1、`restore.rs`、`recovery_assets.rs`） |
 | C5 | 解決の途中でクラッシュすると、`ContinueRevert` が `KeepCurrent` の記録まで `before` に戻す。`Expect::Any` が利用者の新しい変更を上書きする | 採用 | `JournalEntry::revert_mode`（`Revert` / `Rollback` / `Resolution`）を `RevertPending` と一緒に永続化し、解決ではすべての記録に `resolve_to` を入れる（`KeepCurrent` は現在の値）。回復は `resolve_to` と違う記録だけを、利用者が見た値（`conflict`）を期待値にして書き、合わなければもう一度 `Conflict`。解決は `Expect::Any` を使わない（C.3、C.5、C.8、D.7、D.8、`RestoreTo::Resolution`） |
@@ -1657,3 +1710,9 @@ M2 設計の 1 回目のレビュー（2 つの観点）への対応。すべて
 | K 章の「`KEY_SET_VALUE` は `regwrite` と `journal_store` だけ」が、`session::register_post_reboot`（HKCU の RunOnce）と矛盾する | 採用 | 「HKLM への `KEY_SET_VALUE` は `regwrite` と `journal_store` だけ、HKCU の RunOnce は `session` だけ」に書き直した（A.3、K） |
 | 昇格したまま同じプロセスで動く CLI で、`restrict_dll_search` の失敗が警告だけ | 採用 | `--in-process` のときは致命的なエラーにする（A.7、F.2） |
 | helper の現在のフォルダーが固定されていない | 採用 | helper は起動直後に `SetCurrentDirectoryW(System32)` を呼び、起動側も `lpDirectory` / `CreateProcessW` の現在のフォルダーに System32 を渡す（A.6、E.1、`elevation.rs`、`session.rs`） |
+
+### 0.1.0 の不具合（公開後に見つかったもの）
+
+| # | 不具合 | 対応 | 変更 / 理由 |
+|---|---|---|---|
+| B1 | デスクトップ PC（build 26200、UEFI、高速スタートアップ有効）で、`SystemBootEnvironmentInformation.BootIdentifier` が完全な再起動を 3 回しても変わらなかった。固定モードから移行して再起動しても `PendingReboot` のままで、確認画面の「このままにする」が押せず、helper は確定（`InvalidState`）も新しい変更（`OpInProgress`）も断った。取り消した移行の「再起動が必要」も消えなかった（2026-09-29 報告。`docs/research/boot-id.md`） | 0.1.1 で修正 | 起動 ID を `KUSER_SHARED_DATA.BootId` のカウンター形式にした（C2 の代案）。版は上げない。0.1.x が記録した GUID の起動 ID は、ジャーナルを読むとき（エンジンの `open()` と `mklm_client::journal::read_journal`）に、その GUID の下の履歴行の起動時刻（`boot_time_hint`）と今の `BootTime - BootTimeBias` を比べてメモリの上で判定する。利用者向けの文言、IPC、スキーマは変えない。R9/R10 を MT-1〜MT-9 に書き直した（A.2、A.3、B.3、B.4、C.3、C.7、C.10、D.1、D.7、H.1、H.2、I.1、J.12） |

@@ -43,6 +43,8 @@ MKLM は、まだコード署名をしていません。そのため、次のよ
 
 すでにインストールしてある場合は、新しいインストーラーを実行するだけで上書き更新できます。動いている MKLM は自動的に終了します。設定と変更の記録は、そのまま引き継がれます。
 
+古い版のインストーラーで入れ直す（ダウングレードする）のは、PC の再起動を待っている変更がないときだけにしてください。再起動を待っている間に古い版に戻すと、古い版は、まだ反映されていない変更を「再起動した後」と誤って扱うことがあります。
+
 ## 最初に起動したとき
 
 初回はセットアップのウィザードが開きます。キーボードごとに JIS か US かを決め、必要なら PC を 1 回再起動します。詳しい使い方は、アプリの画面の説明に従ってください。
@@ -81,5 +83,5 @@ MKLM は、まだコード署名をしていません。そのため、次のよ
 - Requires Windows 11 24H2 (build 26100) or later, x64 or ARM64, and administrator rights.
 - Download `MKLM-Setup-<version>-x64.exe` (Intel/AMD) or `-arm64.exe` from GitHub Releases. Optionally compare it with `SHA256SUMS`.
 - MKLM is not code-signed yet. Keep the download in the browser, choose "More info → Run anyway" in SmartScreen, and "Yes" in UAC ("Unknown publisher"). It cannot run where Smart App Control is on.
-- It installs into `C:\Program Files\SHIN DATA CENTER\MKLM` with a Start menu entry. Running a newer installer upgrades in place and keeps your settings.
+- It installs into `C:\Program Files\SHIN DATA CENTER\MKLM` with a Start menu entry. Running a newer installer upgrades in place and keeps your settings. Do not go back to an older version while a change waits for a PC restart: the older version may take it for already restarted.
 - Uninstall from Settings → Apps. You are asked whether to put the keyboard settings back to how they were before MKLM; the journal and the recovery files stay.
