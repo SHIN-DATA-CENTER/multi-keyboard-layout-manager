@@ -6,7 +6,8 @@
   -Profile release (the default): release binaries, dist\MKLM-Setup-<version>-<arch>.exe, and
   dist\SHA256SUMS for every installer in dist. The version comes from [workspace.package] in
   Cargo.toml. Unsigned for now: code signing, when it comes, signs the three exes before makensis
-  and the installer after it (see SIGNING below).
+  and the installer after it (see SIGNING below). Built into target\<triple>\release even when
+  CARGO_TARGET_DIR is set (that is where the exes are packed and checked from).
 
   -Profile dev (the update rehearsal, design m5b F.6): the three exes in the dev profile with the
   development update overrides (RUSTFLAGS=--cfg mklm_update_dev passed to this script's cargo only,
@@ -79,11 +80,22 @@ if ($Profile -eq 'dev') {
     $dist = Join-Path $root "dist-dev\$version"
 }
 else {
+    $targetDir = Join-Path $root 'target'
+    $src = Join-Path $targetDir "$target\release"
     if (-not $SkipBuild) {
-        & cargo build --release --locked --target $target -p mklm -p mklm-cli -p mklm-helper
-        if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)." }
+        # The exes are packed and checked from $src, so this cargo builds there whatever the
+        # caller's CARGO_TARGET_DIR says (else the new exes land elsewhere and older ones under
+        # target\ are packed and checked instead); the caller's environment is restored.
+        $savedTargetDir = $env:CARGO_TARGET_DIR
+        try {
+            $env:CARGO_TARGET_DIR = $targetDir
+            & cargo build --release --locked --target $target -p mklm -p mklm-cli -p mklm-helper
+            if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)." }
+        }
+        finally {
+            $env:CARGO_TARGET_DIR = $savedTargetDir
+        }
     }
-    $src = Join-Path $root "target\$target\release"
     $dist = Join-Path $root 'dist'
 }
 foreach ($exe in $executables) {
