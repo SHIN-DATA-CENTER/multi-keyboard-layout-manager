@@ -7,9 +7,11 @@ use mklm_update::keys::KeyError;
 use mklm_update::{Arch, KeyId, KeyRole, Manifest, TrustAnchors, Version, installer_name};
 use serde_json::Value;
 
-use crate::common::Env;
+use crate::common::{Env, shell_arg};
 use crate::prepare::{Prepare, PrepareDev, prepare_release, prepare_release_dev};
 use crate::publish::publish;
+#[cfg(windows)]
+use crate::testing::powershell_command_elements;
 use crate::testing::{DAY, FakeClock, FakeHost, FakeRepo, FakeWeb, Key, T0, TempDir, anchors_text};
 
 /// The commit of the release being prepared.
@@ -195,7 +197,14 @@ fn a_release_is_prepared() {
         sign.starts_with(r"E:\tools\minisign.exe -S -s E:\mklm-keys\mklm-primary.key -m "),
         "{sign}"
     );
-    assert!(sign.contains("latest.json -x "), "{sign}");
+    assert!(
+        sign.contains(&format!(
+            "-m {} -x {} -t",
+            shell_arg(&out.join("latest.json")),
+            shell_arg(&out.join("latest.json.minisig"))
+        )),
+        "{sign}"
+    );
     assert!(
         sign.trim_end()
             .ends_with(&format!("-t \"{}\"", comment.trim_end())),
@@ -868,7 +877,7 @@ fn a_rehearsal_manifest() {
     assert!(
         sign.starts_with(&format!(
             r"C:\Users\me\mklm-dev-keys\minisign.exe -S -s {} -m ",
-            key_file.display()
+            shell_arg(&key_file)
         )),
         "{sign}"
     );
@@ -879,12 +888,111 @@ fn a_rehearsal_manifest() {
     // No prepare.json (publish never handles rehearsals); the .key was never created or read.
     assert!(!dir.join("prepare.json").exists());
     assert!(!key_file.exists());
-    // --issued-at for the rollback rehearsal.
+    // --issued-at (with --expires-days) makes an expired manifest for the rehearsal of the
+    // expiry display (design m5b B.3; BUILD-RUN-1). It cannot rehearse a rollback: the
+    // development key records nothing (mklm-update's
+    // the_development_key_signs_rehearsals_only_and_records_nothing).
     let mut options = dev_options(&dist);
-    options.issued_at = Some(T0);
+    options.issued_at = Some(NOW - 3 * DAY);
+    options.expires_days = 1;
     prepare_release_dev(&options, Err(KeyError::NotConfigured), NOW, &mut out).unwrap();
     let manifest = Manifest::parse(&std::fs::read(dir.join("latest.json")).unwrap()).unwrap();
-    assert_eq!(manifest.issued_at, T0);
+    assert_eq!(manifest.issued_at, NOW - 3 * DAY);
+    assert_eq!(manifest.expires, NOW - 2 * DAY);
+    assert!(manifest.expires < NOW);
+    let comment = std::fs::read_to_string(dir.join("trusted-comment.txt")).unwrap();
+    assert_eq!(
+        comment,
+        format!(
+            "mklm-dev-latest-json v1 version=0.2.1 issued_at={}\n",
+            NOW - 3 * DAY
+        )
+    );
+}
+
+/// BUILD-RUN-2: the rehearsal's SIGN-OFFLINE.txt line and the printed one paste into PowerShell
+/// with paths that contain spaces (the repository lives under "D:\SHIN DATA CENTER\").
+#[cfg(windows)]
+#[test]
+fn a_rehearsal_command_with_spaces_pastes_into_powershell() {
+    let dist = dist(false);
+    let mut options = dev_options(&dist);
+    options.out = dist.dir.path().join("space test");
+    options.minisign = Path::new(r"C:\Users\John Smith\mklm-dev-keys\minisign.exe").to_path_buf();
+    let mut printed = Vec::new();
+    prepare_release_dev(&options, Err(KeyError::NotConfigured), NOW, &mut printed).unwrap();
+    let sign = std::fs::read_to_string(options.out.join("SIGN-OFFLINE.txt")).unwrap();
+    let comment = std::fs::read_to_string(options.out.join("trusted-comment.txt")).unwrap();
+    let expected = vec![
+        options.minisign.display().to_string(),
+        "-S".to_string(),
+        "-s".to_string(),
+        dist.dir.path().join("mklm-dev.key").display().to_string(),
+        "-m".to_string(),
+        options.out.join("latest.json").display().to_string(),
+        "-x".to_string(),
+        options
+            .out
+            .join("latest.json.minisig")
+            .display()
+            .to_string(),
+        "-t".to_string(),
+        comment.trim_end().to_string(),
+    ];
+    assert_eq!(powershell_command_elements(&sign), vec![expected.clone()]);
+    let printed = String::from_utf8(printed).unwrap();
+    let line = printed
+        .lines()
+        .find(|line| line.contains(" -S -s "))
+        .unwrap();
+    assert_eq!(powershell_command_elements(line), vec![expected]);
+}
+
+/// BUILD-RUN-2: the production SIGN-OFFLINE.txt with an --out folder that contains a space: both
+/// lines paste into PowerShell; the fixed media paths stay bare.
+#[cfg(windows)]
+#[test]
+fn signing_commands_with_spaces_paste_into_powershell() {
+    let mut world = world();
+    let mut options = options(&world, &world.p1);
+    options.out = world.out.path().join(r"release work\v0.2.1");
+    options.alt_key_id = Some(world.b1.id);
+    prepare(&mut world, &options).unwrap();
+    let sign = std::fs::read_to_string(options.out.join("SIGN-OFFLINE.txt")).unwrap();
+    assert!(
+        sign.starts_with(r"E:\tools\minisign.exe -S -s E:\mklm-keys\mklm-primary.key -m '"),
+        "{sign}"
+    );
+    let comment = std::fs::read_to_string(options.out.join("trusted-comment.txt")).unwrap();
+    let line = |minisign: &str, key: &str, signature: &str| {
+        vec![
+            minisign.to_string(),
+            "-S".to_string(),
+            "-s".to_string(),
+            key.to_string(),
+            "-m".to_string(),
+            options.out.join("latest.json").display().to_string(),
+            "-x".to_string(),
+            options.out.join(signature).display().to_string(),
+            "-t".to_string(),
+            comment.trim_end().to_string(),
+        ]
+    };
+    assert_eq!(
+        powershell_command_elements(&sign),
+        vec![
+            line(
+                r"E:\tools\minisign.exe",
+                r"E:\mklm-keys\mklm-primary.key",
+                "latest.json.minisig"
+            ),
+            line(
+                r"F:\tools\minisign.exe",
+                r"F:\mklm-keys-backup\mklm-backup.key",
+                "latest.json.alt.minisig"
+            ),
+        ]
+    );
 }
 
 #[test]

@@ -5,7 +5,7 @@
 | 対象 | マイルストーン M5 の後半（M5b）: アップデーターとリリースの署名（計画 4.2〜4.4、6 章の M5） |
 | 根拠 | 承認済みプラン 2.1〜2.2、4.2〜4.4、5 章（4.x は MSI 向けに書かれている。インストーラーは 2026-09-28 のユーザーの決定で NSIS）。M2 設計（`docs/design/m2-engine.md`）の D.9、E、G.1、I.18。M3 設計（`docs/design/m3-gui.md`）の A.4、B.5、B.17、D、E、F。M5a の実機テスト（`docs/research/m5-install-tests.md`）。main の 37989f8 のコード |
 | ユーザーの決定（M5b の依頼） | 完全な自動更新（ダウンロード、署名の検証、サイレント インストール）。minisign で署名した `latest.json`。**秘密鍵はメンテナーがオフラインで保管し、GitHub の secrets には置かない**。公開鍵を 2 本（通常用とバックアップ用）埋め込み、鍵 ID、失効（`revoked_keys`）、`issued_at`（巻き戻しの防止）、`expires`（凍結の検知）を持つ。確認とダウンロードは自動、インストールは利用者がボタンを押したときだけ。UAC の事前説明あり（未署名のため）。当面バイナリは署名しない。インストーラーは NSIS 3.12（WiX は使わない）。「まず使えるもの」を優先するが、更新の経路は安全に直結するので、検証の正しさは譲らない |
-| 状態 | 設計。**レビュー第 1 回（47 件）と第 2 回（20 件: 第 1 回の対応の検証 17 件、新しい攻撃の検討 3 件）を反映した版**（対応は M 章の 2 つの表）。**2026-09-29 のユーザーの決定（J 章の J-1〜J-9）を反映した**（有効期限の既定 180 日、署名は普段のアカウント、など）。実装（WP-0、WP-U、WP-H、WP-C）は `m5b/updater` に統合済み（実装での変更点は K 章の 20 以降）。**実装のセキュリティ レビュー（3 件。M.3）、設計適合のレビュー（6 件。M.4）、Windows の仕組みと信頼性のレビュー（3 件。M.5）を反映した** |
+| 状態 | 設計。**レビュー第 1 回（47 件）と第 2 回（20 件: 第 1 回の対応の検証 17 件、新しい攻撃の検討 3 件）を反映した版**（対応は M 章の 2 つの表）。**2026-09-29 のユーザーの決定（J 章の J-1〜J-9）を反映した**（有効期限の既定 180 日、署名は普段のアカウント、など）。実装（WP-0、WP-U、WP-H、WP-C）は `m5b/updater` に統合済み（実装での変更点は K 章の 20 以降）。**実装のセキュリティ レビュー（3 件。M.3）、設計適合のレビュー（6 件。M.4）、Windows の仕組みと信頼性のレビュー（3 件。M.5）、ビルドと実行のレビュー（4 件。M.6）を反映した** |
 | 読み手 | M5b を分担して実装する人（G 章、H 章）とレビューする人。指摘に使えるよう、すべての節に番号を付けた |
 
 識別子、コード、コマンドは英語のまま書く。「計画」は承認済みプラン、「m2 D.9」「m3 F.5」は M2 / M3 設計の節を指す。H1 と H2 は D 章で定義する helper の 2 つのプロセスを指す。「未確認」と書いたものは L 章にまとめた。レビューの指摘は「（SECURITY-1）」のように ID で引く（実装のレビューの指摘は、M.1 の ID と区別して「M.3 の SECURITY-1」と書く）。
@@ -343,7 +343,7 @@ revoked 1111222233334444
 | `verify-signer --zip <minisign の zip> --sig <zip.minisig>` | 公式の `minisign` の配布物を作者の公開鍵（B.1。定数）で確かめ、zip と中の `minisign.exe` の SHA-256 を表示する（メンテナーが記録する） | なし |
 | `prepare-release …` | 下の手順。署名する前のすべての確認と、`latest.json` と trusted comment の作成 | あり |
 | `publish --tag vX.Y.Z --dir <dir>` | 下の手順。署名の検証、アップロード、公開、公開後の確認 | あり |
-| `verify --remote [--installers] [--min-days-left N] [--newest-published]`、`verify --dir <dir>` | 本番の取得の経路（`WinHttpTransport`、本番の URL の規則、tag の取り出し、副署名の規則）で公開中の更新情報を取り、信頼の起点ファイルの鍵と空の記録で検証する。`--installers` なら 2 つのインストーラーもダウンロードして大きさと SHA-256 を確かめる（SECURITY-1 の (6)）。期限までの日数が N 未満、`issued_at` が信頼できる時刻より 1 日以上先なら失敗。`--newest-published` は、配られている版が公開済みの最も新しい安定版より古ければ失敗（G.6 の見張り。RED-TEAM-1）。`--dir` は手元のファイルを検証する | `--remote` はあり |
+| `verify --remote [--installers] [--min-days-left N] [--newest-published] [--skip-before-keyed-release]`、`verify --dir <dir>` | 本番の取得の経路（`WinHttpTransport`、本番の URL の規則、tag の取り出し、副署名の規則）で公開中の更新情報を取り、信頼の起点ファイルの鍵と空の記録で検証する。`--installers` なら 2 つのインストーラーもダウンロードして大きさと SHA-256 を確かめる（SECURITY-1 の (6)）。期限までの日数が N 未満、`issued_at` が信頼できる時刻より 1 日以上先なら失敗。`--newest-published` は、配られている版が公開済みの最も新しい安定版より古ければ失敗（G.6 の見張り。RED-TEAM-1）。`--skip-before-keyed-release` は見張りだけが使う: 鍵を埋め込んだ安定版のタグがまだなければ、何も取らずに notice を出して成功する（G.6。M.6 の BUILD-RUN-4）。`--dir` は手元のファイルを検証する | `--remote` はあり |
 | `fetch-smoke` | 本番の経路で `releases/latest/download/SHA256SUMS` を取り、リダイレクトの各段が本番の規則を通ること、tag が取り出せること、TLS、本文が `SHA256SUMS` として読めることを確かめる（v0.1.0 にもある。OPS-UX-TEST-8） | あり |
 | `key-drill start --role backup --out <dir>`、`key-drill check --dir <dir> --role backup` | 鍵の点検（B.6）。`start` は乱数の nonce のファイル（`<out>\nonce.bin`、32 バイト）と、公式の `minisign` のコマンド（`<out>\SIGN-OFFLINE.txt`。署名は `<out>\nonce.bin.minisig`、trusted comment は固定の `mklm-key-drill v1`。署名が新しい乱数のファイルにかかるので、nonce を trusted comment に写す必要はない）を書く。`check` は、その署名が「窓の中の版」（下の定義。今の時刻で数える）のすべてのタグの信頼の起点ファイルのバックアップ用の鍵で、`start` が作った `nonce.bin` の署名として通ることと、trusted comment が `mklm-key-drill v1` であることを確かめ、鍵 ID を表示する。何も書かない（OPS-UX-TEST-13） | `check` はリリースの公開日のため `gh release list`、ファイルのため `git` |
 | `prepare-release --dev …`、`serve-releases --dir <dir> [--port N]` | デバッグ ビルドのリハーサル専用（F.6）。文法と出力は下の「`prepare-release --dev` の文法」 | なし |
@@ -368,6 +368,7 @@ revoked 1111222233334444
     E:\tools\minisign.exe -S -s E:\mklm-keys\mklm-primary.key -m <out>\latest.json -x <out>\latest.json.minisig -t "<trusted comment>"
     ```
     （副署名があれば、同じ形で `-x <out>\latest.json.alt.minisig` の行も。）
+    - 貼る先は PowerShell（B.5 の手順 8 の `Get-FileHash` と同じ窓）。パスは、すべての文字が英数字（日本語などの文字を含む）と `\ / : . _ -` のときはそのまま書き、それ以外（空白、`$`、`'`、`(`、`&`、`;`、`~` など）を含めば `'…'` で囲む（PowerShell の単一引用符の中は何も展開されない。中の `'` は 2 つ重ねる）。`minisign.exe` のパスを囲んだときは、先頭に呼び出しの演算子 `&` と空白を付ける（囲んだ文字列だけでは実行されない）。固定の媒体のパスと、相対の `--out`（`release-work\vX.Y.Z`）は囲まれないので、上の形のまま。作るのは `xtask::common::shell_arg` / `shell_program`（`key-drill start` と `prepare-release --dev` も同じ）。M.6 の BUILD-RUN-2
 13. `<out>\prepare.json` に、タグ、コミット、2 つのアセットの SHA-256 と `digest`、`issued_at`、鍵 ID、窓の中の版の一覧、取り残しの検査の結果を書く（`publish` が照らし直す）。
 14. 要約を表示する: 版、**`issued_at` と有効期限の UTC の日付**（大きく）、主署名と副署名の鍵と役割、失効、2 つのアセットの大きさと SHA-256、取り残しの表（窓の中の各版の後継の公開日と、窓が明ける日を含む）。
 
@@ -390,12 +391,13 @@ cargo xtask prepare-release --dev --tag vX.Y.Z --dist <dir> --dev-pub <file.pub>
 - `--dev-pub`: 公式の `minisign -G` が書いた開発用の鍵の `.pub`。その鍵 ID が `key_ids` になる。**鍵 ID が `TrustAnchors::release()`（本番の信頼の起点ファイル）にあれば拒否**（本番の鍵を開発用として使わない）。
 - `--minisign`: `SIGN-OFFLINE.txt` に書く `minisign.exe` のパス（F.6 の準備で、確かめた zip から取り出したもの）。`xtask` はこのファイルを実行しない。
 - `--only-arch`: もう一方のアーキテクチャのアセットを「大きさ 1、SHA-256 は 64 個の 0」で埋める（OPS-UX-TEST-9）。
-- `issued_at`: 手元の時計（GitHub には問い合わせない）。`--issued-at` は巻き戻しのリハーサル用。`expires` は `issued_at` + `--expires-days`（既定 180。本番と同じ `DEFAULT_VALIDITY_DAYS`）。
+- `issued_at`: 手元の時計（GitHub には問い合わせない）。`expires` は `issued_at` + `--expires-days`（既定 180。本番と同じ `DEFAULT_VALIDITY_DAYS`）。`--issued-at` は期限切れの表示のリハーサル用（例: 3 日前の値と `--expires-days 1` で、E.3 の期限切れの表示と CLI の `"freshness":"expired"`）。
+  - **巻き戻しはリハーサルできない**（M.6 の BUILD-RUN-1）: 開発用の鍵の更新情報は記録を何も動かさない（A.10、C.4）ので、古い `--issued-at` の更新情報も `Rollback` にならない。巻き戻しの拒否、E.3 の巻き戻しの警告、`last_rollback`、CLI の `rollback_ignored`（キャッシュの検証済みの更新情報に戻る）は、F.1 と F.4 のテストが確かめる。開発用の鍵に記録を持たせないのは、機械の記録（HKLM の `Trust`）と利用者の記録が、後で入れるリリース ビルドと共有で、リハーサルの値が本番の巻き戻しのしきい値（鍵をまたいだ最大値。B.2）を上げうるため。
 - `--out`: `--dist` と同じでもよい（F.6 はそうする）。書くもの: `latest.json`（正準形、`revoked_keys` は空）、`trusted-comment.txt`（`mklm-dev-latest-json v1 version=<v> issued_at=<t>`）、`SIGN-OFFLINE.txt`（下の 1 行）。`prepare.json` は書かない（`publish` は `--dev` の成果物を扱わない）。
   ```
   <--minisign> -S -s <--dev-pub と同じフォルダーの、同じ名前の .key> -m <out>\latest.json -x <out>\latest.json.minisig -t "<trusted comment>"
   ```
-  （`xtask` は `.key` のパスを文字列として書くだけで、開かない。B.3 の「秘密鍵のファイルを開くコードを持たない」は変わらない。）
+  （`xtask` は `.key` のパスを文字列として書くだけで、開かない。B.3 の「秘密鍵のファイルを開くコードを持たない」は変わらない。パスの囲み方は上の手順 12 と同じで、`--minisign` のパスを囲めば先頭に `&` が付く。）
 - 拒否するもの: `--dev` のない `--dist`、`--dev-pub`、`--minisign`、`--only-arch`、`--issued-at`（本番の文法と混ぜない）。プレリリースのタグ。ファイルの欠け、`SHA256SUMS` の食い違い。
 - `serve-releases --dir <dist-dev のルート> [--port N]`: `127.0.0.1` だけで待ち受け、`<ルート>\<版>\` をタグ `v<版>` として、`/releases/latest/download/<名前>` → 302 → `/releases/download/v<最新>/<名前>` を GitHub と同じ形で返す。「最新」は `latest.json` と `latest.json.minisig` がそろった、最も新しい版のフォルダー。
 
@@ -474,7 +476,7 @@ cargo xtask prepare-release --dev --tag vX.Y.Z --dist <dir> --dev-pub <file.pub>
    ```
    E:\tools\minisign.exe -S -s E:\mklm-keys\mklm-primary.key -m release-work\vX.Y.Z\latest.json -x release-work\vX.Y.Z\latest.json.minisig -t "mklm-latest-json v1 version=X.Y.Z issued_at=<数字>"
    ```
-   （副署名があるときは、鍵と `-x` の名前を変えた 2 行目。）値を写し間違えても、`publish` が trusted comment の不一致で公開を止める（B.3）。秘密鍵に触れるのは公式の `minisign` だけ（0.2 の 9。J-9 の決定 (a)）。
+   （副署名があるときは、鍵と `-x` の名前を変えた 2 行目。`--out` に空白などを含むパスを使ったときは、`-m` と `-x` のパスが `'…'` で囲まれる。B.3 の手順 12。）値を写し間違えても、`publish` が trusted comment の不一致で公開を止める（B.3）。秘密鍵に触れるのは公式の `minisign` だけ（0.2 の 9。J-9 の決定 (a)）。
 10. USB メモリを外す。**ネットワークを戻す。**
 11. `cargo xtask publish --tag vX.Y.Z --dir <手順 6 の --out>`。署名の検証、アップロード、ファイルの組の確認、公開、公開後の確認（インストーラーのダウンロードを含む）が終わるのを待つ。
 12. Actions の「Update canary」（公開で動く）が緑であることを確かめる。
@@ -509,7 +511,7 @@ cargo xtask prepare-release --dev --tag vX.Y.Z --dist <dir> --dev-pub <file.pub>
 - 秘密鍵をクラウドの同期フォルダー、GitHub、CI、開発機のディスクに置かない。`xtask` は秘密鍵を開かない。
 - **署名に使う PC の条件**（**J-6 の決定 (a)**、2026-09-29: 普段の開発機の、普段のアカウントで署名する。SECURITY-2、SECURITY-9）
   - 署名の間はネットワークを切る。鍵をつないでいる間は、`minisign.exe` 以外を実行しない（エディター、ブラウザー、`cargo` を動かしているターミナルは先に閉じる）。
-  - F.6 のデバッグ ビルドの MKLM が入っていないこと、開発用の鍵（`%USERPROFILE%\mklm-dev-keys\`）が残っていないこと（F.6 の後片付け）。
+  - F.6 のデバッグ ビルドの MKLM が入っていないこと、開発用の鍵（`%USERPROFILE%\mklm-dev-keys\`）と、リハーサルの利用者ごとの更新のキャッシュ（リハーサルで MKLM を動かしたすべてのアカウントの `%LOCALAPPDATA%\SHIN DATA CENTER\MKLM\update\`。開発用の鍵で署名した `latest.json` とデバッグ ビルドのインストーラーを含む）が残っていないこと（F.6 の後片付け）。
   - 秘密鍵に触れるのは、鍵の媒体に置いた、ハッシュを確かめた公式の `minisign` だけ（J-9 の決定 (a)）。`xtask` もほかの道具も鍵のファイルを開かない。
   - Windows と Defender が最新であること。
 - **残る危険**（FIX-VERIFICATION-16。**ユーザーが 2026-09-29 に受け入れた**。J-6、G.7 の 21）: `xtask` は鍵に触れないが、`cargo xtask prepare-release`（B.5 の手順 6）は、タグの `xtask` と、`Cargo.lock` のすべてのビルド スクリプトと proc-macro を、メンテナーの権限でコンパイルして実行する。ふだんの開発でも毎日同じことが起きる。`Cargo.lock` の差分のレビューは版を見るだけで、コードは読まない。侵された依存のクレートが利用者の権限で常駐するプログラムを仕込めば、数分後につないだ USB メモリの `E:\mklm-keys\*.key` を写し、`minisign` に打ち込むパスワードを記録し、手順 10 でネットワークが戻った後に送り出せる。そうなれば、オフラインの鍵はオンラインの鍵と同じだけ危うい。ネットワークを切るだけでは防げない。署名は普段のアカウントで行うので、この危険は上の注意では消えない。将来、危険を下げたくなったときの安い順の対策（今は採らない）:
@@ -1428,7 +1430,9 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
 - `publish`: 通る組、プレリリースの tag の拒否、`prepare.json` の後に下書きの `digest` が変わった、署名が対象の版で通らない、trusted comment の不一致、アップロード後のファイルの組の不一致。
 - `prepare-release` の取り残しの検査（FIX-VERIFICATION-1、FIX-VERIFICATION-2）: F.1 の「バックアップ用の鍵の回転」の 4 つの版を窓の中に置き、(a) と (b) の更新情報が拒否されないこと（`--allow-strand` なしで通る）。`window_targets` の B.3 の例の時系列（v0.4.0 が v0.5.0 の公開から 60 日で窓の中 → v0.6.0 の主 P2 だけの準備は拒否、副 B1 を付ければ通る）。後継の公開から 399 日と 401 日の境目。公開後にプレリリースの印を付けた安定版の形のタグは対象に入り、`-` のタグは入らない。
 - `check-keys`: 過去のタグで同じ ID が別の公開鍵を指す → 拒否。過去のタグで `revoked` にした ID を埋め込む → 拒否。浅いリポジトリ、`v*` のタグがない、ファイルを持つ最初のタグより後のタグでファイルが読めない → 飛ばさずに失敗（FIX-VERIFICATION-15）。
-- `prepare-release --dev`（FIX-VERIFICATION-17）: B.3 の文法どおりの出力（`latest.json`（既定の `expires` は `issued_at` + 180 日）、`trusted-comment.txt` の開発用の接頭辞、`SIGN-OFFLINE.txt` の 1 行）。`--dev-pub` の鍵 ID が本番の信頼の起点にある → 拒否。`--dev` なしの `--dist` などの拒否。`--only-arch` の埋め物。
+- `prepare-release --dev`（FIX-VERIFICATION-17）: B.3 の文法どおりの出力（`latest.json`（既定の `expires` は `issued_at` + 180 日）、`trusted-comment.txt` の開発用の接頭辞、`SIGN-OFFLINE.txt` の 1 行）。`--issued-at` と `--expires-days 1` で期限の切れた更新情報（M.6 の BUILD-RUN-1）。`--dev-pub` の鍵 ID が本番の信頼の起点にある → 拒否。`--dev` なしの `--dist` などの拒否。`--only-arch` の埋め物。
+- 貼るコマンド（M.6 の BUILD-RUN-2）: `shell_arg` / `shell_program` の表（固定の形と相対のパスはそのまま、空白、`$`、`'`、`(`、`~`、全角のダッシュなどは `'…'`、中の `'` は 2 つ、囲んだプログラムには `&`）。Windows では、`prepare-release`（主と副の 2 行）、`prepare-release --dev`（ファイルと表示）、`key-drill start`（ファイルと `then:` の行）の、空白を含むパスのコマンドを、PowerShell 5.1 の `Parser::ParseInput`（実行はしない）で読み戻し、各パスがそのまま 1 つの引数になること。
+- `verify --remote --skip-before-keyed-release`（M.6 の BUILD-RUN-4）: 鍵のない v0.1.0、鍵を持つプレリリースのタグ、鍵のない信頼の起点ファイルだけ → 飛ばす（notice）。鍵を持つ v0.2.0 があれば飛ばさない。浅いリポジトリ、`v*` のタグがない、壊れた信頼の起点ファイル → 失敗。`--dir` と一緒には使えない。
 - `key-drill check`: 正しいバックアップ用の鍵 → 通る。古い（埋め込みにない）バックアップ用の鍵 → 拒否。通常用の鍵 → 拒否。別の `nonce.bin`（前回の点検のもの）の署名 → 拒否。trusted comment が `mklm-key-drill v1` でない → 拒否。対象の版は `window_targets` と同じ。
 - `pubkey-line`: 公式の `minisign -G` の `.pub` の形（テストのデータに、形を写したもの）から正しい行と ID。
 - 本番のコマンドが、開発用の cfg のビルドで失敗すること（開発用の cfg のテストで）。
@@ -1533,12 +1537,12 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 
 **手順**
 
-1. 開発用の鍵: `%USERPROFILE%\mklm-dev-keys\minisign.exe -G -W -p %USERPROFILE%\mklm-dev-keys\mklm-dev.pub -s %USERPROFILE%\mklm-dev-keys\mklm-dev.key`（`-W` はパスワードなし）。`.pub` の 2 行目（base64）を、**その PowerShell の中だけで** `$env:MKLM_UPDATE_DEV_PUBKEY` に入れる（`setx` は使わない。OPS-UX-TEST-7）。
+1. 開発用の鍵: `& "$env:USERPROFILE\mklm-dev-keys\minisign.exe" -G -W -p "$env:USERPROFILE\mklm-dev-keys\mklm-dev.pub" -s "$env:USERPROFILE\mklm-dev-keys\mklm-dev.key"`（`-W` はパスワードなし。手順はすべて PowerShell で行う。PowerShell は `%USERPROFILE%` を展開しないので、コマンドには `$env:USERPROFILE` を書く）。`.pub` の 2 行目（base64）を、**その PowerShell の中だけで** `$env:MKLM_UPDATE_DEV_PUBKEY` に入れる（`setx` は使わない。OPS-UX-TEST-7）。
 2. MKLM を全部終わらせる: `& "C:\Program Files\SHIN DATA CENTER\MKLM\mklm.exe" --quit`、`target\` の下で動いている `mklm.exe` にも `--quit`。タスク マネージャーで `mklm*.exe` がないことを確かめる（E.8。2 つ目の起動は `activate` を送って終わり、`--update-endpoint` が届かないため。`target\` の GUI が同じセッションの多重起動のパイプを持っていると、H2 が `NotOurs` から `ProgramsStillRunning` になるため）。
 3. 0.2.0: ブランチで `[workspace.package] version = "0.2.0"` → `cargo update -w --offline`（ワークスペースのメンバーの版だけを `Cargo.lock` に反映）→ コミット → `.\installer\build-installer.ps1 -Arch x64 -Profile dev`（`RUSTFLAGS=--cfg mklm_update_dev` を自分の子の `cargo` にだけ渡し、dev プロファイルで 3 つの exe をビルドし、3 つに目印があることを確かめ（なければ失敗。A.10 の陽性の対照）、`dist-dev\0.2.0\MKLM-Setup-0.2.0-x64.exe` と、そのフォルダーだけの `SHA256SUMS` を書く）→ そのインストーラーを手で実行して入れる。入れた GUI が起動すると、HKCU の Run の値はインストールした場所を指すように直る（m3 F.3 の `needs_repair`）。
 4. 0.2.1: 同じく版を 0.2.1 にして `cargo update -w --offline` → コミット → `build-installer.ps1 -Arch x64 -Profile dev` → `dist-dev\0.2.1\`。
-5. `cargo xtask prepare-release --dev --tag v0.2.1 --dist dist-dev\0.2.1 --dev-pub %USERPROFILE%\mklm-dev-keys\mklm-dev.pub --minisign %USERPROFILE%\mklm-dev-keys\minisign.exe --only-arch x64 --out dist-dev\0.2.1`（文法は B.3 の「`prepare-release --dev` の文法」。ARM64 のアセットは埋め物。ARM64 のクロスビルドの道具は要らない）。この `xtask` は `RUSTFLAGS` のない別の PowerShell でビルドされてもよい（`--dev` のコマンドは cfg を問わない）。
-6. `dist-dev\0.2.1\SIGN-OFFLINE.txt` の 1 行（`%USERPROFILE%\mklm-dev-keys\minisign.exe -S -s %USERPROFILE%\mklm-dev-keys\mklm-dev.key -m dist-dev\0.2.1\latest.json -x dist-dev\0.2.1\latest.json.minisig -t "mklm-dev-latest-json v1 version=0.2.1 issued_at=…"`）を実行する。
+5. `cargo xtask prepare-release --dev --tag v0.2.1 --dist dist-dev\0.2.1 --dev-pub "$env:USERPROFILE\mklm-dev-keys\mklm-dev.pub" --minisign "$env:USERPROFILE\mklm-dev-keys\minisign.exe" --only-arch x64 --out dist-dev\0.2.1`（文法は B.3 の「`prepare-release --dev` の文法」。ARM64 のアセットは埋め物。ARM64 のクロスビルドの道具は要らない）。この `xtask` は `RUSTFLAGS` のない別の PowerShell でビルドされてもよい（`--dev` のコマンドは cfg を問わない）。
+6. `dist-dev\0.2.1\SIGN-OFFLINE.txt` の 1 行（`C:\Users\<名前>\mklm-dev-keys\minisign.exe -S -s C:\Users\<名前>\mklm-dev-keys\mklm-dev.key -m dist-dev\0.2.1\latest.json -x dist-dev\0.2.1\latest.json.minisig -t "mklm-dev-latest-json v1 version=0.2.1 issued_at=…"`。パスに空白などがあれば `'…'` で囲まれ、先頭に `&` が付く。B.3 の手順 12）を、同じ PowerShell で、リポジトリのルートで実行する（`-m` と `-x` は相対のパス）。
 7. `cargo xtask serve-releases --dir dist-dev --port 8421`（`127.0.0.1` だけで待ち受け、`/releases/latest/download/…` → `/releases/download/v0.2.1/…` のリダイレクトを GitHub と同じ形で返す。「最新」は `latest.json` のある最も新しい版のフォルダー）。
 8. 手順 2 と同じく MKLM を全部終わらせてから、インストールしたデバッグの GUI を `"C:\Program Files\SHIN DATA CENTER\MKLM\mklm.exe" --update-endpoint=http://127.0.0.1:8421` で起動 → 確認 → ダウンロード → ［今すぐ更新］→ UAC（「詳細を表示」でプログラムの場所を確かめる）→ 更新 → 起動し直し → 結果。
 9. 変えた版はブランチごと捨てる（`main` にはコミットしない）。
@@ -1552,13 +1556,15 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 - **H2 の起動から `ready` までの時間**を `update.log` で記録する。Windows セキュリティの「クラウド提供の保護」をオンにした状態で行う（RELIABILITY-5）。
 - 中断（`waiting` の間に H2 を `taskkill` で止める。ユーザーの同意の上で）→ 次の起動で「更新は中断されました」が 1 回だけ出る。
 - 任意: `installing` の間にサインアウトを選ぶ → 「MKLM を更新しています」の理由の文で止められる。
+- 任意（手順 8 の後）: 期限切れの表示。手順 5 に `--issued-at ([DateTimeOffset]::UtcNow.AddDays(-3).ToUnixTimeSeconds()) --expires-days 1` を足して 0.2.1 の更新情報を作り直し、手順 6 で署名し直す（`serve-releases` はそのまま）→ ［今すぐ確認］で E.3 の期限切れの表示（`mklm-cli update --check --json --update-endpoint http://127.0.0.1:8421` なら `"freshness":"expired"`）。
+- **巻き戻しはリハーサルできない**（B.3。開発用の鍵は記録を動かさないので、古い `--issued-at` も `Rollback` にならない）。E.3 の巻き戻しの警告、`last_rollback`、CLI の `rollback_ignored` は F.1 と F.4 のテストが確かめる（M.6 の BUILD-RUN-1）。
 
 **後片付け**（SECURITY-9、OPS-UX-TEST-9）
 
-1. デバッグの MKLM をアンインストールする（「設定」→「アプリ」）。この PC で MKLM を使うなら、公開中のリリース ビルドを入れ直す。
+1. デバッグの MKLM をアンインストールする（「設定」→「アプリ」）。続けて、**リリース ビルドを入れ直す前に**、利用者ごとの更新のキャッシュ `%LOCALAPPDATA%\SHIN DATA CENTER\MKLM\update\` を消す（リハーサルで MKLM を動かしたほかのアカウントでも、そのアカウントのフォルダーを。MKLM が 1 つも動いていないときに）。リハーサルの確認とダウンロードは、ここに開発用の鍵で署名した `latest.json` と署名、手順 8 でダウンロードしたデバッグ ビルドのインストーラー、リハーサルの時刻の `last_check` と `last_success`（`state.json`）を残し、アンインストールでは消えない。残すと、後で入れたリリース ビルドがそれを読む（開発用の鍵を知らないので検証に通らず、ログに残して使わないが、確認の時刻はリハーサルのものになる。M.6 の BUILD-RUN-3）。その後、この PC で MKLM を使うなら、公開中のリリース ビルドを入れ直す。
 2. 任意（昇格した PowerShell、ユーザーの同意の上で）: リハーサルの `HKLM\SOFTWARE\SHIN DATA CENTER\MKLM\Update` の `Run` と `LastResult`（開発用の鍵は `Trust` を変えないので、`Trust` は残してよい）と、`%ProgramData%\SHIN DATA CENTER\MKLM\Updates\` の残り（D.11 の掃除でも消える）。
-3. `%USERPROFILE%\mklm-dev-keys\`（取り出した `minisign.exe` を含む）と `dist-dev\` を消す。`MKLM_UPDATE_DEV_PUBKEY` を入れた PowerShell を閉じる。ブランチ `rehearsal/m5b` を消す。
-4. この PC で本物の署名をするなら、その前に 1〜3 が済んでいることを確かめる（B.6）。
+3. `%USERPROFILE%\mklm-dev-keys\`（取り出した `minisign.exe` を含む）と `dist-dev\` を消す。1 の更新のキャッシュが消えていることを確かめる。`MKLM_UPDATE_DEV_PUBKEY` を入れた PowerShell を閉じる。ブランチ `rehearsal/m5b` を消す。
+4. この PC で本物の署名をするなら、その前に 1〜3 が済んでいることを確かめる（B.6。`release-signing.ja.md` の 5 章の「署名に使う PC の条件」）。
 
 - リリース ビルドにはこの経路がない（A.10）。本番の鍵とサーバーでの確かめは F.7 と F.8。
 
@@ -1605,7 +1611,7 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 | v0.2.0 のタグの前 | `cargo xtask fetch-smoke`（本番の経路で v0.1.0 の `SHA256SUMS`。リダイレクトの各段、tag の取り出し、TLS、本文） | 開発機。プロキシの内側の PC があればそこでも |
 | 毎回のリリース（下書きの前） | `cargo xtask fetch-smoke` | release.yml の x64 のジョブ |
 | 公開の直後 | `xtask publish` の公開後の確認（`verify --remote --installers` と同じ） | メンテナーの PC |
-| 公開の直後と毎週 | `cargo xtask verify --remote --installers --min-days-left 60 --newest-published` と `cargo xtask fetch-smoke` | `update-canary.yml`（`release: published`、毎週、手動） |
+| 公開の直後と毎週 | `cargo xtask verify --remote --installers --min-days-left 60 --newest-published --skip-before-keyed-release` と `cargo xtask fetch-smoke`（鍵を埋め込んだ安定版のタグができるまでは、前者は notice を出して何もしない。G.6） | `update-canary.yml`（`release: published`、毎週、手動） |
 | v0.2.0 の公開の後 | v0.2.0 を入れた PC で `mklm-cli update --check --json` → `"status":"up-to-date"`、`"freshness":"fresh"`、終了コード 0 | 開発機 |
 
 ---
@@ -1779,7 +1785,11 @@ D.9.3 の静的な検査と煙の試験。ci.yml（静的な検査）、`install
 
 - きっかけ: `release: [published]`、毎週（例: 月曜 03:17 UTC）、`workflow_dispatch`。
 - 権限: `contents: read` だけ。自分で登録した secrets を使わない（`gh` には自動の `GITHUB_TOKEN` を `GH_TOKEN` として渡す）。`runs-on: windows-latest`。
-- `cargo xtask verify --remote --installers --min-days-left 60 --newest-published` と `cargo xtask fetch-smoke`。更新情報がない、署名が通らない、tag が合わない、期限まで 60 日未満、インストーラーの大きさかハッシュが違えば失敗し、GitHub がメンテナーにメールで知らせる。
+- `cargo xtask verify --remote --installers --min-days-left 60 --newest-published --skip-before-keyed-release` と `cargo xtask fetch-smoke`。更新情報がない、署名が通らない、tag が合わない、期限まで 60 日未満、インストーラーの大きさかハッシュが違えば失敗し、GitHub がメンテナーにメールで知らせる。
+- **最初の鍵を埋め込んだリリースの前は飛ばす**（`--skip-before-keyed-release`。M.6 の BUILD-RUN-4）: 安定版の形のタグ（`vX.Y.Z`）のうち、信頼の起点ファイルに鍵があるものが 1 つもなければ、`verify --remote` は何も取らず、この木の信頼の起点ファイルも読まずに、GitHub Actions の notice（「Update canary skipped」）を出して成功する。鍵は F.6 の後に作り（G.1）、`latest.json` は v0.2.0 の公開で初めてできるので、それまでの毎週の失敗とメールを避ける（慣れて本物の失敗を見落とさないため）。`fetch-smoke` は v0.1.0 の `SHA256SUMS` で通るので、飛ばさない。
+  - 判断はリリースではなく**タグ**で行う: リリースを消したり隠したりしても（凍結）、鍵を埋め込んだタグ（v0.2.0 からは immutable releases で固定）がある限り見張りは止まらない。v0.2.0 のタグを push してから公開するまで（下書きの数時間）に毎週の実行が当たると失敗する（それでよい）。
+  - `actions/checkout` は `fetch-depth: 0`（すべてのタグ）。浅い clone、`v*` のタグがない、タグの信頼の起点ファイルが壊れている、のどれでも、飛ばさずに失敗する。
+  - 採らなかった案: `schedule` を v0.2.0 のコミットで足す（足し忘れると見張りがないまま気付かない）。
 - `--newest-published`（RED-TEAM-1）: 配られている `latest.json` の版が、`gh release list --exclude-drafts` の安定版の形のタグ（公開後にプレリリースの印を付けたものを含む）の最も新しい版より古ければ失敗する。「最新」の印を外された（事故か、リポジトリを握った攻撃者による凍結）ことを、メンテナーが知るため。事故の手順（B.5）で印を外した後は、次の版を出すまで失敗し続ける（それでよい）。
 - 注: 公開のリポジトリの定期のワークフローは、60 日間リポジトリに活動がないと GitHub が止める（GitHub のドキュメント。今回は確かめ直していない）。カレンダーの予定（B.5 の注）を残す。
 
@@ -4102,6 +4112,9 @@ JSON の例（形を固定するテストの期待値に使う）:
 | 58 | 仕組みのレビュー | D.10、D.13 の 5: 結果を表示した起動は RunOnce の値を残す。2 つ目の起動はどれも `activate` | 昇格していない GUI は、表示したかどうかによらず起動のたびに値を消す。2 つ目の `--tray` と `--after-update` は `activate` ではなく `ping`（H.3 の `InstanceCommand::Ping`。m3 F.1 のコマンドは 4 つ） | ふつうの成功の後の次のサインインで、Run と RunOnce の 2 つの起動の後の方の `activate` が、表示するもののない窓を出していたため。ほかの利用者の失敗の後も同じ（M.5 の MECHANICS-1） |
 | 59 | 仕組みのレビュー | D.7 の 19、21: `Run` が残っても GUI を起動し直す（K の 36 は「次の起動が中断として報告する」） | `Run` を消せたときだけ起動し直し、残ったときは起動せず、書けていた `LastResult` を `gui_relaunch_attempted = false` で書き直す | 起動し直した GUI は、まだ生きている H2 を指す `Run` を見て窓を出さずに終わり、利用者の手元に MKLM がなくなっていたため（M.5 の MECHANICS-2） |
 | 60 | 仕組みのレビュー | D.9.3 の 3〜5: 同じビルドを入れ直して「ビルド ID が変わっていない」を確かめる | 3〜5 の前に直前のリリースを入れ直し、ID が直前のリリースのまま（3 つそろっている）ことを確かめる。その後に新しいビルドを入れ直してから 6、7 | 同じビルドでは置き換えを ID で見分けられず、戻しの後退を見逃すため（M.5 の MECHANICS-3） |
+| 61 | ビルドと実行のレビュー | B.3: `prepare-release --dev --issued-at` は巻き戻しのリハーサル用 | 期限切れの表示のリハーサル用（`--expires-days 1` と）。巻き戻しはリハーサルできないと明記し、F.1 と F.4 のテストに任せる。開発用の鍵は記録を動かさないまま | 開発用の鍵は記録を動かさない（A.10）ので、古い `--issued-at` でも `Rollback` にならなかった。記録を持たせると、リリース ビルドと共有の記録を汚すため（M.6 の BUILD-RUN-1） |
+| 62 | ビルドと実行のレビュー | B.3 の手順 12: `SIGN-OFFLINE.txt` のパスは書いたまま | PowerShell に貼る形: 英数字と `\ / : . _ -` 以外を含むパスは `'…'` で囲み、囲んだ `minisign.exe` には `&` を付ける（`xtask::common::shell_arg` / `shell_program`。`key-drill start` の行と表示、`prepare-release --dev` も） | 空白を含む絶対の `--out`、`--dev-pub`、`--minisign` で、貼ったコマンドが `-m D:\SHIN` などに分かれて失敗していたため（M.6 の BUILD-RUN-2） |
+| 63 | ビルドと実行のレビュー | G.6: 見張りは毎週、無条件に `verify --remote` | `--skip-before-keyed-release`: 鍵を埋め込んだ安定版のタグがまだなければ、notice を出して成功する。checkout は `fetch-depth: 0` | 鍵と v0.2.0 ができるまで、毎週失敗してメールが届き、ただ 1 つの凍結の検知を無視する癖がつくため（M.6 の BUILD-RUN-4） |
 
 ---
 
@@ -4145,6 +4158,11 @@ JSON の例（形を固定するテストの期待値に使う）:
 
 - **`FOLDERID_ProgramData` と環境**（SECURITY-1）: `HKLM\…\ProfileList\ProgramData` は `REG_EXPAND_SZ` の `%SystemDrive%\ProgramData`。`SystemDrive` だけを変えた環境の子プロセス（PowerShell の P/Invoke と、`elevation::tests::a_forged_system_drive_does_not_move_program_data` の子）で、`SHGetKnownFolderPath(FOLDERID_ProgramData, KF_FLAG_DEFAULT, NULL)` は `<偽の SystemDrive>\ProgramData` を返した（レビューの測定では、存在しないドライブ `Q:` なら 0x80070003。`ProgramData`、`ALLUSERSPROFILE`、`ProgramFiles`、`ProgramW6432` の変数を変えても結果は変わらず、`FOLDERID_ProgramFiles` と `FOLDERID_ProgramFilesX64` は影響を受けない）。最初の問い合わせの**後**に `SystemDrive` を直しても、同じプロセスの 2 回目の答えは偽のまま（キャッシュ）。最初の問い合わせの**前**に直せば `C:\ProgramData`。`pin_system_environment` を先に呼んだ子では、`program_data_dir` と `runner_environment` の `ProgramData` が本物になり、呼ばない子では `verify_protected_dir` が偽の `%ProgramData%` を所有者と DACL で拒んだ。
 - **`C:\ProgramData` の既定の ACL**（この開発機、Windows 11 25H2 の build 26200）: 所有者 SYSTEM、`D:PAI(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;DCLCRPCR;;;BU)`。Users の書き込み系の権利は `0x116`（ファイルとフォルダーの作成、拡張属性、属性）で、`DELETE` も `FILE_DELETE_CHILD` もない。`PROGRAM_DATA_POLICY` を通る（`security::tests::program_data_as_windows_sets_it_up` と `protected_dir::tests::program_data_is_an_absolute_directory`）。
+
+**実装のビルドと実行のレビューで確かめたこと**（2026-09-29、この開発機。M.6）
+
+- **貼るコマンドと PowerShell 5.1**（BUILD-RUN-2）: `'…'` で囲んだ空白を含むパスは、`Parser::ParseInput` で 1 つの `StringConstantExpressionAst` になり、`& '<空白を含むパス>\minisign.exe' -S -s '…' -m '…' -x '…' -t "…"` を `Invoke-Expression` で実行すると、代わりに置いた引数を表示するだけの exe に 9 つの引数がそのまま届いた。囲んだパスの前に `&` がなければ構文の誤り（`'…' -S` は式の後の予期しない字句）。PowerShell は `%USERPROFILE%` を展開しない。
+- **見張りの今の失敗**（BUILD-RUN-4。レビューの測定）: 鍵のない `anchors.txt` では、`xtask verify --dir` が `this build has no update keys` で終了コード 1。`--remote` も同じ `release_anchors()?` を通る。修正の後、このリポジトリ（タグは v0.1.0 だけ、浅くない。本物の `git`）で `cargo xtask verify --remote --installers --min-days-left 60 --newest-published --skip-before-keyed-release` は notice（`::notice title=Update canary skipped::…`）を出して終了コード 0、何も取らなかった（フラグなしでは何も取る前に 1）。`update-canary.yml` そのものは GitHub で実行していない。
 
 **確かめていないこと**
 
@@ -4301,3 +4319,14 @@ M.4 の後の実装（7f96a6b）への、H1 / H2、NSIS、D.7〜D.13 の失敗�
 | MECHANICS-3 | minor | 採用 | 煙の試験の 3〜5 が、1〜2 で入れた同じビルドを入れ直していたので、「何も置き換えていない」のビルド ID の比べ方が、置き換えられても通っていた。戻し（`SwapFailed` / `UNSWAP`）が `.old` の名前を戻さずに消す後退は、ID が同じで `.new` も `.old` も残らないので見逃す（本当の上書きでは、新しい helper と CLI が残る版の混ざったインストール）。3〜5 の前に直前のリリースを入れ直し、ID が直前のリリースのまま（3 つともあってそろっている）ことを確かめる（`Test-NothingReplaced`。5 にも足した）。直前のリリースと新しいビルドの ID が同じなら `WARN` で知らせる。その後、新しいビルドを入れ直してから 6、7（アンインストーラーも新しい版のもの）。回帰テスト（Pester 3.4）: 比べ方の関数の表（途中まで置き換えられた、全部置き換えられた、欠けた、同じビルド）と、スクリプトの順序（3 の前に直前のリリース、3 回の比較、7 の前の入れ直し）。修正前のスクリプトでは 2 つのテストが落ちる。煙の試験そのものは CI だけで動く（開発機では実行しない）。D.9.3、K の 60 |
 
 **m3 への反映**: `docs/design/m3-gui.md` の A 章のスレッドの表、B.18 の状態遷移の表、F.1（コマンドの一覧と 2 つ目の起動の送るもの）、F.2（`--tray` と、足した `--after-update` の行）に `ping` を足した（MECHANICS-1）。
+
+### M.6 実装のビルドと実行のレビュー（2026-09-29。4 件）
+
+M.5 の後の実装（7f4b9ba）を、インストールも昇格もせずに、ビルドして動かしたレビュー（fmt、x64 と ARM64 の clippy、ワークスペースのテスト、F.3 の開発用の cfg のテストと目印の陽性の対照、リリース ビルドと守り、`check-nsi.ps1` と Pester、x64 のインストーラーのビルド、GUI と CLI の煙の試験、F.6 のローカルのリハーサル、文書のコマンド）。ID はこのレビューの番号。不採用の指摘はない。
+
+| ID | 重さ | 対応 | 何を変えたか |
+|---|---|---|---|
+| BUILD-RUN-1 | minor | 採用（文書を直す案） | B.3 が `prepare-release --dev --issued-at` を「巻き戻しのリハーサル用」としていたが、開発用の鍵は記録を動かさない（`TrustState::recorded` の早い戻り）ので、古い `--issued-at` の更新情報も `Rollback` にならず、E.3 の巻き戻しの警告、`last_rollback`、CLI の `rollback_ignored` は F.6 ではリハーサルできない。開発用の鍵に記録を持たせる案は採らなかった: 機械の記録（HKLM の `Trust`）と利用者の記録は後で入れるリリース ビルドと共有で、リハーサルの値（鍵をまたいだ最大値）が本番の巻き戻しのしきい値を上げうる。`--issued-at` を期限切れの表示のリハーサル用（`--expires-days 1` と）にし、巻き戻しは F.1 と F.4 のテストに任せると B.3 と F.6 に書いた。F.6 の「確かめること」に任意の期限切れの確認を足した。clap の説明を足した。テスト: `--issued-at` と `--expires-days 1` で期限の切れた更新情報になること（`xtask`）。開発用の鍵が記録を動かさないことは、既存の `the_development_key_signs_rehearsals_only_and_records_nothing`（開発用の cfg）が確かめる。K の 61 |
+| BUILD-RUN-2 | minor | 採用 | `SIGN-OFFLINE.txt` と表示のコマンド（`prepare-release`、`prepare-release --dev`、`key-drill start` と `then:` の行）がパスを囲まずに書き、空白を含む絶対のパス（リポジトリは `D:\SHIN DATA CENTER\` の下）では、貼ったコマンドが `-m D:\SHIN` に分かれて失敗していた（署名はされないので安全側）。PowerShell に貼る形にした: 英数字と `\ / : . _ -` 以外を含むパスは `'…'`（中の `'` と、PowerShell が単一引用符として読む全角の引用符は 2 つ重ねる）、囲んだ `minisign.exe` には呼び出しの演算子 `&`。固定の形（`E:\…`、`F:\…`、相対の `release-work\vX.Y.Z`）は変わらない。回帰テスト: 引数の表と、空白を含むパスの 4 種類のコマンドを PowerShell 5.1 の `Parser::ParseInput` で読み戻し、各パスがそのまま 1 つの引数になること（実行はしない）。囲まない前のコードでは 4 つのテストが落ちることを確かめた。レビューと同じく、空白を含む `--out` と `--minisign` の `prepare-release --dev` の行を `Invoke-Expression` で実行し（`minisign.exe` の代わりに引数を表示するだけの exe）、9 つの引数がそのまま届くことも確かめた。F.6 の手順 1、5 は `%USERPROFILE%`（PowerShell は展開しない）を `"$env:USERPROFILE\…"` に直した。B.3 の手順 12、B.5 の手順 9、F.1、F.6、K の 62、`release-signing.ja.md` |
+| BUILD-RUN-3 | minor | 採用 | F.6 の後片付けと `release-signing.ja.md` の 5 章（署名に使う PC の条件）が、利用者ごとの更新のキャッシュ（`%LOCALAPPDATA%\SHIN DATA CENTER\MKLM\update\`）に触れていなかった。リハーサルはここに開発用の鍵で署名した `latest.json` と署名、デバッグ ビルドのインストーラー、リハーサルの時刻の `last_check` と `last_success` を残し、アンインストールでは消えない。後片付けの 1 に「アンインストールの後、リリース ビルドを入れ直す前に、リハーサルで MKLM を動かしたすべてのアカウントのこのフォルダーを消す」を、3 に確認を、B.6 と `release-signing.ja.md` の 5 章に条件を足した。文書の手順なので、テストはない |
+| BUILD-RUN-4 | minor | 採用 | `update-canary.yml` は毎週、無条件に `verify --remote` を実行し、信頼の起点ファイルに鍵ができ v0.2.0 が `latest.json` 付きで公開されるまで、毎回失敗していた（`release_anchors()?` で何も取る前に）。`verify --remote --skip-before-keyed-release` を足した: 安定版の形のタグのうち信頼の起点ファイルに鍵があるものが 1 つもなければ、何も取らず、この木の信頼の起点ファイルも読まずに notice を出して成功する。判断はリリースではなくタグ（リリースを消されても見張りは止まらない）。浅い clone、`v*` のタグがない、壊れた信頼の起点ファイルは失敗。checkout は `fetch-depth: 0`。`fetch-smoke` は v0.1.0 で通るので飛ばさない。`schedule` を v0.2.0 のコミットで足す案は、足し忘れると見張りがないまま気付かないので採らなかった。テスト: 飛ばす / 飛ばさない / 失敗の表（`xtask`）。B.3、F.1、F.8、G.6、K の 63、`release-signing.ja.md` |

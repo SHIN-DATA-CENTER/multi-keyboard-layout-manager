@@ -10,6 +10,11 @@ name: Update canary
 #   (--newest-published: the "latest" mark was moved or removed; RED-TEAM-1);
 # - the production fetch path (redirects, tag extraction, TLS) no longer works (F.8).
 #
+# Until the first release tag whose crates/mklm-update/trust/anchors.txt has keys (v0.2.0), no
+# latest.json can exist: --skip-before-keyed-release then succeeds with a notice and fetches
+# nothing (BUILD-RUN-4). The tags decide, not the releases, so hiding or deleting releases never
+# turns the canary off; a shallow clone or a clone without tags fails instead of skipping.
+#
 # Scheduled workflows of a public repository stop after 60 days without activity: keep the
 # calendar reminder of docs/maintainer/release-signing.ja.md.
 
@@ -33,8 +38,10 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
+      # Every tag: --skip-before-keyed-release reads the anchors file of each release tag.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install the pinned toolchain (rust-toolchain.toml)
@@ -44,7 +51,7 @@ jobs:
       - name: The published manifest, its signature and installers (design m5b G.6)
         env:
           GH_TOKEN: ${{ github.token }}
-        run: cargo xtask verify --remote --installers --min-days-left 60 --newest-published
+        run: cargo xtask verify --remote --installers --min-days-left 60 --newest-published --skip-before-keyed-release
 
       - name: The production fetch path (design m5b F.8)
         run: cargo xtask fetch-smoke

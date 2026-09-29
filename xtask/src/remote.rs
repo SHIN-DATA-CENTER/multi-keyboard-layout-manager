@@ -16,7 +16,8 @@ use mklm_update::{
     Arch, SignatureSlot, TrustAnchors, VerifiedManifest, Version, installer_name, tries_alternate,
 };
 
-use crate::common::{Env, Signatures, read, verify_with_alternate};
+use crate::common::{Env, Signatures, anchors_at, read, verify_with_alternate};
+use crate::host::Repo;
 use crate::releases::stable_tag_version;
 use crate::sums;
 use crate::time::{DAY, format_date, format_utc};
@@ -41,6 +42,39 @@ pub struct Served {
     pub verified: VerifiedManifest,
     pub slot: SignatureSlot,
     pub tag: Option<String>,
+}
+
+/// `verify --remote --skip-before-keyed-release` (the canary; design m5b G.6, BUILD-RUN-4): `true`
+/// (skip, after printing a GitHub Actions notice) while no stable `vX.Y.Z` tag of this repository
+/// embeds update keys. Before the first such tag (v0.2.0) no `latest.json` can exist, and the
+/// weekly canary would fail every week until then.
+///
+/// The tags, not the published releases, decide: deleting or hiding releases (a freeze) never
+/// turns the canary off once a keyed tag exists. A shallow clone, a clone without `v*` tags, a tag
+/// missing locally or a malformed anchors file fails instead of skipping (fail closed).
+pub fn before_keyed_release(repo: &mut dyn Repo, out: &mut dyn Write) -> anyhow::Result<bool> {
+    if repo.is_shallow()? {
+        bail!(
+            "the repository is shallow: the canary needs every tag (actions/checkout with \
+             fetch-depth: 0)"
+        );
+    }
+    let tags = repo.tags()?;
+    if tags.is_empty() {
+        bail!("the repository has no v* tags (git fetch --tags)");
+    }
+    for tag in tags.iter().filter(|tag| stable_tag_version(tag).is_some()) {
+        if anchors_at(repo, tag)?.is_some() {
+            return Ok(false);
+        }
+    }
+    writeln!(
+        out,
+        "::notice title=Update canary skipped::No release tag embeds update keys yet (before \
+         v0.2.0), so no latest.json can exist: nothing to verify (design m5b G.6). The canary \
+         runs from the first tag whose crates/mklm-update/trust/anchors.txt has keys."
+    )?;
+    Ok(true)
 }
 
 /// `verify --remote` (design m5b B.3, G.6).
@@ -260,7 +294,9 @@ pub fn fetch_smoke(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{DAY as TEST_DAY, FakeClock, FakeHost, FakeRepo, FakeWeb, Key, T0};
+    use crate::testing::{
+        DAY as TEST_DAY, FakeClock, FakeHost, FakeRepo, FakeWeb, Key, T0, anchors_text,
+    };
     use mklm_update::{KeyRole, Manifest, ManifestAsset, Sha256Digest};
 
     fn manifest(version: &str, issued_at: u64, key: &Key, installers: &[(Arch, &[u8])]) -> Vec<u8> {
@@ -428,6 +464,53 @@ mod tests {
         setup.anchors =
             TrustAnchors::from_keys(&[(KeyRole::Primary, &Key::new().public)], &[]).unwrap();
         assert!(run(&mut setup, &RemoteChecks::default()).is_err());
+    }
+
+    /// BUILD-RUN-4: the canary skips only while no stable tag embeds keys, and never silently
+    /// on a repository it cannot read.
+    #[test]
+    fn the_canary_waits_for_the_first_keyed_release_tag() {
+        let skips = |repo: &mut FakeRepo| {
+            let mut out = Vec::new();
+            before_keyed_release(repo, &mut out).map(|skip| (skip, String::from_utf8(out).unwrap()))
+        };
+        // Today: v0.1.0 has no anchors file; a pre-release with keys does not count (it carries
+        // no latest.json); neither does a stable tag whose file has no key yet.
+        let mut repo = FakeRepo::default();
+        repo.tag("v0.1.0", &"1".repeat(40), None);
+        let (skip, out) = skips(&mut repo).unwrap();
+        assert!(skip);
+        assert!(out.starts_with("::notice "), "{out}");
+        let (p, b) = (Key::new(), Key::new());
+        let keyed = anchors_text(&[(KeyRole::Primary, &p), (KeyRole::Backup, &b)], &[]);
+        repo.tag("v0.2.0-rc.1", &"2".repeat(40), Some(keyed.clone()));
+        repo.tag(
+            "v0.1.1",
+            &"3".repeat(40),
+            Some("# MKLM update trust anchors (design m5b B.2).\n".to_string()),
+        );
+        assert!(skips(&mut repo).unwrap().0);
+        // From v0.2.0 on, the canary runs (and fails when nothing is served).
+        repo.tag("v0.2.0", &"4".repeat(40), Some(keyed));
+        let (skip, out) = skips(&mut repo).unwrap();
+        assert!(!skip);
+        assert!(out.is_empty(), "{out}");
+        // Never a silent skip on a repository it cannot read.
+        let mut shallow = FakeRepo {
+            shallow: true,
+            ..FakeRepo::default()
+        };
+        shallow.tag("v0.1.0", &"1".repeat(40), None);
+        assert!(skips(&mut shallow).is_err());
+        assert!(skips(&mut FakeRepo::default()).is_err());
+        let mut broken = FakeRepo::default();
+        broken.tag("v0.1.0", &"1".repeat(40), None);
+        broken.tag(
+            "v0.2.0",
+            &"4".repeat(40),
+            Some("primary nonsense\n".to_string()),
+        );
+        assert!(skips(&mut broken).is_err());
     }
 
     fn setup_future() -> Setup {

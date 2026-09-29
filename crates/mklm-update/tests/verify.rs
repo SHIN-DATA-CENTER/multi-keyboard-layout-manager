@@ -329,6 +329,21 @@ fn the_development_key_signs_rehearsals_only_and_records_nothing() {
         ..TrustState::default()
     };
     assert_eq!(state.recorded(&verified, NOW), state);
+    // So the rehearsal cannot show a rollback: after this manifest, an older rehearsal manifest
+    // still passes (design m5b B.3: prepare-release --dev --issued-at is for the expiry display;
+    // BUILD-RUN-1).
+    let after = empty().recorded(&verified, NOW);
+    assert_eq!(after, empty());
+    let older_at = T0 - 7 * DAY;
+    let older = Draft::new("0.2.1", older_at, &[&dev]).bytes();
+    let older = Signed {
+        signature: dev.sign(
+            &older,
+            &format!("{DEV_TRUSTED_COMMENT_PREFIX} version=0.2.1 issued_at={older_at}"),
+        ),
+        manifest: older,
+    };
+    assert_eq!(check(&older, &trust, &after).unwrap().issued_at, older_at);
     assert_eq!(
         apply_trust_report(
             &rehearsal.manifest,

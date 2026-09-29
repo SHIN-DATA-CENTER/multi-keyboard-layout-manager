@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, bail};
@@ -22,8 +22,8 @@ use mklm_update::{
 use serde_json::json;
 
 use crate::common::{
-    Env, Signatures, anchors_at, hash_file, read_text, release_tag_version, shown,
-    verify_with_alternate, write,
+    Env, Signatures, anchors_at, hash_file, read_text, release_tag_version, shell_arg,
+    shell_program, shown, verify_with_alternate, write,
 };
 use crate::keys::pubkey_line;
 use crate::releases::{StrandRow, strand_row, verdict, window_targets};
@@ -312,9 +312,11 @@ pub fn prepare_release(env: &mut Env<'_>, options: &Prepare) -> anyhow::Result<(
         let role = role_for_signing(key, &this_anchors, &rows, env.repo)?;
         let (minisign, key_file) = signing_media(role);
         sign.push_str(&format!(
-            "{minisign} -S -s {key_file} -m {} -x {} -t \"{trusted_comment}\"\n",
-            shown(&out.join("latest.json")),
-            shown(&out.join(slot_file)),
+            "{} -S -s {} -m {} -x {} -t \"{trusted_comment}\"\n",
+            shell_program(Path::new(minisign)),
+            shell_arg(Path::new(key_file)),
+            shell_arg(&out.join("latest.json")),
+            shell_arg(&out.join(slot_file)),
         ));
     }
     write(&out.join("SIGN-OFFLINE.txt"), &sign)?;
@@ -652,10 +654,10 @@ pub fn prepare_release_dev(
     let key_file = options.dev_pub.with_extension("key");
     let sign = format!(
         "{} -S -s {} -m {} -x {} -t \"{trusted_comment}\"\n",
-        shown(&options.minisign),
-        shown(&key_file),
-        shown(&options.out.join("latest.json")),
-        shown(&options.out.join("latest.json.minisig")),
+        shell_program(&options.minisign),
+        shell_arg(&key_file),
+        shell_arg(&options.out.join("latest.json")),
+        shell_arg(&options.out.join("latest.json.minisig")),
     );
     write(&options.out.join("SIGN-OFFLINE.txt"), &sign)?;
     writeln!(

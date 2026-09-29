@@ -384,3 +384,95 @@ impl Drop for TempDir {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+/// Standard base64 (for `powershell -EncodedCommand`).
+#[cfg(windows)]
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[((n >> shift) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// How PowerShell (Windows PowerShell 5.1, the maintainer's shell) reads pasted command lines:
+/// for each line, the elements of its one command (the program, then each parameter and
+/// argument) as values. Only `Parser::ParseInput` runs; the commands never do. Panics when a line
+/// does not parse or is not exactly one command.
+#[cfg(windows)]
+pub fn powershell_command_elements(lines: &str) -> Vec<Vec<String>> {
+    const SCRIPT: &str = r#"
+$text = $env:MKLM_XTASK_TEST_COMMANDS
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)
+if ($errors.Count -gt 0) { [Console]::Out.WriteLine('PARSE-ERROR ' + $errors[0].Message); exit 3 }
+foreach ($statement in $ast.EndBlock.Statements) {
+  if (-not ($statement -is [System.Management.Automation.Language.PipelineAst]) -or $statement.PipelineElements.Count -ne 1) { [Console]::Out.WriteLine('NOT-ONE-COMMAND'); exit 4 }
+  $command = $statement.PipelineElements[0]
+  if (-not ($command -is [System.Management.Automation.Language.CommandAst])) { [Console]::Out.WriteLine('NOT-A-COMMAND'); exit 4 }
+  foreach ($element in $command.CommandElements) {
+    if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $value = $element.Value }
+    elseif ($element -is [System.Management.Automation.Language.CommandParameterAst]) { $value = $element.Extent.Text }
+    else { $value = 'UNEXPECTED ' + $element.GetType().Name }
+    [Console]::Out.WriteLine('E ' + $value)
+  }
+  [Console]::Out.WriteLine('END')
+}
+exit 0
+"#;
+    let utf16: Vec<u8> = SCRIPT
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect();
+    let powershell = std::env::var_os("SystemRoot")
+        .map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+        .unwrap_or_else(|| PathBuf::from("powershell.exe"));
+    let output = std::process::Command::new(&powershell)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            &base64(&utf16),
+        ])
+        .env("MKLM_XTASK_TEST_COMMANDS", lines)
+        .output()
+        .unwrap_or_else(|error| panic!("running {}: {error}", powershell.display()));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{lines}\n{stdout}");
+    let mut commands = Vec::new();
+    let mut current = Vec::new();
+    for line in stdout.lines().map(|line| line.trim_end_matches('\r')) {
+        if let Some(value) = line.strip_prefix("E ") {
+            current.push(value.to_string());
+        } else if line == "END" {
+            commands.push(std::mem::take(&mut current));
+        }
+    }
+    commands
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn base64_of_the_encoded_command() {
+        assert_eq!(super::base64(b""), "");
+        assert_eq!(super::base64(b"f"), "Zg==");
+        assert_eq!(super::base64(b"fo"), "Zm8=");
+        assert_eq!(super::base64(b"foo"), "Zm9v");
+        assert_eq!(super::base64(b"foobar"), "Zm9vYmFy");
+    }
+}

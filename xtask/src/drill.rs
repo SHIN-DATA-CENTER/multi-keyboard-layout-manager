@@ -13,7 +13,7 @@ use mklm_update::keys::{ANCHORS_REPO_PATH, parse_anchors, signature_key_id};
 use mklm_update::verify::verify_file_signature;
 use mklm_update::{KEY_DRILL_COMMENT_PREFIX, KeyId, KeyRole};
 
-use crate::common::{Env, anchors_text_at, read, shown, write};
+use crate::common::{Env, anchors_text_at, read, shell_arg, shell_program, shown, write};
 use crate::prepare::signing_media;
 use crate::releases::window_targets;
 use crate::time::format_utc;
@@ -54,9 +54,11 @@ pub fn start(role: KeyRole, dir: &Path, out: &mut dyn Write) -> anyhow::Result<(
     write(&nonce_path, nonce())?;
     let (minisign, key_file) = signing_media(role);
     let command = format!(
-        "{minisign} -S -s {key_file} -m {} -x {} -t \"{KEY_DRILL_COMMENT_PREFIX}\"\n",
-        shown(&nonce_path),
-        shown(&dir.join(SIGNATURE_NAME)),
+        "{} -S -s {} -m {} -x {} -t \"{KEY_DRILL_COMMENT_PREFIX}\"\n",
+        shell_program(Path::new(minisign)),
+        shell_arg(Path::new(key_file)),
+        shell_arg(&nonce_path),
+        shell_arg(&dir.join(SIGNATURE_NAME)),
     );
     write(&dir.join("SIGN-OFFLINE.txt"), &command)?;
     writeln!(out, "Wrote {} and SIGN-OFFLINE.txt.", shown(&nonce_path))?;
@@ -69,7 +71,7 @@ pub fn start(role: KeyRole, dir: &Path, out: &mut dyn Write) -> anyhow::Result<(
     writeln!(
         out,
         "then: cargo xtask key-drill check --dir {} --role {}",
-        shown(dir),
+        shell_arg(dir),
         role.as_str()
     )?;
     Ok(())
@@ -215,6 +217,14 @@ mod tests {
             "{command}"
         );
         assert_eq!(command.lines().count(), 1);
+        assert!(
+            command.contains(&format!(
+                "-m {} -x {} -t",
+                shell_arg(&dir.path().join(NONCE_NAME)),
+                shell_arg(&dir.path().join(SIGNATURE_NAME))
+            )),
+            "{command}"
+        );
         // A second start in the same folder is refused.
         assert!(start(KeyRole::Backup, dir.path(), &mut out).is_err());
 
@@ -254,6 +264,52 @@ mod tests {
         // Another trusted comment.
         std::fs::write(&signature_path, world.b.sign(&nonce, "mklm-latest-json v1")).unwrap();
         assert!(check_with(&mut world, dir.path(), KeyRole::Backup).is_err());
+    }
+
+    /// BUILD-RUN-2: with a folder that contains a space, the SIGN-OFFLINE.txt line and the
+    /// printed `then:` line paste into PowerShell.
+    #[cfg(windows)]
+    #[test]
+    fn drill_commands_with_spaces_paste_into_powershell() {
+        let root = TempDir::new("drill-spaces");
+        let dir = root.path().join("drill 2027");
+        let mut printed = Vec::new();
+        start(KeyRole::Backup, &dir, &mut printed).unwrap();
+        let command = std::fs::read_to_string(dir.join("SIGN-OFFLINE.txt")).unwrap();
+        let text = |value: &str| value.to_string();
+        assert_eq!(
+            crate::testing::powershell_command_elements(&command),
+            vec![vec![
+                text(r"F:\tools\minisign.exe"),
+                text("-S"),
+                text("-s"),
+                text(r"F:\mklm-keys-backup\mklm-backup.key"),
+                text("-m"),
+                dir.join(NONCE_NAME).display().to_string(),
+                text("-x"),
+                dir.join(SIGNATURE_NAME).display().to_string(),
+                text("-t"),
+                text(KEY_DRILL_COMMENT_PREFIX),
+            ]]
+        );
+        let printed = String::from_utf8(printed).unwrap();
+        let then = printed
+            .lines()
+            .find_map(|line| line.strip_prefix("then: "))
+            .unwrap();
+        assert_eq!(
+            crate::testing::powershell_command_elements(then),
+            vec![vec![
+                text("cargo"),
+                text("xtask"),
+                text("key-drill"),
+                text("check"),
+                text("--dir"),
+                dir.display().to_string(),
+                text("--role"),
+                text("backup"),
+            ]]
+        );
     }
 
     #[test]

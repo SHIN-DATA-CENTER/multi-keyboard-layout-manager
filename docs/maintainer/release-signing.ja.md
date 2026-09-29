@@ -24,7 +24,7 @@ MKLM の自動更新は、メンテナーがオフラインで署名した `late
 | `cargo xtask check-keys` | 信頼の起点ファイル（`crates/mklm-update/trust/anchors.txt`）の検査。通常用 1 本とバックアップ用 1 本、失効させた鍵を埋め込んでいない、過去のタグの同じ ID が別の鍵を指していない、過去に失効させた ID を埋め込み直していない。過去のタグを読めなければ（浅いリポジトリ、`v*` のタグがない、途中のタグにファイルがない）失敗する。release.yml が呼ぶ | なし（git） |
 | `cargo xtask prepare-release …` | 署名の前のすべての確認と、`latest.json`、`trusted-comment.txt`、`SIGN-OFFLINE.txt`、`prepare.json` の作成（下の 3 章） | あり |
 | `cargo xtask publish --tag vX.Y.Z --dir <dir>` | 署名の検証、アップロード、ファイルの組の確認、公開、公開後の確認 | あり |
-| `cargo xtask verify --remote [--installers] [--min-days-left N] [--newest-published]` | 公開中の `latest.json` を本番の経路で取り、この木の信頼の起点ファイルで検証する。見張りが使う | あり |
+| `cargo xtask verify --remote [--installers] [--min-days-left N] [--newest-published] [--skip-before-keyed-release]` | 公開中の `latest.json` を本番の経路で取り、この木の信頼の起点ファイルで検証する。見張りが使う。`--skip-before-keyed-release`（見張りだけ）は、鍵を埋め込んだ安定版のタグ（v0.2.0）ができるまで、何も取らずに notice を出して成功する（設計 G.6） | あり |
 | `cargo xtask verify --dir <dir>` | 手元の `latest.json` と署名を検証する | なし |
 | `cargo xtask fetch-smoke` | 本番の経路で `releases/latest/download/SHA256SUMS` を取り、リダイレクトの各段、tag の取り出し、TLS、本文を確かめる | あり |
 | `cargo xtask key-drill start --role backup --out <dir>`、`key-drill check --dir <dir> --role backup` | 鍵の点検（6 章） | `check` はあり |
@@ -41,7 +41,7 @@ MKLM の自動更新は、メンテナーがオフラインで署名した `late
 
 - [ ] 公式の `minisign` を用意する: `https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip` とその `.minisig` をダウンロード → `cargo xtask verify-signer --zip … --sig …` → 表示された SHA-256 を下の「記録」の表に書く → 確かめた zip を残しておく（F.6 はここから取り出した `minisign.exe` を使う）。
 - [ ] （ここから F.6 の後）確かめた zip の中の `minisign.exe` を、通常用の鍵の USB メモリ（`E:\tools\`）とバックアップ用の媒体（`F:\tools\`）の両方に置く。
-- [ ] 鍵は普段の開発機の、普段のアカウントで作り、署名する（J-6 の決定 (a)。署名専用のアカウントは作らない）。その前に 5 章の「署名に使う PC の条件」を確かめる: F.6 の後片付けが済み、デバッグ ビルドの MKLM と開発用の鍵（`%USERPROFILE%\mklm-dev-keys\`）が残っていない。
+- [ ] 鍵は普段の開発機の、普段のアカウントで作り、署名する（J-6 の決定 (a)。署名専用のアカウントは作らない）。その前に 5 章の「署名に使う PC の条件」を確かめる: F.6 の後片付けが済み、デバッグ ビルドの MKLM と開発用の鍵（`%USERPROFILE%\mklm-dev-keys\`）と、リハーサルの更新のキャッシュ（`%LOCALAPPDATA%\SHIN DATA CENTER\MKLM\update\`）が残っていない。
 - [ ] ネットワークを切る → エディター、ブラウザー、`cargo` を動かしているターミナルを閉じる → 通常用の USB メモリ（BitLocker To Go）をつなぐ → `Get-FileHash E:\tools\minisign.exe` が記録した値と一致することを確かめる → `E:\tools\minisign.exe -G -p E:\mklm-keys\mklm-primary.pub -s E:\mklm-keys\mklm-primary.key`（パスワードを 2 回）→ 外す。
 - [ ] 同じく（ネットワークを切ったまま）、別の媒体でバックアップ用: `F:\tools\minisign.exe -G -p F:\mklm-keys-backup\mklm-backup.pub -s F:\mklm-keys-backup\mklm-backup.key` → 外す → ネットワークを戻す。2 つのパスワードは別々の保管場所に置く（5 章）。
 - [ ] 2 つの `.pub`（公開鍵。秘密ではない）を作業用のフォルダーに写し、`cargo xtask pubkey-line --pub … --role primary`、`--role backup` → 表示された 2 行を `crates/mklm-update/trust/anchors.txt` に貼る → `cargo xtask check-keys` → コミット（公開鍵だけ。秘密鍵は決してリポジトリに入れない）。`minisign -G` が表示した鍵 ID と、`pubkey-line` の ID が一致することを目で確かめる（`minisign` は先頭の 0 を省いて表示することがある。`pubkey-line` は `.pub` の 1 行目の ID と違えば止まる）。
@@ -78,6 +78,8 @@ E:\tools\minisign.exe -S -s E:\mklm-keys\mklm-primary.key -m release-work\vX.Y.Z
 ```
 
 バックアップ用の鍵で署名するとき（鍵の移行の間の主署名か副署名）は、1 つ目の 2 つのパスを `F:\tools\minisign.exe` と `F:\mklm-keys-backup\mklm-backup.key` に替えた形。副署名は `-x release-work\vX.Y.Z\latest.json.alt.minisig`。`-t` の中身は `trusted-comment.txt` と同じ。
+
+コマンドは PowerShell に貼る形で書かれる。`--out` に空白や PowerShell の特別な文字（`$`、`'`、`(`、`&`、`;`、`~` など）を含むパスを使うと、`-m` と `-x` のパスが `'…'` で囲まれる（中の `'` は 2 つ重なる）。上の形の相対のパス（`release-work\vX.Y.Z`）なら囲まれない。固定の形の `minisign.exe` と鍵のパスは囲まれないので、行の先頭に `&` が付くことはない（付いていれば貼らない）。
 
 鍵の点検（6 章）:
 
@@ -142,6 +144,7 @@ F:\tools\minisign.exe -S -s F:\mklm-keys-backup\mklm-backup.key -m <out>\nonce.b
 
 - 署名の間はネットワークを切る。鍵をつないでいる間は、`minisign.exe` 以外を実行しない（エディター、ブラウザー、`cargo` を動かしているターミナルは先に閉じる）。
 - F.6 のデバッグ ビルドの MKLM が入っていないこと、開発用の鍵（`%USERPROFILE%\mklm-dev-keys\`）が残っていないこと。
+- F.6 のリハーサルの利用者ごとの更新のキャッシュ `%LOCALAPPDATA%\SHIN DATA CENTER\MKLM\update\` が消してあること（リハーサルで MKLM を動かしたすべてのアカウントで）。開発用の鍵で署名した `latest.json` と署名、デバッグ ビルドのインストーラー、リハーサルの時刻の確認の記録が入っていて、アンインストールでは消えない（設計 F.6 の後片付けの 1）。
 - 秘密鍵に触れるのは、鍵の媒体に置いた、ハッシュを確かめた公式の `minisign` だけ。
 - Windows と Defender が最新であること。
 

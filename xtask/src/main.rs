@@ -163,6 +163,8 @@ struct PrepareRelease {
     minisign: Option<PathBuf>,
     #[arg(long, value_enum)]
     only_arch: Option<ArchArg>,
+    /// Rehearsal only: this Unix time instead of the local clock, for the expiry display (with
+    /// --expires-days 1). Never a rollback: the development key records nothing (design m5b B.3).
     #[arg(long)]
     issued_at: Option<u64>,
     #[arg(long)]
@@ -261,6 +263,10 @@ struct Verify {
     min_days_left: Option<u64>,
     #[arg(long)]
     newest_published: bool,
+    /// The canary (update-canary.yml): succeed with a notice, without fetching anything, while
+    /// no stable vX.Y.Z tag of this repository embeds update keys (before v0.2.0).
+    #[arg(long)]
+    skip_before_keyed_release: bool,
     #[arg(long)]
     dir: Option<PathBuf>,
 }
@@ -395,13 +401,27 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         Command::Publish { tag, dir } => publish::publish(&mut env, tag, dir),
         Command::Verify(verify) => match (&verify.dir, verify.remote) {
             (Some(dir), false) => {
-                if verify.installers || verify.min_days_left.is_some() || verify.newest_published {
-                    bail!("--installers, --min-days-left and --newest-published go with --remote");
+                if verify.installers
+                    || verify.min_days_left.is_some()
+                    || verify.newest_published
+                    || verify.skip_before_keyed_release
+                {
+                    bail!(
+                        "--installers, --min-days-left, --newest-published and \
+                         --skip-before-keyed-release go with --remote"
+                    );
                 }
                 let now = env.clock.now();
                 remote::verify_dir(dir, &release_anchors()?, now, env.out).map(|_| ())
             }
             (None, true) => {
+                // Before anything else, even this tree's anchors, which have no key before
+                // v0.2.0 (design m5b G.6; BUILD-RUN-4).
+                if verify.skip_before_keyed_release
+                    && remote::before_keyed_release(env.repo, env.out)?
+                {
+                    return Ok(());
+                }
                 let checks = remote::RemoteChecks {
                     installers: verify.installers,
                     min_days_left: verify.min_days_left,
@@ -462,6 +482,7 @@ mod tests {
             "xtask prepare-release --dev --tag v0.2.1 --dist dist-dev --dev-pub k.pub --minisign minisign.exe --only-arch x64 --issued-at 1792022400 --out dist-dev",
             "xtask publish --tag v0.2.1 --dir release-work",
             "xtask verify --remote --installers --min-days-left 60 --newest-published",
+            "xtask verify --remote --installers --min-days-left 60 --newest-published --skip-before-keyed-release",
             "xtask verify --dir release-work",
             "xtask fetch-smoke",
             "xtask key-drill start --role backup --out drill-2027",
@@ -534,6 +555,17 @@ mod tests {
                 .is_err()
         );
         assert!(mode("xtask prepare-release --tag v0.2.1 --commit 0123456789abcdef0123456789abcdef01234567 --main-key-id 8f1a --out o").is_err());
+    }
+
+    /// The canary's skip belongs to `--remote` only (BUILD-RUN-4).
+    #[test]
+    fn the_canary_skip_goes_with_remote_only() {
+        for line in [
+            "xtask verify --dir d --skip-before-keyed-release",
+            "xtask verify --skip-before-keyed-release",
+        ] {
+            assert!(run(&parse(line).unwrap()).is_err(), "{line}");
+        }
     }
 
     #[test]

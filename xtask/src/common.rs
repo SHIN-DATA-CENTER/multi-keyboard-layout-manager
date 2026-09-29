@@ -135,9 +135,51 @@ pub fn one_line(text: &str) -> &str {
         .unwrap_or(text)
 }
 
-/// A path as the maintainer typed it, for the printed commands.
+/// A path as the maintainer typed it, for messages.
 pub fn shown(path: &Path) -> String {
     path.display().to_string()
+}
+
+/// A character PowerShell reads as a single quote (it ends a single-quoted string unless doubled).
+fn is_single_quote(c: char) -> bool {
+    matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}')
+}
+
+/// One argument of a command that the maintainer pastes into PowerShell (`SIGN-OFFLINE.txt`, the
+/// printed `key-drill check` line; design m5b B.3 step 12, F.6): bare when every character is
+/// one PowerShell takes literally in a bare word (letters, digits, `\ / : . _ -`), otherwise in
+/// single quotes, where PowerShell expands nothing (a quote character inside is doubled). The
+/// fixed media paths and relative `--out` folders stay bare, as release-signing.ja.md shows them.
+pub fn shell_arg(path: &Path) -> String {
+    let text = path.display().to_string();
+    let bare = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '\\' | '/' | ':' | '.' | '_' | '-'));
+    if bare {
+        return text;
+    }
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('\'');
+    for c in text.chars() {
+        if is_single_quote(c) {
+            quoted.push(c);
+        }
+        quoted.push(c);
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// The program of such a command: a quoted path is a string to PowerShell, which runs it only
+/// after the call operator `&`.
+pub fn shell_program(path: &Path) -> String {
+    let arg = shell_arg(path);
+    if arg.starts_with('\'') {
+        format!("& {arg}")
+    } else {
+        arg
+    }
 }
 
 #[cfg(test)]
@@ -166,5 +208,96 @@ mod tests {
         assert_eq!(one_line("x\r\n"), "x");
         assert_eq!(one_line("x\n"), "x");
         assert_eq!(one_line("x"), "x");
+    }
+
+    /// BUILD-RUN-2: paths with a space or a PowerShell character are quoted; the fixed forms of
+    /// release-signing.ja.md stay as they are.
+    #[test]
+    fn command_arguments() {
+        let arg = |text: &str| shell_arg(Path::new(text));
+        let program = |text: &str| shell_program(Path::new(text));
+        for bare in [
+            r"E:\tools\minisign.exe",
+            r"E:\mklm-keys\mklm-primary.key",
+            r"release-work\v0.2.1\latest.json",
+            r".\dist-dev\0.2.1\latest.json.minisig",
+            r"C:\Users\me\mklm-dev-keys\minisign.exe",
+            r"C:\Users\山田\mklm-dev-keys\minisign.exe",
+        ] {
+            assert_eq!(arg(bare), bare);
+            assert_eq!(program(bare), bare);
+        }
+        assert_eq!(
+            arg(r"D:\SHIN DATA CENTER\out\latest.json"),
+            r"'D:\SHIN DATA CENTER\out\latest.json'"
+        );
+        assert_eq!(
+            program(r"C:\Users\John Smith\minisign.exe"),
+            r"& 'C:\Users\John Smith\minisign.exe'"
+        );
+        assert_eq!(arg(r"C:\it's\x"), r"'C:\it''s\x'");
+        assert_eq!(arg("C:\\it\u{2019}s\\x"), "'C:\\it\u{2019}\u{2019}s\\x'");
+        for special in [
+            r"C:\$env:x\y",
+            r"C:\a`b\y",
+            r"C:\Program Files (x86)\y",
+            r"C:\a;b\y",
+            r"C:\a&b\y",
+            r"C:\a,b\y",
+            r"C:\a@b\y",
+            r"C:\a#b\y",
+            r"C:\RUNNER~1\y",
+            "C:\\a\u{2013}b\\y",
+        ] {
+            assert_eq!(arg(special), format!("'{special}'"), "{special}");
+        }
+    }
+
+    /// BUILD-RUN-2: PowerShell's own parser reads every quoted path back unchanged (nothing is
+    /// run: only `Parser::ParseInput`).
+    #[cfg(windows)]
+    #[test]
+    fn powershell_reads_the_quoted_paths_back() {
+        let paths = [
+            r"C:\Users\John Smith\mklm-dev-keys\minisign.exe",
+            r"D:\SHIN DATA CENTER\mklm\dist-dev\space test\latest.json",
+            r"C:\it's (x86)\$env:USERPROFILE\a`b;c&d,e@f#g\latest.json.minisig",
+            r"release-work\v0.2.1\latest.json",
+        ];
+        let line = format!(
+            "{} -S -m {} -x {} -t \"mklm-dev-latest-json v1 version=0.2.1 issued_at=1\"",
+            shell_program(Path::new(paths[0])),
+            shell_arg(Path::new(paths[1])),
+            shell_arg(Path::new(paths[2])),
+        );
+        let elements = crate::testing::powershell_command_elements(&line);
+        assert_eq!(
+            elements,
+            vec![vec![
+                paths[0].to_string(),
+                "-S".to_string(),
+                "-m".to_string(),
+                paths[1].to_string(),
+                "-x".to_string(),
+                paths[2].to_string(),
+                "-t".to_string(),
+                "mklm-dev-latest-json v1 version=0.2.1 issued_at=1".to_string(),
+            ]],
+            "{line}"
+        );
+        // A bare program stays bare; the relative path too.
+        let line = format!(
+            "{} -m {}",
+            shell_program(Path::new(r"E:\tools\minisign.exe")),
+            shell_arg(Path::new(paths[3]))
+        );
+        assert_eq!(
+            crate::testing::powershell_command_elements(&line),
+            vec![vec![
+                r"E:\tools\minisign.exe".to_string(),
+                "-m".to_string(),
+                paths[3].to_string(),
+            ]]
+        );
     }
 }
