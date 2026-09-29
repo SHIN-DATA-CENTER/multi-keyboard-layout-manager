@@ -8,7 +8,8 @@
 //! loader's boot GUID ([`legacy_boot_guid`]), which a desktop PC kept across full restarts
 //! (docs/research/boot-id.md); it is still read, together with the boot time
 //! ([`boot_time_hint`]), to judge the ids 0.1.x recorded ([`current_boot`],
-//! `mklm_core::boot`).
+//! `mklm_core::boot`). The boot time also backs the counter up: it can only add "same boot"
+//! answers.
 
 use std::path::Path;
 
@@ -113,12 +114,16 @@ unsafe fn query_fixed<T>(
 /// `\Windows\bootstat.dat`, increments and hands to the kernel on every boot attempt; also
 /// mirrored in `PrefetchParameters\BootId`.
 ///
-/// Expected properties (design H.2 R9/R10, rerun after Windows feature updates): unchanged by
-/// sleep, by a resume from hibernation and by a Fast Startup "shutdown" (the hibernated kernel,
-/// this page included, is restored and the loader does not count a boot), and by clock changes;
-/// one higher after a restart or a full shutdown (the drivers re-read their values). It only goes
-/// back when `bootstat.dat` is recreated (a repair or in-place upgrade); a collision with a
-/// counter an open entry recorded then reads as "not restarted" for one boot, the safe side.
+/// Expected properties (design H.2 MT-2..MT-7, R9/R10; checked before a release and again after
+/// Windows feature updates): unchanged by sleep, by a resume from hibernation and by a Fast
+/// Startup "shutdown" (the hibernated kernel, this page included, is restored), and by clock
+/// changes; higher after a restart or a full shutdown (the drivers re-read their values). MKLM
+/// only needs "different": the step is 1 when the loader counted nothing in between, more if a
+/// resume was counted in `bootstat.dat` without reaching this page. It only goes back when
+/// `bootstat.dat` is recreated (a repair or in-place upgrade); a collision with a counter an open
+/// entry recorded then reads as "not restarted" for one boot, the safe side. Should the counter
+/// ever move without a new boot, the boot time ([`boot_time_hint`]) still says "same boot"
+/// (`mklm_core::JournalEntry::counter_boot_is_current`).
 ///
 /// A value of 0 is refused ([`Error::UnexpectedData`]): the loader always counts the boot.
 pub fn boot_counter() -> Result<u32, Error> {
@@ -180,10 +185,23 @@ pub fn legacy_boot_guid() -> Result<BootId, Error> {
 /// Kernel boot time minus `BootTimeBias`
 /// (`NtQuerySystemInformation(SystemTimeOfDayInformation)`), FILETIME units: the boot's RTC
 /// second plus about 0.5 s, whatever the clock did since (the bias records every change).
-/// Recorded in the journal's history lines as a diagnostic; the boot ID never depends on it. The
-/// only decision that reads it is whether a legacy (0.1.x) boot ID is the current boot
-/// (`mklm_core::JournalEntry::legacy_boot_is_current`).
+/// Recorded in the journal's history lines; the boot ID never depends on it. It decides whether a
+/// legacy (0.1.x) boot ID is the current boot (`mklm_core::JournalEntry::legacy_boot_is_current`),
+/// and it can make a counter boot ID count as the current boot, never as an earlier one
+/// (`mklm_core::JournalEntry::counter_boot_is_current`).
 pub fn boot_time_hint() -> Result<u64, Error> {
+    let info = time_of_day()?;
+    boot_time_without_bias(info.boot_time, info.boot_time_bias).ok_or_else(|| {
+        Error::UnexpectedData {
+            path: "SystemTimeOfDayInformation.BootTime".to_string(),
+        }
+    })
+}
+
+/// `NtQuerySystemInformation(SystemTimeOfDayInformation)` as the kernel returns it (the manual
+/// boot-ID tests print every field: which of `BootTime`, `BootTimeBias` and `SleepTimeBias`
+/// moved, design H.2).
+fn time_of_day() -> Result<SystemTimeOfDay, Error> {
     let mut info = SystemTimeOfDay::default();
     // SAFETY: `SystemTimeOfDay` is the plain-data layout of SystemTimeOfDayInformation.
     unsafe {
@@ -193,11 +211,7 @@ pub fn boot_time_hint() -> Result<u64, Error> {
             &mut info,
         )
     }?;
-    boot_time_without_bias(info.boot_time, info.boot_time_bias).ok_or_else(|| {
-        Error::UnexpectedData {
-            path: "SystemTimeOfDayInformation.BootTime".to_string(),
-        }
-    })
+    Ok(info)
 }
 
 /// `boot_time - boot_time_bias` with the bias signed: the boot time before any clock change since
@@ -210,7 +224,7 @@ fn boot_time_without_bias(boot_time: i64, boot_time_bias: i64) -> Option<u64> {
 
 /// The current boot as a journal reader needs it: [`boot_id`] (required), and the boot time and
 /// the legacy GUID that judge the boot IDs 0.1.x recorded (each `None` when it cannot be read;
-/// `mklm_core::JournalEntry::adopt_legacy_boots` then takes the safe side).
+/// `mklm_core::JournalEntry::adopt_current_boot` then takes the safe side).
 pub fn current_boot() -> Result<CurrentBoot, Error> {
     Ok(CurrentBoot {
         id: boot_id()?,
@@ -506,17 +520,15 @@ mod tests {
     }
 
     /// The windows crate's `KUSER_SHARED_DATA` (ntddk.h) puts `BootId` where [`boot_counter`]
-    /// reads it. The type needs two more `windows` features, enabled for tests only.
-    #[test]
-    fn kuser_boot_id_offset_matches_the_sdk_layout() {
+    /// reads it, 4-aligned and inside the page. The type needs two more `windows` features,
+    /// enabled for tests only. Checked at compile time, so that `cargo clippy --all-targets
+    /// --target aarch64-pc-windows-msvc` checks the ARM64 build too (its tests never run in CI).
+    const _: () = {
         use windows::Wdk::System::SystemServices::KUSER_SHARED_DATA;
-        assert_eq!(
-            std::mem::offset_of!(KUSER_SHARED_DATA, BootId),
-            KUSER_BOOT_ID_OFFSET
-        );
-        assert_eq!(KUSER_BOOT_ID_OFFSET % align_of::<u32>(), 0);
+        assert!(std::mem::offset_of!(KUSER_SHARED_DATA, BootId) == KUSER_BOOT_ID_OFFSET);
+        assert!(KUSER_BOOT_ID_OFFSET.is_multiple_of(align_of::<u32>()));
         assert!(KUSER_BOOT_ID_OFFSET + size_of::<u32>() <= 0x1000);
-    }
+    };
 
     #[test]
     fn boot_counter_is_stable_across_calls() {
@@ -554,13 +566,15 @@ mod tests {
         assert!(current.legacy_guid.is_some());
     }
 
-    /// Design H.2 R9/R10: prints what decides "same boot" (the counter and its id) and what
-    /// judges 0.1.x's ids (the boot time without its bias, the loader GUID), so that they can be
-    /// compared across sleep, hibernation, a Fast Startup shutdown, a clock change and a restart:
+    /// Design H.2 MT-1..MT-9 (R9/R10): prints what decides "same boot" (the counter and its id)
+    /// and what backs it up and judges 0.1.x's ids (the boot time without its bias, the loader
+    /// GUID), with the raw `SystemTimeOfDayInformation` fields, so that they can be compared
+    /// across sleep, hibernation, a Fast Startup shutdown, a clock change and a restart, and a
+    /// change of the difference traced to `BootTime`, `BootTimeBias` or `SleepTimeBias`:
     /// `cargo test -p mklm-win print_boot_id -- --ignored --nocapture`. Read-only, but only
     /// meaningful as part of that manual procedure.
     #[test]
-    #[ignore = "H.2 R9/R10: run by hand around sleep, hibernation, shutdown and restart"]
+    #[ignore = "H.2 MT-1..MT-9: run by hand around sleep, hibernation, shutdown and restart"]
     fn print_boot_id() {
         let counter = boot_counter();
         let id = boot_id();
@@ -572,13 +586,28 @@ mod tests {
             id.map_or_else(|error| format!("{error:?}"), BootId::to_text)
         );
         // FILETIME (100 ns since 1601) to Unix milliseconds, for the local time.
-        let local = hint.as_ref().ok().and_then(|time| {
+        let local = |time: u64| {
             let unix_ms = time.checked_sub(116_444_736_000_000_000)? / 10_000;
             crate::time::local_time(mklm_core::Timestamp(unix_ms))
                 .ok()
                 .map(|local| local.to_iso_text())
-        });
-        println!("BootTime - BootTimeBias = {hint:?} ({local:?})");
+        };
+        match time_of_day() {
+            Ok(info) => {
+                let at = |time: i64| u64::try_from(time).ok().and_then(local);
+                println!("BootTime = {} ({:?})", info.boot_time, at(info.boot_time));
+                println!(
+                    "CurrentTime = {} ({:?})",
+                    info.current_time,
+                    at(info.current_time)
+                );
+                println!("BootTimeBias = {} (signed)", info.boot_time_bias);
+                println!("SleepTimeBias = {}", info.sleep_time_bias);
+            }
+            Err(error) => println!("SystemTimeOfDayInformation = {error:?}"),
+        }
+        let hint_local = hint.as_ref().ok().copied().and_then(local);
+        println!("BootTime - BootTimeBias = {hint:?} ({hint_local:?})");
         println!(
             "legacy boot GUID = {}",
             guid.map_or_else(|error| format!("{error:?}"), BootId::to_text)

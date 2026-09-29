@@ -217,8 +217,10 @@ fn before_the_restart_keep_is_refused_and_nothing_changes() {
     assert_eq!(w.entry(&reverted_op()).state, OpState::Reverted);
 }
 
-/// Sleep, hibernation or a Fast Startup shutdown keep the boot time (and the counter): a legacy
-/// entry of this boot still waits for the restart, whatever the GUID says.
+/// A legacy entry of this boot still waits for the restart, whatever the GUID says, as long as
+/// the boot time is this boot's. Sleep, hibernation and a Fast Startup shutdown are expected to
+/// keep the boot time and the counter (expected; design H.2 MT-2..MT-4, MT-8 and MT-9 check it
+/// before a release). The 4 s offset here stays within the tolerance.
 #[test]
 fn a_legacy_entry_of_this_boot_waits_whatever_the_guid_says() {
     for guid in [Some(LEGACY_PC_GUID), Some(BootId(0x1234)), None] {

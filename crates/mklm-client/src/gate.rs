@@ -303,14 +303,13 @@ mod tests {
         );
     }
 
-    /// The journal 0.1.0 left on the desktop PC of the boot-ID bug, adopted as
-    /// `journal::read_journal` does, with the boot time of `boot_time`.
+    /// The journal 0.1.0 left on the desktop PC of the boot-ID bug, read as
+    /// `journal::read_journal` reads it (`journal::parse_journal`) in a boot with `boot_time`.
     fn legacy_journal(boot_time: u64) -> (Journal, BootId) {
         let (ops, baselines) = fixtures::legacy_guid_journal();
         let current = fixtures::legacy_pc_boot(boot_time);
-        let mut journal = Journal::parse(&ops, &baselines);
-        journal.adopt_legacy_boots(&current);
-        (journal, current.id)
+        let read = crate::journal::parse_journal(&ops, &baselines, Some(1), Some(&current));
+        (read.journal, current.id)
     }
 
     fn ids(entries: &[&JournalEntry]) -> Vec<String> {

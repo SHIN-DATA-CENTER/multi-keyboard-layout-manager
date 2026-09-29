@@ -1145,7 +1145,9 @@ impl FakeHost {
     }
 
     /// Makes [`Host::boot_time_hint`] answer `boot_time` (`BootTime - BootTimeBias`) from now on;
-    /// a reboot does not change it.
+    /// a reboot does not change it. So a [`FakeHost::reboot`] alone, with a boot time set, is a
+    /// counter that moved without a new boot (what the counter's safety net catches); a test of a
+    /// real restart sets another boot time after it.
     pub fn set_boot_time(&mut self, boot_time: Option<u64>) {
         self.boot_time = boot_time;
     }

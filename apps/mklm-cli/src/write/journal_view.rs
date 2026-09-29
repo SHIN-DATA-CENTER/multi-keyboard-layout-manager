@@ -533,8 +533,9 @@ mod tests {
         let dead = |_: &ProcessIdentity| Liveness::Dead;
         let document_of = |boot_time| {
             let current = fixtures::legacy_pc_boot(boot_time);
-            let mut journal = Journal::parse(&ops, &baselines);
-            journal.adopt_legacy_boots(&current);
+            let journal =
+                mklm_client::journal::parse_journal(&ops, &baselines, Some(1), Some(&current))
+                    .journal;
             let text = journal_text(&journal, Some(current.id), &dead, None, &utc_timestamp_text);
             let document = journal_document(&journal, Some(1), Some(current.id), &dead);
             (serde_json::to_value(&document).unwrap(), text)

@@ -92,14 +92,14 @@ mod tests {
 
     use super::*;
 
-    /// The journal 0.1.0 left on the desktop PC of the boot-ID bug, adopted as
-    /// `journal::read_journal` does, and summarized for a boot with `boot_time`.
+    /// The journal 0.1.0 left on the desktop PC of the boot-ID bug, read as
+    /// `journal::read_journal` reads it (`journal::parse_journal`), and summarized for a boot with
+    /// `boot_time`.
     fn summary(boot_time: u64) -> StartupSummary {
         let (ops, baselines) = fixtures::legacy_guid_journal();
         let current = fixtures::legacy_pc_boot(boot_time);
-        let mut journal = Journal::parse(&ops, &baselines);
-        journal.adopt_legacy_boots(&current);
-        summarize(&journal, current.id, &|_| Liveness::Dead)
+        let read = crate::journal::parse_journal(&ops, &baselines, Some(1), Some(&current));
+        summarize(&read.journal, current.id, &|_| Liveness::Dead)
     }
 
     fn items(summary: &StartupSummary) -> Vec<(String, Attention)> {

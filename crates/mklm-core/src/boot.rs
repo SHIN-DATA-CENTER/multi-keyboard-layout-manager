@@ -1,27 +1,34 @@
 //! Which boot of Windows a journal entry was written in (design review C2, docs/design/m2-engine.md
-//! C.10): the current boot as the reader sees it, and how the boot IDs that 0.1.x recorded are
-//! judged.
+//! C.10): the current boot as the reader sees it, and how the boot IDs an entry recorded are
+//! judged against it.
 //!
 //! Since 0.1.1 a [`BootId`] is the counter form of `KUSER_SHARED_DATA.BootId`
-//! ([`BootId::from_boot_counter`]), which changes only when the OS loader runs (a restart or a
-//! full shutdown) and never with sleep, hibernation, a Fast Startup "shutdown" or a clock change.
-//! 0.1.x recorded the loader's boot GUID instead, which a desktop PC kept across full restarts
-//! (docs/research/boot-id.md), so an entry it wrote could wait for a restart forever.
+//! ([`BootId::from_boot_counter`]), which the OS loader increases on every boot: a restart or a
+//! full shutdown. Sleep, hibernation, a Fast Startup "shutdown" and clock changes are expected to
+//! keep it (design H.2 MT-2..MT-7 check this before a release). 0.1.x recorded the loader's boot
+//! GUID instead, which a desktop PC kept across full restarts (docs/research/boot-id.md), so an
+//! entry it wrote could wait for a restart forever.
 //!
-//! Such legacy ids are judged once, when the journal is read (the engine under its lock, the GUI
-//! and the CLI unelevated), and **in memory only**: [`Journal::adopt_legacy_boots`] replaces the
-//! `boot_id` and `apply_pending.since` of an entry whose legacy id is the current boot with the
-//! current counter id, and leaves every other legacy id alone, which every comparison then reads
-//! as an earlier boot (a legacy id never equals a counter id). An adopted entry reaches the store
-//! in the new form only when the engine writes it for its own reasons. `history[].boot` is never
-//! rewritten: it is the audit trail, and the rule below reads it.
+//! Recorded ids are judged once, when the journal is read (the engine under its lock, the GUI and
+//! the CLI unelevated), and **in memory only**: [`Journal::adopt_current_boot`] replaces the
+//! `boot_id` and `apply_pending.since` of an entry that stand for the current boot with the
+//! current counter id, and leaves every other id alone, which every comparison then reads as an
+//! earlier boot. An adopted entry reaches the store in the new form only when the engine writes it
+//! for its own reasons. `history[].boot` is never rewritten: it is the audit trail, and the rules
+//! below read it. [`JournalEntry::boot_is_current`] has two rules:
 //!
-//! The rule ([`JournalEntry::legacy_boot_is_current`]) compares the `boot_time_hint` of the
-//! history lines written under the legacy id with the current boot's `BootTime - BootTimeBias`:
-//! both are taken in the boot they describe, the bias absorbs every clock change, and two boots
-//! start far more than [`LEGACY_BOOT_TIME_TOLERANCE`] apart. Without a hinted line (M2-era
-//! entries), or without the boot time, 0.1.x's own rule applies: the GUID decides, and "not
-//! known" counts as the current boot (not restarted: the safe side).
+//! - A **legacy** id (0.1.x, [`JournalEntry::legacy_boot_is_current`]) never equals a counter id.
+//!   The `boot_time_hint` of the history lines written under it is compared with the current
+//!   boot's `BootTime - BootTimeBias`: both are taken in the boot they describe, the bias absorbs
+//!   every clock change, and two boots start far more than [`BOOT_TIME_TOLERANCE`] apart. Without
+//!   a hinted line (M2-era entries), or without the boot time, 0.1.x's own rule applies: the GUID
+//!   decides, and "not known" counts as the current boot (not restarted: the safe side).
+//! - A **counter** id is the current boot when it equals the current id, and also (the safety
+//!   net, [`JournalEntry::counter_boot_is_current`]) when a history line written under it carries
+//!   a hint within [`BOOT_TIME_TOLERANCE`] of the current boot time: should a resume from
+//!   hibernation or a Fast Startup boot ever move the counter, the unchanged boot time still says
+//!   "same boot". The net only adds "same boot" answers, never "restarted" ones (C2: a false
+//!   "restarted" would let the user keep a change the drivers never read).
 
 use serde::{Deserialize, Serialize};
 
@@ -46,47 +53,81 @@ pub struct CurrentBoot {
 /// that line to count as written in this boot: 10 s in FILETIME units (100 ns). The value is the
 /// boot's RTC second plus 0.5 s and stays put within a boot; two boots start at least tens of
 /// seconds apart (sign-in, the change itself, the restart, the firmware).
-pub const LEGACY_BOOT_TIME_TOLERANCE: u64 = 100_000_000;
+pub const BOOT_TIME_TOLERANCE: u64 = 100_000_000;
 
 impl JournalEntry {
+    /// True when `id` (this entry's `boot_id` or `apply_pending.since`) stands for the current
+    /// boot: [`Self::legacy_boot_is_current`] for a legacy (0.1.x) id,
+    /// [`Self::counter_boot_is_current`] for a counter id.
+    pub fn boot_is_current(&self, id: BootId, current: &CurrentBoot) -> bool {
+        if id.is_legacy() {
+            self.legacy_boot_is_current(id, current)
+        } else {
+            self.counter_boot_is_current(id, current)
+        }
+    }
+
     /// True when the legacy boot ID `legacy` (recorded by 0.1.x as this entry's `boot_id` or
     /// `apply_pending.since`) stands for the current boot:
     /// 1. `legacy == current.id` (only in tests);
     /// 2. else, when some history lines under `legacy` carry a `boot_time_hint` and the current
-    ///    boot time is known: some hint is within [`LEGACY_BOOT_TIME_TOLERANCE`] of it (a write
-    ///    phase under `legacy` happened in this boot);
+    ///    boot time is known: some hint is within [`BOOT_TIME_TOLERANCE`] of it (a write phase
+    ///    under `legacy` happened in this boot);
     /// 3. else 0.1.x's own rule: the current loader GUID equals `legacy`, or it could not be read
     ///    (nothing tells, so the safe side: not restarted).
     pub fn legacy_boot_is_current(&self, legacy: BootId, current: &CurrentBoot) -> bool {
         if legacy == current.id {
             return true;
         }
-        let mut hints = self
-            .history
-            .iter()
-            .filter(|line| line.boot == legacy)
-            .filter_map(|line| line.boot_time_hint)
-            .peekable();
         if let Some(boot_time) = current.boot_time
-            && hints.peek().is_some()
+            && let Some(matched) = self.hinted_lines_match(legacy, boot_time)
         {
-            return hints.any(|hint| hint.abs_diff(boot_time) <= LEGACY_BOOT_TIME_TOLERANCE);
+            return matched;
         }
         current.legacy_guid.is_none_or(|guid| guid == legacy)
     }
 
-    /// Replaces `boot_id` and `apply_pending.since` with `current.id` where they are legacy ids
-    /// judged to be the current boot ([`JournalEntry::legacy_boot_is_current`]). Counter ids,
-    /// legacy ids of an earlier boot and `history` stay as they are; adopting twice changes
-    /// nothing more. In memory only: the caller never writes the entry for this alone.
-    pub fn adopt_legacy_boots(&mut self, current: &CurrentBoot) {
-        if self.boot_id.is_legacy() && self.legacy_boot_is_current(self.boot_id, current) {
+    /// True when the counter-form boot ID `id` stands for the current boot: it equals
+    /// `current.id`, or (the safety net of design C.10) the current boot time is known and some
+    /// history line written under `id` carries a `boot_time_hint` within [`BOOT_TIME_TOLERANCE`]
+    /// of it. Without such a line, or without the boot time, the counter alone decides.
+    ///
+    /// The net can only turn "restarted" into "not restarted" (the safe side). It errs only when
+    /// two real boots start within the tolerance of each other in RTC time before any clock
+    /// change (an RTC that starts from the same value at every power-on); the entry then waits
+    /// for a restart that starts at another time, and can still be undone.
+    pub fn counter_boot_is_current(&self, id: BootId, current: &CurrentBoot) -> bool {
+        id == current.id
+            || current
+                .boot_time
+                .is_some_and(|boot_time| self.hinted_lines_match(id, boot_time) == Some(true))
+    }
+
+    /// Whether some history line written under `id` carries a `boot_time_hint` within
+    /// [`BOOT_TIME_TOLERANCE`] of `boot_time`; `None` when no line under `id` carries a hint.
+    fn hinted_lines_match(&self, id: BootId, boot_time: u64) -> Option<bool> {
+        let mut hints = self
+            .history
+            .iter()
+            .filter(|line| line.boot == id)
+            .filter_map(|line| line.boot_time_hint)
+            .peekable();
+        hints.peek()?;
+        Some(hints.any(|hint| hint.abs_diff(boot_time) <= BOOT_TIME_TOLERANCE))
+    }
+
+    /// Replaces `boot_id` and `apply_pending.since` with `current.id` where they are other ids
+    /// judged to be the current boot ([`JournalEntry::boot_is_current`]). Ids of an earlier boot
+    /// and `history` stay as they are; adopting twice changes nothing more. In memory only: the
+    /// caller never writes the entry for this alone.
+    pub fn adopt_current_boot(&mut self, current: &CurrentBoot) {
+        if self.boot_id != current.id && self.boot_is_current(self.boot_id, current) {
             self.boot_id = current.id;
         }
         let since = self.apply_pending.as_ref().map(|pending| pending.since);
         if let Some(since) = since
-            && since.is_legacy()
-            && self.legacy_boot_is_current(since, current)
+            && since != current.id
+            && self.boot_is_current(since, current)
             && let Some(pending) = &mut self.apply_pending
         {
             pending.since = current.id;
@@ -95,11 +136,11 @@ impl JournalEntry {
 }
 
 impl Journal {
-    /// [`JournalEntry::adopt_legacy_boots`] on every entry, each judged on its own history (the
+    /// [`JournalEntry::adopt_current_boot`] on every entry, each judged on its own history (the
     /// same GUID may stand for different boots in different entries).
-    pub fn adopt_legacy_boots(&mut self, current: &CurrentBoot) {
+    pub fn adopt_current_boot(&mut self, current: &CurrentBoot) {
         for entry in &mut self.entries {
-            entry.adopt_legacy_boots(current);
+            entry.adopt_current_boot(current);
         }
     }
 }
@@ -162,7 +203,8 @@ mod tests {
         }
     }
 
-    /// A pending-reboot entry with `boot_id` and `apply_pending.since` legacy, and `history`.
+    /// A pending-reboot entry with `boot_id`, `apply_pending.since` and `history` (legacy or
+    /// counter ids).
     fn legacy_entry(
         boot_id: BootId,
         since: BootId,
@@ -200,7 +242,7 @@ mod tests {
         assert!(!pending.legacy_boot_is_current(since, &current));
 
         let mut adopted = journal.clone();
-        adopted.adopt_legacy_boots(&current);
+        adopted.adopt_current_boot(&current);
         assert_eq!(adopted, journal, "nothing is the current boot");
 
         assert_eq!(
@@ -236,7 +278,7 @@ mod tests {
     fn legacy_live_ops_same_boot() {
         let current = legacy_pc_boot(LEGACY_PC_BOOT_TIME_OF_WRITES);
         let mut journal = live_journal();
-        journal.adopt_legacy_boots(&current);
+        journal.adopt_current_boot(&current);
         let reverted = live_entry(&journal, LEGACY_REVERTED_OP);
         let pending = live_entry(&journal, LEGACY_PENDING_OP);
         assert_eq!(reverted.boot_id, COUNTER);
@@ -281,7 +323,7 @@ mod tests {
             };
             e.legacy_boot_is_current(legacy, &current)
         };
-        assert_eq!(LEGACY_BOOT_TIME_TOLERANCE, 100_000_000);
+        assert_eq!(BOOT_TIME_TOLERANCE, 100_000_000);
         assert!(judge(T, T));
         assert!(judge(T + 100_000_000, T));
         assert!(judge(T - 100_000_000, T));
@@ -368,13 +410,13 @@ mod tests {
             legacy_guid: guid,
         };
         let mut same = e.clone();
-        same.adopt_legacy_boots(&current(Some(legacy)));
+        same.adopt_current_boot(&current(Some(legacy)));
         assert_eq!(same.boot_id, BootId::from_boot_counter(2));
         let mut earlier = e.clone();
-        earlier.adopt_legacy_boots(&current(Some(LEGACY_PC_GUID)));
+        earlier.adopt_current_boot(&current(Some(LEGACY_PC_GUID)));
         assert_eq!(earlier, e);
         let mut unknown = e.clone();
-        unknown.adopt_legacy_boots(&current(None));
+        unknown.adopt_current_boot(&current(None));
         assert_eq!(unknown.boot_id, BootId::from_boot_counter(2));
     }
 
@@ -390,12 +432,12 @@ mod tests {
         let far = T - 3_000_000_000;
         // boot_id far, since current.
         let mut a = legacy_entry(l1, l2, vec![line(l1, Some(far)), line(l2, Some(T))]);
-        a.adopt_legacy_boots(&current);
+        a.adopt_current_boot(&current);
         assert_eq!(a.boot_id, l1);
         assert_eq!(a.apply_pending.as_ref().unwrap().since, COUNTER);
         // The reverse.
         let mut b = legacy_entry(l1, l2, vec![line(l1, Some(T)), line(l2, Some(far))]);
-        b.adopt_legacy_boots(&current);
+        b.adopt_current_boot(&current);
         assert_eq!(b.boot_id, COUNTER);
         assert_eq!(b.apply_pending.as_ref().unwrap().since, l2);
 
@@ -410,7 +452,7 @@ mod tests {
             entries: vec![earlier.clone(), now.clone()],
             ..Journal::default()
         };
-        journal.adopt_legacy_boots(&current);
+        journal.adopt_current_boot(&current);
         assert_eq!(journal.entries[0], earlier);
         assert_eq!(journal.entries[1].boot_id, COUNTER);
         assert_eq!(
@@ -425,18 +467,19 @@ mod tests {
         let current = legacy_pc_boot(LEGACY_PC_BOOT_TIME_OF_WRITES);
         let journal = live_journal();
         let mut once = journal.clone();
-        once.adopt_legacy_boots(&current);
+        once.adopt_current_boot(&current);
         assert_ne!(once, journal);
         for (before, after) in journal.entries.iter().zip(&once.entries) {
             assert_eq!(after.history, before.history, "history is never rewritten");
             assert!(after.history.iter().all(|h| h.boot == LEGACY_PC_GUID));
         }
         let mut twice = once.clone();
-        twice.adopt_legacy_boots(&current);
+        twice.adopt_current_boot(&current);
         assert_eq!(twice, once, "idempotent");
-        // Also when judged from another boot: counter ids are never touched.
+        // Also when judged from a later boot: the adopted counter id has no line under it, so it
+        // stays (an earlier boot).
         let mut later = once.clone();
-        later.adopt_legacy_boots(&CurrentBoot {
+        later.adopt_current_boot(&CurrentBoot {
             id: BootId::from_boot_counter(8),
             boot_time: Some(T + 3_000_000_000),
             legacy_guid: Some(LEGACY_PC_GUID),
@@ -449,7 +492,7 @@ mod tests {
             entry.history.clear();
         }
         let copy = modern.clone();
-        modern.adopt_legacy_boots(&legacy_pc_boot(T));
+        modern.adopt_current_boot(&legacy_pc_boot(T));
         assert_eq!(modern, copy);
 
         // The stored form: schema and field order as before, and it reads back.
@@ -481,11 +524,121 @@ mod tests {
         let mut cleanup = entry(3, cleanup_kind("ACPI\\X"), OpState::AwaitingConfirm, vec![]);
         cleanup.boot_id = LEGACY_PC_GUID;
         cleanup.history = vec![line(LEGACY_PC_GUID, Some(T))];
-        cleanup.adopt_legacy_boots(&legacy_pc_boot(T));
+        cleanup.adopt_current_boot(&legacy_pc_boot(T));
         assert_eq!(cleanup.boot_id, COUNTER);
         let json = cleanup.to_json().unwrap();
         assert!(json.starts_with(&format!("{{\"schema_version\":{JOURNAL_SCHEMA_VERSION},")));
         assert_eq!(JournalEntry::from_json(&json).unwrap(), cleanup);
         assert_eq!(JOURNAL_SCHEMA_V1, 1);
+    }
+
+    /// The safety net of the counter (design C.10): a counter id other than the current one is
+    /// the current boot when a line written under it carries this boot's time (the counter
+    /// moved without a new boot); otherwise the counter decides. It only adds "same boot".
+    #[test]
+    fn a_counter_id_with_this_boot_time_is_the_current_boot() {
+        let (n, next) = (BootId::from_boot_counter(7), BootId::from_boot_counter(8));
+        let current = |boot_time| CurrentBoot {
+            id: next,
+            boot_time,
+            legacy_guid: Some(LEGACY_PC_GUID),
+        };
+        // Two minutes later: a real restart.
+        let far = T + 1_200_000_000;
+        let written = legacy_entry(n, n, vec![line(n, Some(T)), line(n, None)]);
+
+        // Resumed, or started from Fast Startup, with a counter that moved: the same boot time.
+        for boot_time in [T, T + BOOT_TIME_TOLERANCE, T - BOOT_TIME_TOLERANCE] {
+            assert!(written.counter_boot_is_current(n, &current(Some(boot_time))));
+            assert!(written.boot_is_current(n, &current(Some(boot_time))));
+        }
+        // A real restart, no boot time, or no hinted line under the id: the counter decides.
+        assert!(!written.counter_boot_is_current(n, &current(Some(far))));
+        assert!(!written.counter_boot_is_current(n, &current(Some(T + BOOT_TIME_TOLERANCE + 1))));
+        assert!(!written.counter_boot_is_current(n, &current(None)));
+        let unhinted = legacy_entry(n, n, vec![line(n, None), line(next, Some(T))]);
+        assert!(!unhinted.counter_boot_is_current(n, &current(Some(T))));
+        assert!(!legacy_entry(n, n, Vec::new()).counter_boot_is_current(n, &current(Some(T))));
+        // A counter that went back (bootstat.dat recreated) with another boot time: restarted.
+        let nine = BootId::from_boot_counter(9);
+        let back = legacy_entry(nine, nine, vec![line(nine, Some(far))]);
+        assert!(!back.boot_is_current(nine, &current(Some(T))));
+        // The current id is always this boot, whatever the time says.
+        assert!(written.counter_boot_is_current(next, &current(Some(far))));
+        assert!(written.counter_boot_is_current(next, &current(None)));
+        // The GUID plays no part for a counter id.
+        for guid in [None, Some(n), Some(next)] {
+            let judged = CurrentBoot {
+                legacy_guid: guid,
+                ..current(Some(far))
+            };
+            assert!(!written.boot_is_current(n, &judged), "{guid:?}");
+        }
+
+        // Adopted in memory like a legacy id: both fields, history untouched, idempotent.
+        let now = current(Some(T + 5));
+        let mut adopted = written.clone();
+        adopted.adopt_current_boot(&now);
+        assert_eq!(adopted.boot_id, next);
+        assert_eq!(adopted.apply_pending.as_ref().unwrap().since, next);
+        assert_eq!(adopted.history, written.history);
+        let mut twice = adopted.clone();
+        twice.adopt_current_boot(&now);
+        assert_eq!(twice, adopted);
+        let mut restarted = written.clone();
+        restarted.adopt_current_boot(&current(Some(far)));
+        assert_eq!(restarted, written);
+
+        // What every caller then decides: the entry still waits for the restart. Without the net
+        // the same entry would read as restarted.
+        assert_eq!(
+            attention(&adopted, now.id, Liveness::Dead),
+            Attention::WaitingForReboot
+        );
+        assert_eq!(
+            decide_recovery(&adopted, &intended(&adopted), &context(&now)),
+            RecoveryDecision::Leave {
+                reason: LeaveReason::WaitingForReboot
+            }
+        );
+        assert!(!apply_pending_cleared(
+            adopted.apply_pending.as_ref().unwrap(),
+            now.id,
+            &|_| true
+        ));
+        assert_eq!(
+            attention(&written, now.id, Liveness::Dead),
+            Attention::Recover
+        );
+    }
+
+    /// `boot_id` and `apply_pending.since` of either form are judged on their own.
+    #[test]
+    fn counter_and_legacy_fields_are_judged_on_their_own() {
+        let (n, next) = (BootId::from_boot_counter(3), BootId::from_boot_counter(4));
+        let current = CurrentBoot {
+            id: next,
+            boot_time: Some(T),
+            legacy_guid: None,
+        };
+        let far = T - 3_000_000_000;
+        // A legacy boot_id of an earlier boot, a counter since of this boot time.
+        let mut a = legacy_entry(
+            LEGACY_PC_GUID,
+            n,
+            vec![line(LEGACY_PC_GUID, Some(far)), line(n, Some(T))],
+        );
+        a.adopt_current_boot(&current);
+        assert_eq!(a.boot_id, LEGACY_PC_GUID);
+        assert_eq!(a.apply_pending.as_ref().unwrap().since, next);
+        // The reverse.
+        let mut b = legacy_entry(
+            n,
+            LEGACY_PC_GUID,
+            vec![line(n, Some(far)), line(LEGACY_PC_GUID, Some(T))],
+        );
+        b.adopt_current_boot(&current);
+        assert_eq!(b.boot_id, n);
+        assert_eq!(b.apply_pending.as_ref().unwrap().since, next);
     }
 }

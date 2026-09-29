@@ -19,9 +19,11 @@
 //!   the post-reboot check rows), as data.
 //! - [`values`]: stored values as the unelevated snapshot reads them.
 //! - [`describe`]: facts the front ends need to word a result (e.g. whether a reset happened).
-//! - Windows only: [`launch`] (helper start and handshake), [`journal`] (unelevated journal
-//!   read), [`inventory`] (the keyboards a request plans with), [`run_once`] (the post-reboot
-//!   RunOnce rule, design m2 F.4 / review C17).
+//! - [`journal`]: the journal as the front ends read it, its boot IDs judged against the current
+//!   boot ([`journal::parse_journal`]); the unelevated read itself is Windows only.
+//! - Windows only: [`launch`] (helper start and handshake), [`inventory`] (the keyboards a
+//!   request plans with), [`run_once`] (the post-reboot RunOnce rule, design m2 F.4 / review
+//!   C17).
 //!
 //! `mklm-client` never elevates and never writes the machine's keyboard settings: those writes
 //! happen in `mklm-helper.exe`. Its only write is the per-user RunOnce value ([`run_once`]),
@@ -33,7 +35,6 @@ pub mod describe;
 pub mod gate;
 #[cfg(windows)]
 pub mod inventory;
-#[cfg(windows)]
 pub mod journal;
 #[cfg(windows)]
 pub mod launch;

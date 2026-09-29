@@ -112,7 +112,7 @@
 |---|---|---|
 | `journal` | `JournalEntry`（`transition`、`take_over`）、`ValueRecord`、`RegValue`、`value_eq`、`ValueKey`、`OpId`、`BootId`（0.1.1 から `KUSER_SHARED_DATA.BootId` のカウンター形式。`from_boot_counter`、`boot_counter`、`is_legacy`。C.10）、`ProcessIdentity`、`Liveness`、`OpKind`、`LayoutChoice`、`RestoreScope`、`OpState`（`is_open`、`is_in_flight`、`can_transition_to`）、`RevertMode`、`ApplyPending`、`SkipReason`、`Countdown`、`FailureReason`、`TransitionRecord`、`BaselineRecord`、`Journal`（`parse`、`open_entries`、`latest_record`、`baseline`、`next_seq`、`prunable`、`resolve_prefix`、`needs_post_reboot_check`）、`JournalError`、保存場所の定数 | ジャーナルの型と状態機械（C 章） |
 | `recovery` | `decide_recovery`、`RecoveryDecision`、`RecoveryContext`、`observe`、`attention`（`Attention::blocks_writes`）、`state_after_resolution`、`apply_pending_on_close`、`apply_pending_cleared` | 回復の判定表（C.7） |
-| `boot`（0.1.1） | `CurrentBoot`、`LEGACY_BOOT_TIME_TOLERANCE`、`JournalEntry::{legacy_boot_is_current, adopt_legacy_boots}`、`Journal::adopt_legacy_boots` | 0.1.x が記録した GUID の起動 ID の判定と、メモリ上での読み替え（C.10「起動 ID」） |
+| `boot`（0.1.1） | `CurrentBoot`、`BOOT_TIME_TOLERANCE`、`JournalEntry::{boot_is_current, legacy_boot_is_current, counter_boot_is_current, adopt_current_boot}`、`Journal::adopt_current_boot` | 記録された起動 ID の判定（0.1.x が記録した GUID と、カウンターの安全網）と、メモリ上での読み替え（C.10「起動 ID」） |
 | `restore` | `plan_restore`、`check_restore_record`、`RestorePlan`、`RestoreStep`、`RestorePhase`、`RestoreWrite`、`Expect`、`RestoreTo`、`RestoreError` | 戻す書き込みの検査と、変化の向きで決める順序（C.5） |
 | `operation` | `plan_set_layout`、`plan_migration`、`OperationPlan`、`set_layout_writes`、`migration_writes`、`physical_device_members`、`apply_method`、`OperationError`、`DeviceWrites` | `set` と `migrate` の計画、書き込み内容、反映方法。下見とエンジンが同じ関数を使う |
 | `report` | `ApplyOptions`、`ExpectedPlan`、`ConflictPolicy`、`ResolutionChoice`、`ValueChoice`、`Decision`、`Event`、`ExpectedKeyboard`、`Outcome`、`ConflictInfo`、`RecoveredOp`、`OperationResult`、`ErrorCode`、`ErrorInfo` | エンジン、パイプ、UI が共有する語彙 |
@@ -133,7 +133,7 @@
 | `elevation` | `is_elevated()`、`launch_elevated(exe, params, owner_window)`、`spawn_from_elevated(exe, params)`、`ElevatedProcess::{pid, exit_code, wait}`、`helper_path()`、`file_build_id(exe)`、`BUILD_ID_VERSION_KEY` | `GetTokenInformation(TokenElevation)`、`ShellExecuteExW("runas")`（`lpDirectory` = System32。`ERROR_CANCELLED` なら `Error::Cancelled`）、昇格済みなら `CreateProcessW`（UAC なし。C8）、`GetExitCodeProcess`、`WaitForSingleObject`、`GetFileVersionInfoW`＋`VerQueryValueW`（ビルド ID。S11） |
 | `proc_identity` | `current_process_identity()`、`process_liveness(&ProcessIdentity)`、`process_image_nt_path(pid)`、`same_image_directory(pid)` | **`OpenProcess` を使わない**（S3）。`NtQuerySystemInformation(SystemProcessInformation)` で PID と `CreateTime` の組を、`SystemProcessIdInformation` で NT 形式の実行ファイルのパスを読む。別ユーザーのプロセスでも読める。自分の作成時刻は `GetProcessTimes` |
 | `protected_dir` | `program_data_dir()`、`ensure_protected_dir(DataDir)`、`ProtectedDir::{path, quarantined, replace_file}`、`FileLock::acquire`、各 SDDL 定数 | `SHGetKnownFolderPath(FOLDERID_ProgramData)`、`CreateDirectoryW`＋SA、`CreateFileW(FILE_FLAG_BACKUP_SEMANTICS \| FILE_FLAG_OPEN_REPARSE_POINT)`、`GetFileInformationByHandleEx(FileAttributeTagInfo)`、`GetSecurityInfo`、`GetSecurityDescriptorControl`、`GetAce`、`SetFileInformationByHandle(FileRenameInfo)`（先回りして作られたフォルダーの隔離。S1）、`FlushFileBuffers`（一時ファイルとフォルダー）、`MoveFileExW(REPLACE_EXISTING \| WRITE_THROUGH)`（C10）、`LockFileEx`（D.9） |
-| `session` | `boot_counter()`、`boot_id()`、`legacy_boot_guid()`、`boot_time_hint()`、`current_boot()`、`random_bytes()`、`new_uuid()`、`restart_pc()`、`register_post_reboot()`、`unregister_post_reboot()`、`RUN_ONCE_VALUE` | **0.1.1 から**起動 ID は `KUSER_SHARED_DATA.BootId`（0x7FFE0000 + 0x2C4 の u32 を volatile で読む。ローダーが起動のたびに 1 増やす。C2、C.10）。0.1.0 の `NtQuerySystemInformation(SystemBootEnvironmentInformation = 90)` の `BootIdentifier` は、0.1.x の記録を判定するためだけに `legacy_boot_guid()` で読む（起動ごとに変わらない PC があった。`docs/research/boot-id.md`）。`SystemTimeOfDayInformation` の `BootTime - BootTimeBias`（履歴の診断用。0.1.x の記録の判定にも使う）、`BCryptGenRandom(BCRYPT_USE_SYSTEM_PREFERRED_RNG)`、`AdjustTokenPrivileges(SE_SHUTDOWN_NAME)` → `InitiateShutdownW`、HKCU の `RunOnce` |
+| `session` | `boot_counter()`、`boot_id()`、`legacy_boot_guid()`、`boot_time_hint()`、`current_boot()`、`random_bytes()`、`new_uuid()`、`restart_pc()`、`register_post_reboot()`、`unregister_post_reboot()`、`RUN_ONCE_VALUE` | **0.1.1 から**起動 ID は `KUSER_SHARED_DATA.BootId`（0x7FFE0000 + 0x2C4 の u32 を volatile で読む。ローダーが起動のたびに増やす。C2、C.10）。0.1.0 の `NtQuerySystemInformation(SystemBootEnvironmentInformation = 90)` の `BootIdentifier` は、0.1.x の記録を判定するためだけに `legacy_boot_guid()` で読む（起動ごとに変わらない PC があった。`docs/research/boot-id.md`）。`SystemTimeOfDayInformation` の `BootTime - BootTimeBias`（履歴の各行に記録。0.1.x の記録の判定と、カウンターの安全網に使う）、`BCryptGenRandom(BCRYPT_USE_SYSTEM_PREFERRED_RNG)`、`AdjustTokenPrivileges(SE_SHUTDOWN_NAME)` → `InitiateShutdownW`、HKCU の `RunOnce` |
 
 `Error` に次のバリアントを足した: `NotKeyboard`、`Cancelled`、`Timeout`、`Insecure`、`PeerMismatch`、`ValueNotAllowed`。
 
@@ -275,7 +275,7 @@ pub trait Host {
 
 - `now()` は表示と整理にだけ使う。判定は壁時計に頼らない。
 - カウントダウンは `EventSink::wait_decision(1 秒)` の呼び出し回数で数え、あわせて `monotonic()` で「秒数＋`countdown_slack`（5 秒）」を上限にする。シンクが 1 秒を守らずに待ち続けても、カウントダウンは終わる（C18）。テストの偽物の単調時計は、テストが進めたときだけ進む。
-- `boot_id()` は起動ごとの ID（C2）。**0.1.1 から** `KUSER_SHARED_DATA.BootId` のカウンター形式（C.10「起動 ID」）。`boot_time_hint()` は履歴に記録する診断用の値で、判断に使うのは 0.1.x の記録の判定だけ。`legacy_boot_guid()`（0.1.1）は 0.1.x が起動 ID にしていたローダーの GUID で、その判定にだけ使う。既定の実装は持たせない（どのホストも転送しなければならない）。エンジンは `open()` の最初にこの 3 つから `CurrentBoot` を作り、ジャーナルを読んだ直後に `adopt_legacy_boots` を行う（D.1）。
+- `boot_id()` は起動ごとの ID（C2）。**0.1.1 から** `KUSER_SHARED_DATA.BootId` のカウンター形式（C.10「起動 ID」）。`boot_time_hint()` は履歴の各行に記録する値で、判断に使うのは 0.1.x の記録の判定と、カウンターの安全網（「同じ起動」の答えを足すだけ）。`legacy_boot_guid()`（0.1.1）は 0.1.x が起動 ID にしていたローダーの GUID で、その判定にだけ使う。既定の実装は持たせない（どのホストも転送しなければならない）。エンジンは `open()` の最初にこの 3 つから `CurrentBoot` を作り、ジャーナルを読んだ直後に `adopt_current_boot` を行う（D.1）。
 - `liveness()` は、ロックを持つエンジンの判断には使わない（C3。C.7）。履歴と結果の表示のため。
 - `system32_file_exists()` は計画 1.5 の「`LayerDriver JPN` の DLL が System32 に実在すること」の確認（S8）。
 - `write_recovery_assets()` は耐久的に書く（G.1。C10）。
@@ -305,7 +305,7 @@ pub trait Host {
 **FakeHost**
 
 - `FakeLockCell` を複数の `FakeHost` で共有し、ロックの競合を再現する。
-- `reboot()` で起動 ID を変え（0.1.1 から、カウンター形式の ID のカウンターを 1 増やす。最初は 1）、それまでのプロセスを全部死んだことにする。`legacy_boot_guid()` は既定では 0.1.0 のころの偽の GUID の列を返し、`set_legacy_guid()` で固定できる（再起動しても変わらない PC の再現）。`boot_time_hint()` は `set_boot_time()` で決める（既定は `None`）。`become_process()` で別のプロセス（例: 回復を行う GUI）として動く。`kill()` で特定のプロセスを死んだことにする。`advance()` で壁時計と単調時計を進める。
+- `reboot()` で起動 ID を変え（0.1.1 から、カウンター形式の ID のカウンターを 1 増やす。最初は 1）、それまでのプロセスを全部死んだことにする。`legacy_boot_guid()` は既定では 0.1.0 のころの偽の GUID の列を返し、`set_legacy_guid()` で固定できる（再起動しても変わらない PC の再現）。`boot_time_hint()` は `set_boot_time()` で決める（既定は `None`。`reboot()` では変わらないので、起動時刻を決めたテストで `reboot()` だけを呼ぶと、カウンターが動いて起動時刻が保たれた場合＝カウンターの安全網の場合になる。本当の再起動は、その後に別の起動時刻を決める）。`become_process()` で別のプロセス（例: 回復を行う GUI）として動く。`kill()` で特定のプロセスを死んだことにする。`advance()` で壁時計と単調時計を進める。
 - `set_fail_assets(true)` で復旧用ファイルの書き込みを失敗させる（起動時の値を変える操作は `RecoveryAssetsUnavailable` で何も書かずに止まり、HID だけの操作は警告付きで続く）。`remove_system32_file()` で DLL の欠落を再現する。`push_warning()` でホストの警告を積む。
 
 **ScriptedSink**
@@ -675,16 +675,23 @@ open な状態の操作がある間は、`set` と `migrate`、更新（M5）、
 
 0.1.0 は起動 ID に `SystemBootEnvironmentInformation.BootIdentifier`（ローダーの GUID）を使っていた。デスクトップ PC で、この GUID が完全な再起動を 3 回しても変わらず、`PendingReboot` の操作がいつまでも「再起動していない」と判定された（確認画面の「このままにする」が押せない、helper が確定も新しい変更も断る。`docs/research/boot-id.md`）。R9/R10 を行わないまま出荷したため。
 
-- **今の起動 ID は `KUSER_SHARED_DATA.BootId`**（`mklm_win::session::boot_counter`）。ローダー（winload）が `\Windows\bootstat.dat` の値を起動のたびに 1 増やしてカーネルに渡す。スリープ、休止からの復帰、高速スタートアップの起動ではローダーが数えないので変わらず、再起動と完全なシャットダウンで 1 増える（H.2 R9/R10、MT-2〜MT-7 で確かめる）。
+- **今の起動 ID は `KUSER_SHARED_DATA.BootId`**（`mklm_win::session::boot_counter`）。ローダー（winload）が `\Windows\bootstat.dat` の値を起動のたびに増やしてカーネルに渡す（Kernel-Boot のイベント 20 の `LastBootId` が前の起動の値を記録する）。スリープ、休止からの復帰、高速スタートアップの起動では、復元されたカーネルの値が変わらず、再起動と完全なシャットダウンで増えると**期待する**（H.2 R9/R10、MT-2〜MT-7 で確かめる。公開の条件）。製品に要るのは「前と違う」ことだけ。完全な起動の間にローダーが休止からの復帰も数えていれば、次の完全な起動で 2 以上増えるが、それでも正しい（MT では差を記録する）。
 - **記録の形**: `BootId::from_boot_counter(n)` = `nnnnnnnn-0000-8000-8000-000000000000`（最初の組がカウンター。RFC 9562 のバージョン 8、バリアント 10、ほかのビットは 0）。ローダーの GUID はバージョン 1 か 4 なので、この形にはならない。この形でない ID を legacy と呼ぶ（`BootId::is_legacy`）。JSON の型は変えないので、**版は上げない**（エントリは 1、`Cleanup` は 2、`BaselineRecord` と `StoreVersion` は 1、IPC と M5b の Run 記録も同じ）。0.1.x の `BootId::parse` もこの形を読める。
-- **カウンターだけを使う理由**: 「同じ起動か」は等しさで決める。危険なのは「違う起動」と誤ること（反映されていない変更を確定させてしまう。C2）。カウンターは起動ごとに 1 回だけ書かれる。GUID（高速スタートアップでの性質は未確認で、この PC では役に立たない）や起動時刻（休止をまたいで `BootTime - BootTimeBias` が動かないことは未確認）を足しても、「違う起動」の誤りが増えるだけ。カウンターが戻る（`bootstat.dat` の作り直し）と「同じ起動」と誤るが、それは安全な側で、次の再起動で直る。しかも、未解決のエントリが記録したちょうどその値に戻った場合だけ。
+- **カウンターと起動時刻の組み合わせ方**: 「同じ起動か」は等しさで決める。危険なのは「違う起動」と誤ること（反映されていない変更を確定させてしまう。C2）。カウンターは起動ごとに 1 回だけ書かれる。ほかの値を足すとき、組み合わせ方で誤りの向きが決まる。
+  - 「すべてが等しければ同じ起動」（組にして比べる）と、足した値が動くたびに「違う起動」の答えが増える（危険な側だけ）。GUID（この PC では役に立たない）や起動時刻を、この形では足さない。
+  - 「カウンターが等しい、**または**その ID の下の行のヒントが今の起動時刻と一致すれば同じ起動」とすると、増えるのは「同じ起動」の答えだけ（安全な側だけ）。起動時刻はこの形でだけ足す（下の「カウンターの安全網」）。
+  - カウンターが戻る（`bootstat.dat` の作り直し）と「同じ起動」と誤るが、それは安全な側で、次の再起動で直る。しかも、未解決のエントリが記録したちょうどその値に戻った場合だけ。
+- **カウンターの安全網**（`JournalEntry::counter_boot_is_current`）: カウンター形式の ID が今の ID と違っても、その ID の下で書いた履歴行のどれかの `boot_time_hint` が、今の起動の `BootTime - BootTimeBias` から `BOOT_TIME_TOLERANCE` 以内なら今の起動とする（ヒントのある行がない、または起動時刻が読めなければ、カウンターだけで決める）。休止からの復帰や高速スタートアップの起動でカウンターが動く Windows があっても（MT-3、MT-4 で確かめるが、公開資料に裏付けがない）、起動時刻が保たれていれば「再起動していない」のまま。
+  - 増えるのは「同じ起動」の答えだけ。起動時刻がハイブリッドの起動をまたいで保たれない場合は、この網は働かないだけで、カウンターだけのときより悪くはならない。
+  - 誤るのは、本当の再起動の開始が、時刻の変更の前の RTC で 10 秒以内に重なる場合だけ（電源を入れるたびに同じ値から始まる RTC）。そのときは次の再起動（開始時刻が違う）まで待ち続け、取り消しはできる。安全な側。
+  - 履歴行は、エンジンのすべての遷移（`move_to`）、引き継ぎ（`take_over`、`take_over_same_boot`。0.1.1 で `take_over` にも記録）と新しいエントリで `boot_time_hint` を記録する。`take_over_same_boot` の行は今の起動の ID の下に書くので、`boot_id`（前の起動）の判定には入らない（I4 はそのまま）。
 - **legacy の起動 ID の判定**（`JournalEntry::legacy_boot_is_current`）。対象は `boot_id` と `apply_pending.since` だけ。
   1. 今の ID と等しければ今の起動（テストでだけ起きる）。
-  2. その ID の下で書いた履歴行のうち `boot_time_hint` を持つものがあり、今の起動の `BootTime - BootTimeBias` が読めれば、どれかのヒントとの差が 10 秒（`LEGACY_BOOT_TIME_TOLERANCE` = 100,000,000。FILETIME の単位）以内のときだけ今の起動。
+  2. その ID の下で書いた履歴行のうち `boot_time_hint` を持つものがあり、今の起動の `BootTime - BootTimeBias` が読めれば、どれかのヒントとの差が 10 秒（`BOOT_TIME_TOLERANCE` = 100,000,000。FILETIME の単位）以内のときだけ今の起動。
   3. それ以外（ヒントのある行がない M2 のころのエントリや、エンジンの引き継ぎ行だけの場合、起動時刻が読めない場合）は 0.1.x と同じ: 今の GUID と等しければ今の起動、違えば前の起動、GUID が読めなければ今の起動（再起動していない。安全な側）。
 - **ヒントで判定してよい理由**: ヒントも今の値も、その起動の中で読んだ `BootTime - BootTimeBias` で、時刻の変更はバイアスが吸収する（この PC では RTC の起動時刻の秒＋0.5 秒。旧開発機では 1.2 秒の時刻合わせの後も一致した）。2 つの起動の開始は、サインイン、変更、再起動、ファームウェアの分だけ少なくとも数十秒離れる。「どれかの行」で判定するのは保守的な側: 今の起動のヒントを持つ行があれば、その ID の下の書き込みがこの起動で行われたことになる。
-- **読み替え（adopt）はメモリの上だけ**（`Journal::adopt_legacy_boots`）。今の起動と判定した legacy の ID は今のカウンターの ID に置き換え、前の起動と判定したものはそのまま残す（カウンターの ID と等しくならないので、どの比較も「前の起動」と読む）。エントリごとに判定する（この PC では、同じ GUID がエントリによって違う起動を指す）。何度行っても同じで、カウンターの ID と履歴は触らない。
-  - 行う場所は 2 つ。エンジンの `open()`（ジャーナルを読んだ直後、関門、セッション、掃除より前。`Engine::read_journal` はそのまま）と、非昇格の `mklm_client::journal::read_journal`（GUI の `reader`、RunOnce の規則、`LiveJournal`、CLI の `start`、`keep`、`reboot`、`post-reboot`、`journal`）。
+- **読み替え（adopt）はメモリの上だけ**（`Journal::adopt_current_boot`。判定は `JournalEntry::boot_is_current`: legacy の ID は上の規則、カウンターの ID は安全網）。今の起動と判定した ID は今のカウンターの ID に置き換え、前の起動と判定したものはそのまま残す（legacy の ID はカウンターの ID と等しくならないので、どの比較も「前の起動」と読む）。エントリごとに判定する（この PC では、同じ GUID がエントリによって違う起動を指す）。何度行っても同じで、履歴は触らない。
+  - 行う場所は 2 つ。エンジンの `open()`（ジャーナルを読んだ直後、関門、セッション、掃除より前）と、非昇格の `mklm_client::journal::read_journal`（中身は純粋な関数 `parse_journal` で、単体テストがある。GUI の `reader`、RunOnce の規則、`LiveJournal`、CLI の `start`、`keep`、`reboot`、`post-reboot`、`journal`）。`Engine::read_journal` は保存された ID のまま返すので、`mklm-cli journal` の表示とは違い、起動 ID の比較に使ってはならない。
   - 判定のためだけにジャーナルを書くことはない。読み替えたエントリは、エンジンが別の理由（遷移、`apply_pending` の掃除）で書くときに新しい形で保存される。`history[].boot` は監査の記録で、判定にも使うので書き換えない。
   - `mklm-cli journal --json` は、今の起動と判定したエントリについて読み替えた `boot_id` を表示する（履歴行は保存された GUID のまま）。
 - **この PC での結果**（今 = カウンター 7、`BootTime - BootTimeBias` = 134351230275000000）: `c10d2d38`（`RevertedPendingReboot`）はヒントとの差が 22 時間と 167 秒で前の起動 → 次のセッションの掃除で `Reverted`（`reboot-observed`）。`d724c149`（`PendingReboot`、`apply_pending` は再起動）は差 167 秒で前の起動 → `attention` は `Recover`、確認画面は「このままにする」を押せ、`RebootObserved` → `AwaitingConfirm` → `Confirmed`。`restart_reasons` は空。11:37 の再起動より前に修正版を入れていれば、どちらも今の起動と判定され、読み替えたうえで再起動を待ち続ける（どちらも正しい）。
@@ -695,6 +702,9 @@ open な状態の操作がある間は、`set` と `migrate`、更新（M5）、
   - ダウングレードの後に再びアップグレードした場合、0.1.x が書いた GUID の ID は同じ規則で判定する。
   - GUI の `settings.toml` の `recovery.prompted[].boot` は形が変わるので、更新の直後に自動の回復の問い合わせがもう一度出ることがある（見た目だけ）。
 - **公開する順序**: 0.1.0 には更新の機能がないので、0.1.1 は NSIS のインストーラーで 0.1.0 の上に入れる（再起動は要らない）。次に GUI を起動したときの読み替えで、止まっていた 2 つの操作が解ける。M5b（更新）の最初の公開版はこの修正を含むこと（含まないと、止まった `PendingReboot` の PC は `check_journal` に断られて更新できない）。
+  - **公開の条件**（0.1.0 は R9/R10 を行わずに出荷した。同じ抜けを繰り返さない）: 0.1.1 のタグを付けて公開するのは、報告のあったデスクトップ PC（高速スタートアップが既定で有効）で H.2 の **MT-1〜MT-9 がすべて通ってから**。MT-1 は、ローカルでビルドしたインストーラーを 0.1.0 の上に入れればすぐにできる。
+  - **止める規則**: MT-2〜MT-4、MT-9 で、次のどれかが起きたら公開せず、設計を見直す。(a) イベント 27 が 0x1 か 0x2 なのに（または新しいイベント 27 がないのに）KUSER のカウンターが変わった。(b) スリープ、休止、高速スタートアップをまたいで `BootTime - BootTimeBias` が 10 秒を超えて動いた。(c) MT-6、MT-7 で、イベント 27 が 0x0 なのにカウンターが増えなかった。
+  - **ARM64**: arm64 のインストーラーを公開する前に、ARM64 の Windows 11（実機か GitHub の `windows-11-arm` ランナー）で `cargo test -p mklm-win session:: -- --include-ignored --nocapture` を一度実行し、カウンターが 0 でなく `PrefetchParameters\BootId` と等しいことを確かめる。CI は ARM64 のテストを実行しない（clippy だけ。オフセットはコンパイル時の検査で ARM64 でも確かめる）。確かめられなければ arm64 版を出さない。
 
 ### C.11 `apply_pending`（保存値がまだ効いていないこと）
 
@@ -722,7 +732,7 @@ C15 の指摘: 計画 2.2 は、サービスが再適用し直すループを防
 ### D.1 共通の前処理（書き込むすべての操作）
 
 1. `Host::acquire_lock(10 秒)`。取れなければ `Busy`。取れたら `Event::Locked`。
-2. `read_journal` → `Journal::parse`。`unreadable` があれば `JournalUnreadable`。**0.1.1 から**、その前に `CurrentBoot`（`boot_id()`、`boot_time_hint()`、`legacy_boot_guid()`）を作り、読んだ直後に `adopt_legacy_boots` で 0.1.x の起動 ID を判定する（メモリの上だけ。C.10「起動 ID」）。セッションの起動 ID は `CurrentBoot::id`。
+2. `read_journal` → `Journal::parse`。`unreadable` があれば `JournalUnreadable`。**0.1.1 から**、その前に `CurrentBoot`（`boot_id()`、`boot_time_hint()`、`legacy_boot_guid()`）を作り、読んだ直後に `adopt_current_boot` で記録された起動 ID を判定する（0.1.x の GUID と、カウンターの安全網。メモリの上だけ。C.10「起動 ID」）。セッションの起動 ID は `CurrentBoot::id`。
 3. 他のエントリの確認:
    - 書き込み中のエントリか `countdown` 付きの `AwaitingConfirm` がある（ロックを持っているので、どれも放棄されたもの。C.7）: `recover` と `undo` はまずそれを回復する。それ以外の要求は `RecoveryNeeded`。
    - `set`、`migrate`: open なエントリがあれば `OpInProgress`。
@@ -888,7 +898,7 @@ C15 の指摘: 計画 2.2 は、サービスが再適用し直すループを防
 
 **回復を行う場面**
 
-1. GUI と CLI の起動時。非昇格のまま `read_journal_store` → `Journal::parse` →（0.1.1 から）`adopt_legacy_boots(current_boot())`（`mklm_client::journal::read_journal`。C.10「起動 ID」）→ エントリごとに `attention(entry, boot_id(), process_liveness(owner))` を求める（C.7 の表）。
+1. GUI と CLI の起動時。非昇格のまま `read_journal_store` → `Journal::parse` →（0.1.1 から）`adopt_current_boot(current_boot())`（`mklm_client::journal::read_journal`。中身は `parse_journal`。C.10「起動 ID」）→ エントリごとに `attention(entry, boot_id(), process_liveness(owner))` を求める（C.7 の表）。
    - `Recover`: ユーザーに伝えて、helper を `Request::Recover` で起動する。**自動で UAC を出すのは、同じエントリについて 1 回の起動につき 1 回まで**（呼び出し元が HKCU に覚える）。それ以降は「回復」ボタンを出すだけにする。ジャーナル自体に書けないなど、回復が同じ理由で失敗し続ける場合に、起動のたびに UAC が出続けないようにするため（C3）。
    - `Busy`: 「別の MKLM が処理中です」と表示する。
    - `AwaitingUser`、`WaitingForReboot`、`Conflict`、`NeedsApply`: それぞれの画面を出す。
@@ -1444,7 +1454,7 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 | `operation` | `plan_set_layout`（固定モードで `MigrationRequired`、PS/2 に `standard`、同じコンテナのコレクションへの展開、phantom のコレクション、`other_input_available = false` で `only_usable`、`allow_live_reset = false` で `Reconnect`）。`plan_migration`（phantom の PS/2 も固定する、PS/2 への割り当てが固定値に優先する、全体は違う値だけ書く、固定 US からは US で固定する、`apply = RestartPc`）。`apply_method` の組み合わせ表 |
 | `recovery_assets` | 開発機の baseline から作った出力をゴールデンファイルと比べる。**固定の順序**（PS/2 の設定 → 全体の設定 → HID → 全体の削除 → PS/2 の削除）。`Select\Default` を使い、`Current` と違えば止まる行があること。`is_cmd_safe` の表（`"&calc&"`、`%PATH%`、`^`、`!x!`、非 ASCII など、注入を狙った文字列を含む）。`.reg` が UTF-16LE の BOM 付きであること。削除の書式 |
 | `report` | すべての型の serde の往復 |
-| `boot`（0.1.1） | カウンター形式（`from_boot_counter(7)` の文字列、1、7、0xffff_ffff の往復、0.1.x の形の検査に通ること）。`is_legacy`（ローダーの GUID、`BootId(0)`、`BootId(1)`、カウンター形式の予約・バージョン・バリアントのビットを 1 つ反転したもの）。**デスクトップ PC の 2 つのエントリをそのまま**（`testdata/journal/legacy-guid`）: 再起動の後の起動時刻では前の起動（読み替えなし、`attention` は `Recover` / `None`、`RebootObserved`、`apply_pending_cleared`）、書いた起動の起動時刻では今の起動（読み替え、`WaitingForReboot` / `NeedsApply`、`Leave`）。許容幅の境界（±100,000,000 と ±100,000,001、0 と `u64::MAX` の付近）。ヒントがない場合と起動時刻がない場合の GUID の規則（等しい / 違う / 読めない）。`boot_id` と `since` を別々に、エントリごとに判定すること。履歴を書き換えない、カウンターの ID に触れない、2 回行っても同じ、`to_json` の版とフィールドの順 |
+| `boot`（0.1.1） | カウンター形式（`from_boot_counter(7)` の文字列、1、7、0xffff_ffff の往復、0.1.x の形の検査に通ること）。`is_legacy`（ローダーの GUID、`BootId(0)`、`BootId(1)`、カウンター形式の予約・バージョン・バリアントのビットを 1 つ反転したもの）。**デスクトップ PC の 2 つのエントリをそのまま**（`testdata/journal/legacy-guid`）: 再起動の後の起動時刻では前の起動（読み替えなし、`attention` は `Recover` / `None`、`RebootObserved`、`apply_pending_cleared`）、書いた起動の起動時刻では今の起動（読み替え、`WaitingForReboot` / `NeedsApply`、`Leave`）。許容幅の境界（±100,000,000 と ±100,000,001、0 と `u64::MAX` の付近）。ヒントがない場合と起動時刻がない場合の GUID の規則（等しい / 違う / 読めない）。`boot_id` と `since` を別々に、エントリごとに判定すること。履歴を書き換えない、後の起動では読み替えたカウンターの ID に触れない、2 回行っても同じ、`to_json` の版とフィールドの順。**カウンターの安全網**: 違うカウンターでも、その ID の下の行のヒントが許容幅の中なら今の起動（読み替え、`WaitingForReboot`、`Leave`、`apply_pending_cleared` が偽）、幅の外、ヒントなし、起動時刻なし、戻ったカウンターではカウンターだけで決まること、GUID が関わらないこと、legacy とカウンターの `boot_id` / `since` を別々に判定すること |
 
 **mklm-ipc**
 
@@ -1514,8 +1524,9 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 - テスト用の DACL（ユーザーの SID を含む）で作ったパイプを、同じプロセス内で往復させ、PID を確認する。PID の違う相手を切って待ち直すこと。
 - `is_elevated()` が通常の `cargo test` では false になる。
 - `boot_id()` が 2 回呼んでも同じ。`new_uuid()` の形。`program_data_dir()`。
-- 0.1.1: `boot_counter()` が 0 でなく、呼ぶたびに同じ。`boot_id()` がそのカウンター形式で legacy ではない。`legacy_boot_guid()` が 0 でなく同じ。`current_boot()` が 3 つの関数と一致する。`KUSER_SHARED_DATA` の `BootId` のオフセットが `windows` クレートの定義（テストだけで有効にする 2 つの feature）と一致する。`print_boot_id`（`#[ignore]`）は、カウンター、ID、`BootTime - BootTimeBias`（現地時刻つき）、GUID を表示する（R9/R10 用: `cargo test -p mklm-win print_boot_id -- --ignored --nocapture`）。
-- 0.1.1（engine）: `WinHost` の `boot_id()` がカウンター形式、`legacy_boot_guid()` と `boot_time_hint()` が `Some`。`FakeHost` はカウンター形式で、既存のテストはそのまま通る。`tests/legacy_boot.rs` がデスクトップ PC のジャーナルで、再起動後の確定と掃除、書いた起動の中での拒否（何も書かない）、今の起動と判定したエントリを取り消したときの保存形式、`read_journal` がそのままの GUID を返すことを確かめる。
+- 0.1.1: `boot_counter()` が 0 でなく、呼ぶたびに同じ。`boot_id()` がそのカウンター形式で legacy ではない。`legacy_boot_guid()` が 0 でなく同じ。`current_boot()` が 3 つの関数と一致する。`KUSER_SHARED_DATA` の `BootId` のオフセットが `windows` クレートの定義（テストだけで有効にする 2 つの feature）と一致し、4 バイト境界でページの中にある（テストのモジュールの `const` の検査なので、ARM64 の `clippy --all-targets` でも評価される）。`print_boot_id`（`#[ignore]`）は、カウンター、ID、`SystemTimeOfDayInformation` の生の値（`BootTime`、`CurrentTime`、`BootTimeBias`、`SleepTimeBias`）、`BootTime - BootTimeBias`（現地時刻つき）、GUID を表示する（MT 用: `cargo test -p mklm-win print_boot_id -- --ignored --nocapture`）。
+- 0.1.1（engine）: `WinHost` の `boot_id()` がカウンター形式、`legacy_boot_guid()` と `boot_time_hint()` が `Some`。`FakeHost` はカウンター形式で、既存のテストはそのまま通る（`reboot()` は起動時刻を変えないので、起動時刻を決めたテストでは、`reboot()` だけならカウンターが動いて起動時刻が保たれた場合になる）。`tests/legacy_boot.rs` がデスクトップ PC のジャーナルで、再起動後の確定と掃除、書いた起動の中での拒否（何も書かない）、今の起動と判定したエントリを取り消したときの保存形式、`read_journal` がそのままの GUID を返すことを確かめる。`tests/engine.rs`: カウンターだけが動いて起動時刻が同じなら確定を拒み、回復は何も書かず、起動時刻の違う本当の再起動の後に確定できること。回復の引き継ぎ行（`recover:take-over`）が起動時刻を記録すること。
+- 0.1.1（client）: `mklm_client::journal::parse_journal`（`read_journal` の中身）が、デスクトップ PC のジャーナルを再起動の後では読み替えず、書いた起動の中では読み替えること、カウンターの ID でも起動時刻が同じなら読み替えて再起動を待つこと（安全網）、今の起動がなければ何も読み替えないこと、新しい `StoreVersion` を `unreadable` にすること。GUI と CLI のテストもこの関数で読む。
 - `process_liveness(current)` が `Alive`、終了した子プロセスが `Dead`。`process_image_nt_path(自分の PID)` がテストの exe で終わる。`same_image_directory(自分の PID)` が true。
 - `ReadIssueKind::blocks_writes` の表。
 - 保護フォルダーの作成と隔離は昇格が必要なので、実機テスト（H.2）で扱う。
@@ -1535,24 +1546,31 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 | R6 | 外部の変更による衝突 | JIS を Keep → ユーザーの同意を得て、昇格したコンソールで `reg add … KeyboardTypeOverride /d 4`（外部の変更）→ `mklm-cli revert <op>` → `Conflict` と値の一覧 → `mklm-cli resolve <op> --all keep-current` → `Failed(ConflictKeptCurrent)` | なし |
 | R7 | 復旧用ファイルと ACL | R2 の後に Recovery のファイルと `*.prev` があり、内容が baseline と一致する。`icacls` で、フォルダーは SY と BA がフル、BU が読み取り。ロックファイルは SY と BA だけ。`restore-offline.cmd` は目で確かめるだけにする（同意があれば `online` で実行してよい。Keychron の baseline は 4/0 なので影響はない） | なし |
 | R8 | 移行の往復（**ユーザーが同意した場合だけ**） | 開発機は M0 #4 ですでにキーボードごとモードなので、先に**ユーザー自身が** `tools\m0\Invoke-M0Migration.ps1 -Undo` を実行して再起動し、固定 JIS に戻す。→ `mklm-cli migrate --standard jis --also <keychron の ID>=us` → `PendingReboot` → `mklm-cli reboot --yes` → サインイン後に RunOnce の `post-reboot` → 内蔵 7/2、Keychron 4/0、Shift+2 のテスト → Keep → `mklm-cli restore --baseline --all --no-reset` → `PendingReboot` → 再起動 → `post-reboot` → 固定 JIS に戻る。途中で一度、`PendingReboot` の状態から `mklm-cli undo` で戻せることも確かめる | 3〜4 回 |
-| R9 | シャットダウンと再起動の違い、起動 ID と高速スタートアップ | **0.1.1 で書き直した**（0.1.0 は未実施のまま出荷し、GUID が完全な再起動でも変わらない PC があった。C.10「起動 ID」）。下の MT-4（高速スタートアップのシャットダウンでは変わらない）、MT-6（再起動では 1 増える）、MT-7（完全なシャットダウンでも 1 増える）。Windows の機能更新の後にもやり直す | シャットダウン 2 回、再起動 1 回 |
+| R9 | シャットダウンと再起動の違い、起動 ID と高速スタートアップ | **0.1.1 で書き直した**（0.1.0 は未実施のまま出荷し、GUID が完全な再起動でも変わらない PC があった。C.10「起動 ID」）。下の MT-4（高速スタートアップのシャットダウンでは変わらない）、MT-6（再起動では増える）、MT-7（完全なシャットダウンでも増える）。0.1.1 の公開の条件で、Windows の機能更新の後にもやり直す | シャットダウン 2 回、再起動 1 回 |
 | R10 | 起動 ID の安定性 | **0.1.1 で書き直した**。下の MT-2（スリープ）、MT-3（休止）、MT-5（時刻の変更と `w32tm /resync /force`）で、カウンターも `BootTime - BootTimeBias` も変わらないこと。0.1.x の記録の判定は MT-8、MT-9 | 休止 1 回 |
 
-**起動 ID の手動テスト（0.1.1。R9/R10 を置き換える。1 項目ずつ行う）**
+**起動 ID の手動テスト（0.1.1。R9/R10 を置き換える。1 項目ずつ行う。0.1.1 の公開の条件: MT-1〜MT-9 がすべて通るまでタグを付けない。止める規則は C.10「公開する順序」）**
 
-毎回、各手順の前後に読み取りだけで記録する: KUSER のカウンター（`[Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]0x7FFE02C4)`）、最新の起動の種類（`Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-Kernel-Boot';Id=27} -MaxEvents 1`。0x0 は完全な起動、0x1 は高速スタートアップ、0x2 は休止からの復帰）、`cargo test -p mklm-win print_boot_id -- --ignored --nocapture`（カウンター、ID、`BootTime - BootTimeBias`、GUID）、`mklm-cli journal`、GUI の再起動後の確認画面（「このままにする」が押せるか）。
+毎回、各手順の前後に読み取りだけで記録する:
+- KUSER のカウンター（`[Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]0x7FFE02C4)`）と `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters` の `BootId`。
+- 最新の Kernel-Boot のイベント 27（`Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-Kernel-Boot';Id=27} -MaxEvents 1`。最初の値が起動の種類で、0x0 は完全な起動、0x1 は高速スタートアップ、0x2 は休止からの復帰）と、イベント 20（`Id=20`。`LastBootId` = ローダーが数えた前の起動）。ローダーが数えたが復元されたカーネルの値は変わらないのか、ローダーも数えないのかを区別するため。
+- 最新の Kernel-General のイベント 25（`ProviderName='Microsoft-Windows-Kernel-General';Id=25`。`SystemTime`、`LoaderTime`、`IsSoftBoot`）。
+- `cargo test -p mklm-win print_boot_id -- --ignored --nocapture`（カウンター、ID、`BootTime`、`CurrentTime`、`BootTimeBias`、`SleepTimeBias`、`BootTime - BootTimeBias`、GUID）。
+- `mklm-cli journal`、GUI の再起動後の確認画面（「このままにする」が押せるか）。
+
+スリープ、休止、シャットダウンは**この PC の前（コンソール）で**行う。RDP の中からでは狙った電源状態にならないことがある（RDP の電源メニューには切断とサインアウトしかない）。狙った状態になったかをイベントで確かめ、ならなければ「結論なし」としてやり直す。
 
 | # | 内容 | 手順と期待する結果 |
 |---|---|---|
 | MT-1 | 報告された場合 | 0.1.0 の上に修正版を NSIS のインストーラーで入れ、再起動しない。GUI が `d724c149` の確認画面を開き、「このままにする」が押せ、「まだ反映されていません」の行がない。`c10d2d38` の「再起動が必要」が消える。Shift+2 のテストをしてから Keep か元に戻す。`mklm-cli journal` で `d724c149` が `Confirmed`（履歴に `recover:reboot-observed` と `keep`）か `Reverted`、`c10d2d38` が `Reverted`（`reboot-observed`）。新しい変更を受け付ける。RDP で接続している場合は、TERMINPUT_BUS のセッション用キーボードで Keep が `Conflict` にならないかも見る |
-| MT-2 | スリープ（R10） | 修正版で、再起動で反映する変更を 1 つ行う（例: 内蔵キーボードの配列）→ `PendingReboot`。`journal` の `boot_id` が `0000000N-0000-8000-8000-000000000000`。スリープ（S3）→ 復帰。カウンターも `BootTime - BootTimeBias` も変わらず、確認画面は「まだ反映されていません」、「このままにする」は押せない |
-| MT-3 | 休止（R10） | 同じ操作が残った状態で `shutdown /h` → 電源を入れる。イベント 27 は 0x2。カウンターと `BootTime - BootTimeBias` は変わらず、まだ再起動していない扱い |
-| MT-4 | 高速スタートアップ（R9） | 同じ状態で、スタート → 電源 → シャットダウン → 電源を入れる。イベント 27 は 0x1。カウンターと `BootTime - BootTimeBias` は変わらず、まだ再起動していない扱い。サインインのときに RunOnce がもう一度尋ねる |
-| MT-5 | 時刻（R10） | 同じ状態で、時計を数分進めて戻し、`w32tm /resync /force`（管理者。同意を得る）。カウンターも `BootTime - BootTimeBias` も変わらない（バイアスが吸収する）。まだ再起動していない扱い |
-| MT-6 | 再起動（R9） | スタート → 電源 → 再起動。イベント 27 は 0x0、カウンターは 1 増える。サインインすると確認画面が開き（RDP でも）、「このままにする」が押せる。Keep で `Confirmed` |
-| MT-7 | 完全なシャットダウン | 再起動で反映する変更をもう 1 つ行い、`shutdown /s /full /t 0`（または Shift を押しながらシャットダウン）→ 電源を入れる。0x0、カウンターは 1 増え、再起動した扱い（ドライバーが読み直した）。その後、元に戻す |
-| MT-8 | 0.1.x の記録、再起動していない | 何も open でない状態で、修正版の上に 0.1.0 を入れる（ダウングレード）。0.1.0 で再起動で反映する変更を行う（`PendingReboot`、GUID の形）。再起動せずに修正版を入れ直す。ヒントが今の起動時刻と等しいので「まだ反映されていません」、Keep は押せない。スリープと復帰の後もまだ。再起動すると Keep が押せる。元に戻す |
-| MT-9 | 0.1.x の記録と高速スタートアップ | MT-8 と同じだが、再起動の前に高速スタートアップのシャットダウンをする。0x1 の起動の後も、0.1.x の操作はまだ再起動していない扱い（`BootTime - BootTimeBias` がハイブリッドの起動をまたいで保たれることの確認）。本当の再起動の後は再起動した扱い |
+| MT-2 | スリープ（R10） | 修正版で、再起動で反映する変更を 1 つ行う（例: 内蔵キーボードの配列）→ `PendingReboot`。`journal` の `boot_id` が `0000000N-0000-8000-8000-000000000000`。コンソールで スタート → 電源 → スリープ（S3。RDP と `rundll32 powrprof.dll,SetSuspendState` は使わない。休止が有効な PC では後者は休止になる）→ 復帰。Kernel-Power のイベント 42 と Power-Troubleshooter のイベント 1 があり、新しいイベント 27 がないことを確かめる（なければ結論なし）。カウンターは変わらない。`SleepTimeBias` や `BootTime` が動いても `BootTime - BootTimeBias` は 10 秒以内で変わらない。確認画面は「まだ反映されていません」、「このままにする」は押せない |
+| MT-3 | 休止（R10） | 同じ操作が残った状態で、コンソールで `shutdown /h` → 電源を入れる。新しいイベント 27 が 0x2 であること（違えば結論なし）。カウンターは変わらない。`BootTime`、`SleepTimeBias` が動いても `BootTime - BootTimeBias` は 10 秒以内で変わらない。まだ再起動していない扱い |
+| MT-4 | 高速スタートアップ（R9） | 同じ状態で、コンソールで スタート → 電源 → シャットダウン（または `shutdown /s /hybrid /t 0`）→ 電源を入れる。新しいイベント 27 が 0x1 であること（0x0 なら、保留中の更新などで完全なシャットダウンになったので、結論なしとしてやり直す）。カウンターと `BootTime - BootTimeBias` は変わらず、まだ再起動していない扱い。サインインのときに RunOnce がもう一度尋ねる |
+| MT-5 | 時刻（R10） | 同じ状態で、時計を数分進めて戻し、`w32tm /resync /force`（管理者。同意を得る。W32Time が止まっていれば先に `net start w32time`）。`BootTimeBias` が時計を動かした分だけ変わり、カウンターと `BootTime - BootTimeBias` は変わらない（バイアスが吸収する）。バイアスが動かなければ時計が動いていないので、結論なし。まだ再起動していない扱い |
+| MT-6 | 再起動（R9） | スタート → 電源 → 再起動。イベント 27 は 0x0、カウンターは前の値より大きい（差を記録する。休止などをローダーが数えていれば 2 以上）。サインインすると確認画面が開き（RDP でも）、「このままにする」が押せる。Keep で `Confirmed` |
+| MT-7 | 完全なシャットダウン | 再起動で反映する変更をもう 1 つ行い、コンソールで `shutdown /s /t 0`（`/hybrid` なしの `/s` は完全なシャットダウン。または Shift を押しながらシャットダウン）→ 電源を入れる。イベント 27 が 0x0 であること、カウンターは前の値より大きく（差を記録する）、再起動した扱い（ドライバーが読み直した）。その後、元に戻す |
+| MT-8 | 0.1.x の記録、再起動していない | 何も open でない状態で、修正版の上に 0.1.0 を入れる（ダウングレード）。0.1.0 で再起動で反映する変更を行う（`PendingReboot`、GUID の形）。再起動せずに修正版を入れ直す。ヒントが今の起動時刻と等しいので「まだ反映されていません」、Keep は押せない。スリープと復帰（MT-2 と同じ確かめ）の後もまだ（`SleepTimeBias` や `BootTime` が動いても `BootTime - BootTimeBias` は 10 秒以内）。再起動すると Keep が押せる。元に戻す |
+| MT-9 | 0.1.x の記録と高速スタートアップ | MT-8 と同じだが、再起動の前に高速スタートアップのシャットダウン（MT-4 と同じ手順と確かめ。0x1 でなければ結論なし）をする。0x1 の起動の後も、0.1.x の操作はまだ再起動していない扱い（`BootTime - BootTimeBias` がハイブリッドの起動をまたいで 10 秒以内に保たれることの確認。カウンターの安全網も同じ性質に頼る）。本当の再起動の後は再起動した扱い |
 | R11 | パイプの防御 | セッション中に、通常の PowerShell から `NamedPipeClientStream` でパイプに接続しようとすると拒否される（`WRITE_DAC` だけの指定を含む。S10）。helper を不正な引数で手動起動すると、接続せずに終了コード 2 で終わる | なし |
 | R12 | UAC を断る | `set` で UAC を「いいえ」→ 終了コード 3。何も書かれず、ジャーナルも変わらない | なし |
 | R13 | BLE の再接続の経路 | 本物の BLE キーボードがないので保留 | — |
@@ -1570,10 +1588,12 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 ## I. 未解決の問題とリスク
 
 1. **起動 ID の性質の確認**（C2）: 起動 ID を `BootTime`（時刻の補正でずれる）から、起動ごとの GUID（`SystemBootEnvironmentInformation.BootIdentifier`）に改めた。**0.1.0 は R9、R10 を行わないまま出荷し、デスクトップ PC でこの GUID が完全な再起動でも変わらず、`PendingReboot` が終わらなくなった**（`docs/research/boot-id.md`）。0.1.1 で `KUSER_SHARED_DATA.BootId`（ローダーが起動のたびに増やすカウンター）に切り替え、0.1.x の記録は履歴の起動時刻で判定する（C.10「起動 ID」）。残るリスク:
-   - カウンターの性質は ntddk.h の注釈と解析（phnt/NtDoc: winload が `bootstat.dat` の `LastBootId` を増やす）でしか裏付けがない。休止や高速スタートアップからの復帰で増える Windows があれば、危険な側（再起動していないのに再起動したと判断する）に誤る。MT-3、MT-4 で確かめ、Windows の機能更新の後にも R9/R10 をやり直す。
+   - カウンターの性質は ntddk.h の注釈と解析（phnt/NtDoc: winload が `bootstat.dat` の `LastBootId` を増やす）でしか裏付けがない。休止からの復帰（winresume）と休止イメージの復元について書いた公開資料はなく、この PC の起動もまだすべて 0x0（イベント 27）。休止や高速スタートアップからの復帰で値が変わる Windows があれば、危険な側（再起動していないのに再起動したと判断する）に誤りうる。対策は 3 つ: (1) MT-2〜MT-4 と MT-9 を 0.1.1 の公開の条件にし、変わったら公開しない（C.10「公開する順序」）。(2) カウンターの安全網: 起動時刻が保たれていれば「同じ起動」のまま（C.10）。(3) Windows の機能更新の後にも R9/R10 をやり直す。
+   - カウンターの安全網が誤るのは、本当の再起動の開始が、時刻の変更の前の RTC で 10 秒以内に重なる場合だけ（電源を入れるたびに同じ値から始まる RTC）。安全な側で、開始時刻の違う次の再起動で直り、取り消しはできる。
+   - ARM64: `KUSER_SHARED_DATA.BootId` を ARM64 で読んだ記録はまだない（CI は ARM64 のテストを実行しない。オフセットは同じ定義で、コンパイル時に確かめる）。値が 0 なら `boot_counter()` がエラーを返し、エンジンの `open()`、GUI、CLI が止まる（回復と取り消しも。安全な側だが使えない）。arm64 版の公開の前に ARM64 の実機か `windows-11-arm` ランナーで確かめる（C.10「公開する順序」）。
    - `bootstat.dat` が書かれない環境（UWF/HORM などの書き込みフィルター、読み取り専用や故障したディスク）では、続く起動が同じカウンターになり、再起動しても「再起動していない」と読む。安全な側（増える再起動まで止まる。取り消しはできる）。
    - カウンターが戻る（`bootstat.dat` の作り直し）と、未解決のエントリが記録した値と重なった場合だけ、その起動の間「再起動していない」と読む。安全な側で、次の再起動で直る。
-   - 0.1.x の記録の判定は、起動の間 `BootTime - BootTimeBias` が 10 秒以内に保たれることを前提にする。休止からの復帰でバイアスなしに `BootTime` が動くと、修正版を入れた起動の中で作られた 0.1.x の操作を再起動したと読むおそれがある（危険な側。その 1 回の起動だけで、確認画面の Raw Input と Shift+2 のテストは残る）。MT-8、MT-9 で確かめる。
+   - 0.1.x の記録の判定は、起動の間 `BootTime - BootTimeBias` が 10 秒以内に保たれることを前提にする。休止からの復帰でバイアスなしに `BootTime` が動くと、修正版を入れた起動の中で作られた 0.1.x の操作を再起動したと読むおそれがある（危険な側。その 1 回の起動だけで、確認画面の Raw Input と Shift+2 のテストは残る）。MT-2、MT-3、MT-8、MT-9 で、`BootTime`、`BootTimeBias`、`SleepTimeBias` の生の値とあわせて確かめる（`print_boot_id`）。
    - ヒントのない 0.1.x のエントリ（M2 の開発中のものだけ）は GUID で判定するので、GUID が変わらない PC では再起動していない扱いのままになる（取り消しはできる）。v0.1.0 は必ずヒントを記録しているので、公開版を使っている PC には関係しない。
    - 同じ起動の中で 0.1.x にダウングレードすると、0.1.x は新しい形のエントリを前の起動のものと読む（危険な側。その起動の間だけ）。更新はダウングレードしないが、NSIS のインストーラーはできる。「再起動待ちの変更がある間はダウングレードしない」と案内する（インストーラーでの防止は任意）。
    - 固定アドレス 0x7FFE0000 の読み取り: ユーザーモードの ABI（kernel32 と ntdll が時刻をここから読む）。ランダム化されたのはカーネル側の書き込み用の別名だけ（MSRC 2022）。「最小」プロセスにはこの割り当てがないが、MKLM のプロセスは最小ではない。ARM64 上の x64 エミュレーションでも同じ。
@@ -1716,3 +1736,16 @@ M2 設計の 1 回目のレビュー（2 つの観点）への対応。すべて
 | # | 不具合 | 対応 | 変更 / 理由 |
 |---|---|---|---|
 | B1 | デスクトップ PC（build 26200、UEFI、高速スタートアップ有効）で、`SystemBootEnvironmentInformation.BootIdentifier` が完全な再起動を 3 回しても変わらなかった。固定モードから移行して再起動しても `PendingReboot` のままで、確認画面の「このままにする」が押せず、helper は確定（`InvalidState`）も新しい変更（`OpInProgress`）も断った。取り消した移行の「再起動が必要」も消えなかった（2026-09-29 報告。`docs/research/boot-id.md`） | 0.1.1 で修正 | 起動 ID を `KUSER_SHARED_DATA.BootId` のカウンター形式にした（C2 の代案）。版は上げない。0.1.x が記録した GUID の起動 ID は、ジャーナルを読むとき（エンジンの `open()` と `mklm_client::journal::read_journal`）に、その GUID の下の履歴行の起動時刻（`boot_time_hint`）と今の `BootTime - BootTimeBias` を比べてメモリの上で判定する。利用者向けの文言、IPC、スキーマは変えない。R9/R10 を MT-1〜MT-9 に書き直した（A.2、A.3、B.3、B.4、C.3、C.7、C.10、D.1、D.7、H.1、H.2、I.1、J.12） |
+
+### 0.1.1 の修正（起動 ID）のレビュー
+
+| 指摘 | 採否 | 変更 / 理由 |
+|---|---|---|
+| RESTART-1: 危険な側を避けられるかは、休止と高速スタートアップでカウンターが変わらないという未確認の性質だけにかかり、公開の順序はその確かめを条件にしていない。C.10 の「起動時刻を足しても『違う起動』の誤りが増えるだけ」は、組にして比べる場合にしか成り立たない | 採用 | MT-1〜MT-9 を公開の条件にし、止める規則を書いた（C.10「公開する順序」、H.2）。理由の説明を「組み合わせ方で誤りの向きが決まる」に直した。カウンターの安全網（`counter_boot_is_current`: その ID の下の行のヒントが今の起動時刻と一致すれば同じ起動）を足した。増えるのは「同じ起動」の答えだけ。エンジンの `take_over` も起動時刻を記録する。core と engine の回帰テストを足した |
+| RESTART-2: GUI と CLI の側の読み替え（`read_journal` の 1 行）にテストがなく、`Engine::read_journal` と CLI のラッパーの説明が「`mklm-cli journal` が表示するもの」「保存されたまま」と誤っている | 採用 | 純粋な関数 `mklm_client::journal::parse_journal` に分けて単体テストを足し、`read_journal` はそれに `current_boot()` を渡すだけにした。GUI と CLI のテストもこの関数で読む。2 つの説明を直した |
+| WINDOWS-TESTS-1: MT-2〜MT-7 を公開の前提にしておらず、0.1.0 と同じ抜けが残る。`legacy_boot.rs` のテストの説明が未確認のことを事実として書いている | 採用 | RESTART-1 と同じ（公開の条件と止める規則）。テストの説明を「期待（MT で確かめる）」に直した |
+| WINDOWS-TESTS-2: MT-7 の `shutdown /s /full` は存在しないスイッチ。MT-2〜MT-4 の操作と、狙った電源状態になったかの確かめ方がない | 採用 | この PC の `shutdown /?` で確かめた（`/full` はない。`/s` だけが完全なシャットダウン、`/hybrid` は高速スタートアップ）。MT-7 を `shutdown /s /t 0` に、MT-4 を コンソールの「シャットダウン」か `/s /hybrid` に直し、各 MT でイベント 27（とスリープのイベント）を必須にした。コンソールで行うこと、MT-5 の `net start w32time` も書いた |
+| WINDOWS-TESTS-3: 「1 増える」は製品に要らない期待で、正しく動いていても MT-6 が失敗しうる。ローダーの記録（イベント 20）が手順にない | 採用 | 期待を「前の値より大きい（差を記録）」に直した（C.10、`boot_counter` の説明、MT-6、MT-7）。記録の手順に `PrefetchParameters\BootId`、イベント 20 の `LastBootId`、Kernel-General 25 を足した。イベント 20 の並びを `docs/research/boot-id.md` に記録した |
+| WINDOWS-TESTS-4: `print_boot_id` が差しか表示せず、MT-5 がバイアスの動きを見ないまま通り、差が動いたときに原因を区別できない | 採用 | 生の `SystemTimeOfDayInformation`（`BootTime`、`CurrentTime`、`BootTimeBias`、`SleepTimeBias`）を読む crate 内の関数 `time_of_day` を足して表示する。MT-5 は「バイアスが時計を動かした分だけ変わり、差は変わらない」、MT-2、MT-3、MT-8、MT-9 は「生の値が動いても差は 10 秒以内」にした |
+| WINDOWS-TESTS-5: RESTART-2 と同じ（非昇格の読み替えにテストがない） | 採用 | RESTART-2 と同じ |
+| WINDOWS-TESTS-6: ARM64 では新しい unsafe の読み取りが一度も実行されず、値が 0 だとすべてが止まる | 採用（CI の job は足さない） | オフセットの確認をテストのモジュールの `const` にし、ARM64 の `clippy --all-targets` でも評価されるようにした（わざとずらして失敗することを確かめた）。arm64 版の公開の前に ARM64 の Windows 11 で `session::` のテストを一度実行することを公開の条件にした（C.10、I.1）。CI の `windows-11-arm` の job は、リポジトリの公開範囲によって使えるかが決まり、push せずに動作を確かめられないので、このコミットでは足さない |

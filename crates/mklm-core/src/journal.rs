@@ -127,18 +127,19 @@ impl From<OpId> for String {
 /// "different boot" would let the user keep a change that is not in effect yet.
 ///
 /// Since 0.1.1 it is the **counter form** of `KUSER_SHARED_DATA.BootId`
-/// ([`BootId::from_boot_counter`]): the boot sequence number that the OS loader increments on
+/// ([`BootId::from_boot_counter`]): the boot sequence number that the OS loader increases on
 /// every boot attempt (`\Windows\bootstat.dat`). Sleep, resume from hibernation and a Fast
-/// Startup "shutdown" do not run the loader and keep it, which is what MKLM needs: the drivers
-/// did not re-read their values either. No clock adjustment moves it (the kernel boot *time*
-/// shifts with time corrections and is only recorded in [`TransitionRecord::boot_time_hint`]).
+/// Startup "shutdown" are expected to keep it (design H.2 MT-2..MT-4), which is what MKLM needs:
+/// the drivers did not re-read their values either. No clock adjustment moves it (the kernel boot
+/// *time* shifts with time corrections; [`TransitionRecord::boot_time_hint`] records it without
+/// them, and backs the counter up: [`crate::JournalEntry::counter_boot_is_current`]).
 ///
 /// 0.1.0 recorded the loader's boot identifier GUID
 /// (`NtQuerySystemInformation(SystemBootEnvironmentInformation).BootIdentifier`) instead, which is
 /// not per boot on every machine (a desktop PC kept the same GUID across full restarts, so its
 /// `PendingReboot` never ended). Such ids are **legacy** ([`BootId::is_legacy`]): they never equal
 /// a counter id, so every comparison reads them as an earlier boot, unless
-/// [`crate::JournalEntry::adopt_legacy_boots`] judged them to be the current boot (see
+/// [`crate::JournalEntry::adopt_current_boot`] judged them to be the current boot (see
 /// [`crate::boot`]).
 ///
 /// JSON form: the lower-case hyphenated UUID text without braces, for both forms (0.1.0's parser
@@ -755,8 +756,9 @@ pub struct TransitionRecord {
     /// Transitions made by recovery start with [`crate::RECOVERY_REASON_PREFIX`].
     pub reason: String,
     /// Kernel boot time minus its bias (`SYSTEM_TIMEOFDAY_INFORMATION`, FILETIME units) of the
-    /// boot this line was written in. A diagnostic, with one exception: it tells whether a legacy
-    /// (0.1.x) `boot` is the current boot ([`JournalEntry::legacy_boot_is_current`]). The boot
+    /// boot this line was written in. It tells whether a legacy (0.1.x) `boot` is the current boot
+    /// ([`JournalEntry::legacy_boot_is_current`]), and it can make a counter `boot` count as the
+    /// current boot, never as an earlier one ([`JournalEntry::counter_boot_is_current`]). The boot
     /// ID itself never depends on it (design review C2).
     #[serde(default)]
     pub boot_time_hint: Option<u64>,
@@ -782,9 +784,9 @@ pub struct JournalEntry {
     pub seq: u64,
     pub kind: OpKind,
     pub state: OpState,
-    /// Boot of the most recent write phase (set at `Planned` and again at `RevertPending`). A
-    /// legacy (0.1.x) id judged to be the current boot is replaced in memory when the journal is
-    /// read ([`JournalEntry::adopt_legacy_boots`]).
+    /// Boot of the most recent write phase (set at `Planned` and again at `RevertPending`). An
+    /// id judged to be the current boot (a legacy 0.1.x one, or a counter one by the safety net)
+    /// is replaced in memory when the journal is read ([`JournalEntry::adopt_current_boot`]).
     pub boot_id: BootId,
     /// Process that performs the current write phase (set together with `boot_id`).
     pub owner: ProcessIdentity,

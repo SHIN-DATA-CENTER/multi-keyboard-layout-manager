@@ -326,8 +326,9 @@ mod tests {
         let (ops, baselines) = fixtures::legacy_guid_journal();
         let read = |boot_time| {
             let current = fixtures::legacy_pc_boot(boot_time);
-            let mut journal = Journal::parse(&ops, &baselines);
-            journal.adopt_legacy_boots(&current);
+            let journal =
+                mklm_client::journal::parse_journal(&ops, &baselines, Some(1), Some(&current))
+                    .journal;
             (journal, current.id)
         };
         let not_restarted = |entry: &JournalEntry, boot| {

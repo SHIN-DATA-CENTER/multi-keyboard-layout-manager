@@ -328,8 +328,9 @@ mod tests {
         let (ops, baselines) = fixtures::legacy_guid_journal();
         let check = |boot_time| {
             let current = fixtures::legacy_pc_boot(boot_time);
-            let mut journal = mklm_core::Journal::parse(&ops, &baselines);
-            journal.adopt_legacy_boots(&current);
+            let journal =
+                mklm_client::journal::parse_journal(&ops, &baselines, Some(1), Some(&current))
+                    .journal;
             let entries = mklm_client::gate::post_reboot_entries(&journal);
             assert_eq!(entries.len(), 1);
             let entry = entries[0];

@@ -599,8 +599,9 @@ mod tests {
         let snapshot = fixtures::dev_machine();
         let read = |boot_time| {
             let current = fixtures::legacy_pc_boot(boot_time);
-            let mut journal = Journal::parse(&ops, &baselines);
-            journal.adopt_legacy_boots(&current);
+            let journal =
+                mklm_client::journal::parse_journal(&ops, &baselines, Some(1), Some(&current))
+                    .journal;
             let summary = mklm_client::startup::summarize(&journal, current.id, &|_| {
                 mklm_core::Liveness::Dead
             });
