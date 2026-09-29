@@ -1,5 +1,6 @@
-//! The journal as stored, read unelevated (design m2 C.1: Users may read it), and the live
-//! [`JournalSource`] of the orchestrator.
+//! The journal as stored, read unelevated (design m2 C.1: Users may read it), with the boot IDs of
+//! 0.1.x judged against this boot ([`read_journal`]), and the live [`JournalSource`] of the
+//! orchestrator.
 
 use mklm_core::{
     Attention, BootId, Journal, JournalError, Liveness, ProcessIdentity, STORE_VERSION,
@@ -17,6 +18,13 @@ pub struct JournalRead {
 }
 
 /// Reads the journal unelevated, counting a newer store layout as unreadable (as the engine does).
+///
+/// The boot IDs that 0.1.x recorded (the loader GUID) are judged here, in memory, as the engine
+/// judges them when it opens a session (`mklm_core::Journal::adopt_legacy_boots`): those of this
+/// boot become this boot's [`boot_id`], every other one reads as an earlier boot. So every
+/// caller's `entry.boot_id == boot` means "written in this boot" for either form, and
+/// `mklm-cli journal --json` shows the adopted id (the history lines keep the stored one). When
+/// the boot cannot be read nothing is adopted; the callers then fail on [`boot_id`] anyway.
 pub fn read_journal() -> Result<JournalRead, mklm_win::Error> {
     let raw = journal_store::read_journal_store()?;
     let mut journal = Journal::parse(&raw.ops, &raw.baselines);
@@ -28,6 +36,9 @@ pub fn read_journal() -> Result<JournalRead, mklm_win::Error> {
                 supported: STORE_VERSION,
             },
         });
+    }
+    if let Ok(current) = session::current_boot() {
+        journal.adopt_legacy_boots(&current);
     }
     Ok(JournalRead {
         journal,
@@ -41,7 +52,7 @@ pub fn liveness(process: &ProcessIdentity) -> Liveness {
     proc_identity::process_liveness(process)
 }
 
-/// The boot ID of this boot.
+/// The boot ID of this boot (the counter form of `KUSER_SHARED_DATA.BootId`).
 pub fn boot_id() -> Result<BootId, mklm_win::Error> {
     session::boot_id()
 }

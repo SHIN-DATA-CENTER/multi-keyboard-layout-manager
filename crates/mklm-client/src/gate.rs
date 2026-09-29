@@ -198,7 +198,7 @@ pub fn restart_reasons(journal: &Journal, boot: BootId) -> Vec<&JournalEntry> {
 mod tests {
     use mklm_core::{
         JournalError, LayoutChoice, RegValue, Timestamp, ValueKey, ValueRecord, WriteTarget,
-        value_names,
+        fixtures, value_names,
     };
 
     use super::*;
@@ -301,5 +301,61 @@ mod tests {
                 .class(),
             OutcomeClass::Failed
         );
+    }
+
+    /// The journal 0.1.0 left on the desktop PC of the boot-ID bug, adopted as
+    /// `journal::read_journal` does, with the boot time of `boot_time`.
+    fn legacy_journal(boot_time: u64) -> (Journal, BootId) {
+        let (ops, baselines) = fixtures::legacy_guid_journal();
+        let current = fixtures::legacy_pc_boot(boot_time);
+        let mut journal = Journal::parse(&ops, &baselines);
+        journal.adopt_legacy_boots(&current);
+        (journal, current.id)
+    }
+
+    fn ids(entries: &[&JournalEntry]) -> Vec<String> {
+        entries.iter().map(|e| e.op_id.to_string()).collect()
+    }
+
+    /// After the restart (the reported case): the migration waiting for it needs the
+    /// post-reboot check, the reverted one needs nothing, and no restart is asked for.
+    #[test]
+    fn the_legacy_journal_after_the_restart() {
+        let (journal, boot) = legacy_journal(fixtures::LEGACY_PC_BOOT_TIME_AFTER_RESTART);
+        let dead = |_: &ProcessIdentity| Liveness::Dead;
+        for gate in [Gate::NewOp, Gate::Restore, Gate::Existing] {
+            let reason = blocker(&journal, boot, &dead, gate);
+            assert!(
+                matches!(&reason, Some(BlockReason::PostRebootCheck(op))
+                    if op.op_id.as_str() == fixtures::LEGACY_PENDING_OP),
+                "{gate:?}: {reason:?}"
+            );
+        }
+        assert_eq!(blocker(&journal, boot, &dead, Gate::Recover), None);
+        assert!(restart_reasons(&journal, boot).is_empty());
+        assert_eq!(
+            ids(&post_reboot_entries(&journal)),
+            [fixtures::LEGACY_PENDING_OP]
+        );
+        // The RunOnce rule is by state: still registered until the check is done.
+        assert_eq!(run_once(&journal, boot, false), RunOnce::Register);
+    }
+
+    /// The same journal in the boot of its writes (the fix installed before the restart): both
+    /// entries wait for the restart.
+    #[test]
+    fn the_legacy_journal_before_the_restart() {
+        let (journal, boot) = legacy_journal(fixtures::LEGACY_PC_BOOT_TIME_OF_WRITES);
+        let dead = |_: &ProcessIdentity| Liveness::Dead;
+        assert!(matches!(
+            blocker(&journal, boot, &dead, Gate::NewOp),
+            Some(BlockReason::WaitingForReboot(op)) if op.op_id.as_str() == fixtures::LEGACY_PENDING_OP
+        ));
+        assert_eq!(blocker(&journal, boot, &dead, Gate::Existing), None);
+        assert_eq!(
+            ids(&restart_reasons(&journal, boot)),
+            [fixtures::LEGACY_REVERTED_OP, fixtures::LEGACY_PENDING_OP]
+        );
+        assert_eq!(run_once(&journal, boot, false), RunOnce::Register);
     }
 }
