@@ -133,7 +133,7 @@
 | `c10d2d38` | `reverted-pending-reboot` → `reverted`（`reboot-observed`、14:09:16.166）。`apply_pending` はなし、`attention` は `none`。「再起動が必要」は消えた |
 | 履歴の新しい 3 行 | どれも同じ helper（pid 7388、14:09:16.130 に起動）が書いた。`boot` はカウンターの ID `00000007-0000-8000-8000-000000000000`、`boot_time_hint` は 134351230275000000。エントリの `boot_id` は保存された GUID `9845bda6-…` のまま（前の起動と判定したので読み替えない）で、C.10 のとおり |
 | 全体 | `mklm-cli status`: `Pending nothing`、`Mode per-keyboard`、`Standard layout US`（`LayerDriver JPN` = `kbd101.dll`、`PCAT_101KEY`）。open の操作がないので、新しい変更を受け付ける。USB Keyboard（04D9:1818）は保存値も報告値も 4/0（US） |
-| RDP の項 | コンソールで行ったので対象外。TERMINPUT_BUS のセッション用キーボードで Keep が `Conflict` にならないかは、RDP の確かめ（`rdp-keyboard.md` の E7）とあわせて見る |
+| RDP の項 | コンソールで行ったので対象外。RDP のセッションでの確認画面と Keep（TERMINPUT_BUS のセッション用キーボードで `Conflict` にならないか）は、設計 H.2 の MT-6b で見る（再起動で反映する変更を 1 つ作り、再起動して、RDP の新しいセッションでサインインする）。`rdp-keyboard.md` の E7 は打鍵の表を調べる実験で、Keep の手順はない。RDP で打ったキーはこの PC のキーボードの確かめにならない（Raw Input に名前がない）ので、打鍵の確認はコンソールで行う |
 | 判定 | **合格**。0.1.0 が止めた 2 つの操作が、再起動なしで解けた（修正版は 11:37 の再起動の後に入れたので、どちらの操作も前の起動のものと判定された） |
 
 ### 0x51 のキーボード（標準配列に従う）
@@ -147,8 +147,10 @@
 
 `docs/design/m2-engine.md` の H.2 の MT-1〜MT-9（R9/R10 を含む）。**0.1.1 の公開の条件**で、すべて通るまでタグを付けない（0.1.0 は R9/R10 を行わずに出荷し、この不具合になった）。
 
-- MT-1 は 2026-09-29 に合格した（上の「MT-1 の結果」）。残りは MT-2〜MT-9。
+- MT-1 は 2026-09-29 に合格した（上の「MT-1 の結果」）。残りは MT-2〜MT-9（MT-6b を含む）。
 - この PC（高速スタートアップが既定で有効）で行う。
 - スリープ、休止、シャットダウンはコンソールで行い、イベント 27（スリープは Kernel-Power 42 と Power-Troubleshooter 1）で狙った状態になったかを確かめる。ならなければ結論なしとしてやり直す。
+- 打鍵の確認もコンソールで行う。RDP で行うのは MT-6b だけ。2026-09-29 14:13 から、利用者はセッション 1 に RDP で再接続している（`qwinsta` で `rdp-tcp#0`、LocalSessionManager のイベント 25、接続元は 0x7/0x2 を報告）ので、MT-2 の前にコンソールに戻る。
+- 記録は `mklm-cli journal --json` で読む（文字の形は履歴と起動 ID を表示しない）。
 - 止める規則: スリープ、0x2 か 0x1 の起動をまたいで KUSER のカウンターが変わった、または `BootTime - BootTimeBias` が 10 秒を超えて動いた、0x0 の起動でカウンターが増えなかった、のどれかが起きたら公開せず、設計を見直す。
-- arm64 版は、ARM64 の Windows 11 で `cargo test -p mklm-win session:: -- --include-ignored --nocapture` を一度実行し、カウンターが 0 でなく `PrefetchParameters\BootId` と等しいことを確かめてから出す。
+- ARM64 の Windows 11 で `cargo test -p mklm-win session:: -- --include-ignored --nocapture` を一度実行し、カウンターが 0 でなく `PrefetchParameters\BootId` と等しいことを確かめて、ここに記録する。M5b の更新情報は arm64 のアセットを必ず持つので、arm64 版だけを外して出すことはできない。確かめられなければ v0.2.0 のリリース全体を延期する（設計 C.10「公開する順序」、m5b B.5 の手順 0）。

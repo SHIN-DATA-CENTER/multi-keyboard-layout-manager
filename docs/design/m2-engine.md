@@ -704,7 +704,9 @@ open な状態の操作がある間は、`set` と `migrate`、更新（M5）、
 - **公開する順序**: 0.1.0 には更新の機能がないので、0.1.1 は NSIS のインストーラーで 0.1.0 の上に入れる（再起動は要らない）。次に GUI を起動したときの読み替えで、止まっていた 2 つの操作が解ける。M5b（更新）の最初の公開版はこの修正を含むこと（含まないと、止まった `PendingReboot` の PC は `check_journal` に断られて更新できない）。
   - **公開の条件**（0.1.0 は R9/R10 を行わずに出荷した。同じ抜けを繰り返さない）: 0.1.1 のタグを付けて公開するのは、報告のあったデスクトップ PC（高速スタートアップが既定で有効）で H.2 の **MT-1〜MT-9 がすべて通ってから**。MT-1 は 2026-09-29 に合格した（ローカルでビルドしたインストーラーを 0.1.0 の上に入れ、再起動せずに Keep。`docs/research/boot-id.md`「MT-1 の結果」）。残りは MT-2〜MT-9。
   - **止める規則**: MT-2〜MT-4、MT-9 で、次のどれかが起きたら公開せず、設計を見直す。(a) イベント 27 が 0x1 か 0x2 なのに（または新しいイベント 27 がないのに）KUSER のカウンターが変わった。(b) スリープ、休止、高速スタートアップをまたいで `BootTime - BootTimeBias` が 10 秒を超えて動いた。(c) MT-6、MT-7 で、イベント 27 が 0x0 なのにカウンターが増えなかった。
-  - **ARM64**: arm64 のインストーラーを公開する前に、ARM64 の Windows 11（実機か GitHub の `windows-11-arm` ランナー）で `cargo test -p mklm-win session:: -- --include-ignored --nocapture` を一度実行し、カウンターが 0 でなく `PrefetchParameters\BootId` と等しいことを確かめる。CI は ARM64 のテストを実行しない（clippy だけ。オフセットはコンパイル時の検査で ARM64 でも確かめる）。確かめられなければ arm64 版を出さない。
+  - **ARM64**: arm64 のインストーラーを公開する前に、ARM64 の Windows 11（実機か GitHub の `windows-11-arm` ランナー）で `cargo test -p mklm-win session:: -- --include-ignored --nocapture` を一度実行し、カウンターが 0 でなく `PrefetchParameters\BootId` と等しいことを確かめ、結果を `docs/research/boot-id.md` に記録する。CI は ARM64 のテストを実行しない（clippy だけ。オフセットはコンパイル時の検査で ARM64 でも確かめる）。
+    - **M5b との関係（2026-09-29 に決定。統合のレビューの INTERACTIONS-2 の案 (a)）**: 「確かめられなければ arm64 版だけを出さない」は、M5b の仕組みではできない。更新情報は x64 と arm64 のアセットをちょうど 1 つずつ持たなければならず（m5b A.2、`verify::select_asset`。配った版に組み込まれ、後から緩められない）、`xtask prepare-release` と `publish` も 2 つのインストーラーと `SHA256SUMS` がそろわないと進まない。そのため、この確認は **v0.2.0（起動 ID の修正を含む最初の公開版）のタグの条件**とし、確かめられなければ x64 を含むリリース全体を延期する（m5b B.5 と `docs/maintainer/release-signing.ja.md` 3 章の手順 0）。更新情報に arm64 のない形を許す案 (b) は採らなかった: 検証の規則をもう一度変える必要があり、arm64 の PC には手での更新の案内が要るため。
+    - **起動 ID を読めない PC**（カウンターが 0 で `boot_counter()` がエラー。I.1）では、GUI と CLI が止まるだけでなく、helper の更新（H1、H2 の `Build::current`）も `UpdateRefusal::Internal`（`upd-prepare-failed`）で断る。その PC には、直した版を自動更新で届けられない。リリース ページからインストーラーを手でダウンロードして入れてもらう（`docs/recovery.md` 8 章「reading the boot ID failed と表示される」）。
 
 ### C.11 `apply_pending`（保存値がまだ効いていないこと）
 
@@ -893,6 +895,7 @@ C15 の指摘: 計画 2.2 は、サービスが再適用し直すループを防
 - `PendingReboot` で、同じ起動: `InvalidState`（「先に PC を再起動してください。シャットダウンではなく再起動」）。
 - カウントダウン中の Keep は、`Confirm` の要求ではなく、同じセッションの `Decision::Keep` で受け取る。
 - **CLI の `keep <op>`** は、再起動で反映する操作（移行、PS/2 への割り当て、起動時の値を含む「導入前に戻す」）に対しては、`post-reboot` と同じ確認画面（Raw Input の表と Shift+2 のテスト、y/N の質問）を経てから `Confirm` を送る（C2）。移行の確定は、起動 ID の変化と利用者の打鍵確認の両方がそろったときだけになる。
+- **リモート デスクトップのセッション**（`OsInfo::remote_session`）では、打ったキーは接続元から届き、Raw Input に名前がない（`docs/research/rdp-keyboard.md` 6.3）。この PC のどのキーボードの確かめにもならないので、打鍵確認はできない。GUI のキーのテスト（再起動後の確認を含む）はそのキーをどのキーボードの結果にもせず、「この PC の前で、この PC につないだキーボードで押してください」と出す（m3 B.6、B.9）。CLI の確認画面も同じ注意を出す（`preview::check_text`）。「このままにする」と `y` は受け付ける（利用者が決める。U2）が、打鍵確認はコンソールで行うよう案内する（H.2 の MT-6b）。
 
 ### D.7 回復（`Recover`）と再起動後の確認
 
@@ -928,7 +931,7 @@ C15 の指摘: 計画 2.2 は、サービスが再適用し直すループを防
 
 1. 非昇格でジャーナルを読み、再起動で反映する `PendingReboot` と `AwaitingConfirm` のエントリを探す。
 2. 起動 ID が変わっていなければ、「まだ反映されていません。『シャットダウン』ではなく『再起動』してください」と表示する（高速スタートアップのシャットダウンでは起動 ID が変わらない。0.1.1 の起動 ID `KUSER_SHARED_DATA.BootId` について R9 と MT-4 で確かめる。0.1.0 の GUID は、完全な再起動でも変わらない PC があった。C.10「起動 ID」）。RunOnce を登録し直して終わる。
-3. 起動 ID が変わっていれば、記録の対象キーボードについて、期待する種類と Raw Input の報告値を並べて示す（例: 内蔵 0x7/0x2 ✓、Keychron 0x4/0x0 ✓）。移行については Raw Input で判別できないことを添え、Shift+2 のテストを案内する。
+3. 起動 ID が変わっていれば、記録の対象キーボードについて、期待する種類と Raw Input の報告値を並べて示す（例: 内蔵 0x7/0x2 ✓、Keychron 0x4/0x0 ✓）。移行については Raw Input で判別できないことを添え、Shift+2 のテストを案内する。リモート デスクトップのセッションでは、ここで打ったキーはこの PC のキーボードの確かめにならないので、PC の前でのテストを案内する（D.6）。
 4. 「このままにしますか? [y/N]」と尋ねる。**自動では戻さない**（計画 3.6）。
    - `y`: helper に `Confirm`（回復の遷移を含む）。
    - `n`: helper に `Revert`。
@@ -1549,25 +1552,26 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 | R9 | シャットダウンと再起動の違い、起動 ID と高速スタートアップ | **0.1.1 で書き直した**（0.1.0 は未実施のまま出荷し、GUID が完全な再起動でも変わらない PC があった。C.10「起動 ID」）。下の MT-4（高速スタートアップのシャットダウンでは変わらない）、MT-6（再起動では増える）、MT-7（完全なシャットダウンでも増える）。0.1.1 の公開の条件で、Windows の機能更新の後にもやり直す | シャットダウン 2 回、再起動 1 回 |
 | R10 | 起動 ID の安定性 | **0.1.1 で書き直した**。下の MT-2（スリープ）、MT-3（休止）、MT-5（時刻の変更と `w32tm /resync /force`）で、カウンターも `BootTime - BootTimeBias` も変わらないこと。0.1.x の記録の判定は MT-8、MT-9 | 休止 1 回 |
 
-**起動 ID の手動テスト（0.1.1。R9/R10 を置き換える。1 項目ずつ行う。0.1.1 の公開の条件: MT-1〜MT-9 がすべて通るまでタグを付けない。止める規則は C.10「公開する順序」。MT-1 は 2026-09-29 に合格、MT-2〜MT-9 は未実施）**
+**起動 ID の手動テスト（0.1.1。R9/R10 を置き換える。1 項目ずつ行う。0.1.1 の公開の条件: MT-1〜MT-9 がすべて通るまでタグを付けない。止める規則は C.10「公開する順序」。MT-1 は 2026-09-29 に合格、MT-2〜MT-9（MT-6b を含む）は未実施）**
 
 毎回、各手順の前後に読み取りだけで記録する:
 - KUSER のカウンター（`[Runtime.InteropServices.Marshal]::ReadInt32([IntPtr]0x7FFE02C4)`）と `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters` の `BootId`。
 - 最新の Kernel-Boot のイベント 27（`Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-Kernel-Boot';Id=27} -MaxEvents 1`。最初の値が起動の種類で、0x0 は完全な起動、0x1 は高速スタートアップ、0x2 は休止からの復帰）と、イベント 20（`Id=20`。`LastBootId` = ローダーが数えた前の起動）。ローダーが数えたが復元されたカーネルの値は変わらないのか、ローダーも数えないのかを区別するため。
 - 最新の Kernel-General のイベント 25（`ProviderName='Microsoft-Windows-Kernel-General';Id=25`。`SystemTime`、`LoaderTime`、`IsSoftBoot`）。
 - `cargo test -p mklm-win print_boot_id -- --ignored --nocapture`（カウンター、ID、`BootTime`、`CurrentTime`、`BootTimeBias`、`SleepTimeBias`、`BootTime - BootTimeBias`、GUID）。
-- `mklm-cli journal`、GUI の再起動後の確認画面（「このままにする」が押せるか）。
+- `mklm-cli journal --json`（全体の `boot_id`、各エントリの `state`、`attention`、`boot_id`、`apply_pending`、`history[].reason` と `history[].boot`。文字の形の `mklm-cli journal` は履歴と起動 ID を表示せず、状態も `(kept)`、`(reverted)` などの言葉になる）、GUI の再起動後の確認画面（「このままにする」が押せるか）。
 
-スリープ、休止、シャットダウンは**この PC の前（コンソール）で**行う。RDP の中からでは狙った電源状態にならないことがある（RDP の電源メニューには切断とサインアウトしかない）。狙った状態になったかをイベントで確かめ、ならなければ「結論なし」としてやり直す。
+スリープ、休止、シャットダウンは**この PC の前（コンソール）で**行う。RDP の中からでは狙った電源状態にならないことがある（RDP の電源メニューには切断とサインアウトしかない）。狙った状態になったかをイベントで確かめ、ならなければ「結論なし」としてやり直す。確認画面の打鍵のテストもコンソールで行う（RDP のセッションで打ったキーは、この PC のキーボードの確かめにならない。D.6）。RDP で行うのは MT-6b だけ。RDP で接続したまま始めないよう、各項目の前に `qwinsta` で今のセッションが `console` であることを確かめる。
 
 | # | 内容 | 手順と期待する結果 |
 |---|---|---|
-| MT-1 | 報告された場合。**合格**（2026-09-29、コンソール。`docs/research/boot-id.md`「MT-1 の結果」） | 0.1.0 の上に修正版を NSIS のインストーラーで入れ、再起動しない。GUI が `d724c149` の確認画面を開き、「このままにする」が押せ、「まだ反映されていません」の行がない。`c10d2d38` の「再起動が必要」が消える。Shift+2 のテストをしてから Keep か元に戻す。`mklm-cli journal` で `d724c149` が `Confirmed`（履歴に `recover:reboot-observed` と `keep`）か `Reverted`、`c10d2d38` が `Reverted`（`reboot-observed`）。新しい変更を受け付ける。RDP で接続している場合は、TERMINPUT_BUS のセッション用キーボードで Keep が `Conflict` にならないかも見る |
-| MT-2 | スリープ（R10） | 修正版で、再起動で反映する変更を 1 つ行う（例: 内蔵キーボードの配列）→ `PendingReboot`。`journal` の `boot_id` が `0000000N-0000-8000-8000-000000000000`。コンソールで スタート → 電源 → スリープ（S3。RDP と `rundll32 powrprof.dll,SetSuspendState` は使わない。休止が有効な PC では後者は休止になる）→ 復帰。Kernel-Power のイベント 42 と Power-Troubleshooter のイベント 1 があり、新しいイベント 27 がないことを確かめる（なければ結論なし）。カウンターは変わらない。`SleepTimeBias` や `BootTime` が動いても `BootTime - BootTimeBias` は 10 秒以内で変わらない。確認画面は「まだ反映されていません」、「このままにする」は押せない |
+| MT-1 | 報告された場合。**合格**（2026-09-29、コンソール。`docs/research/boot-id.md`「MT-1 の結果」） | 0.1.0 の上に修正版を NSIS のインストーラーで入れ、再起動しない。GUI が `d724c149` の確認画面を開き、「このままにする」が押せ、「まだ反映されていません」の行がない。`c10d2d38` の「再起動が必要」が消える。Shift+2 のテストをしてから Keep か元に戻す。`mklm-cli journal --json` で `d724c149` の `state` が `confirmed`（`history[].reason` に `recover:reboot-observed` と `keep`）か `reverted`、`c10d2d38` の `state` が `reverted`（`reboot-observed`）、どちらも `attention` が `none`（文字の形では見出しの `(kept)` / `(reverted)`）。新しい変更を受け付ける。RDP のセッションでの Keep は MT-6b で見る（MT-1 はコンソールで行った） |
+| MT-2 | スリープ（R10） | 修正版で、再起動で反映する変更を 1 つ行う（例: 内蔵キーボードの配列）→ `PendingReboot`。`mklm-cli journal --json` の全体の `boot_id` と、そのエントリの `boot_id` と `history[].boot` が `0000000N-0000-8000-8000-000000000000`。コンソールで スタート → 電源 → スリープ（S3。RDP と `rundll32 powrprof.dll,SetSuspendState` は使わない。休止が有効な PC では後者は休止になる）→ 復帰。Kernel-Power のイベント 42 と Power-Troubleshooter のイベント 1 があり、新しいイベント 27 がないことを確かめる（なければ結論なし）。カウンターは変わらない。`SleepTimeBias` や `BootTime` が動いても `BootTime - BootTimeBias` は 10 秒以内で変わらない。確認画面は「まだ反映されていません」、「このままにする」は押せない |
 | MT-3 | 休止（R10） | 同じ操作が残った状態で、コンソールで `shutdown /h` → 電源を入れる。新しいイベント 27 が 0x2 であること（違えば結論なし）。カウンターは変わらない。`BootTime`、`SleepTimeBias` が動いても `BootTime - BootTimeBias` は 10 秒以内で変わらない。まだ再起動していない扱い |
 | MT-4 | 高速スタートアップ（R9） | 同じ状態で、コンソールで スタート → 電源 → シャットダウン（または `shutdown /s /hybrid /t 0`）→ 電源を入れる。新しいイベント 27 が 0x1 であること（0x0 なら、保留中の更新などで完全なシャットダウンになったので、結論なしとしてやり直す）。カウンターと `BootTime - BootTimeBias` は変わらず、まだ再起動していない扱い。サインインのときに RunOnce がもう一度尋ねる |
 | MT-5 | 時刻（R10） | 同じ状態で、時計を数分進めて戻し、`w32tm /resync /force`（管理者。同意を得る。W32Time が止まっていれば先に `net start w32time`）。`BootTimeBias` が時計を動かした分だけ変わり、カウンターと `BootTime - BootTimeBias` は変わらない（バイアスが吸収する）。バイアスが動かなければ時計が動いていないので、結論なし。まだ再起動していない扱い |
-| MT-6 | 再起動（R9） | スタート → 電源 → 再起動。イベント 27 は 0x0、カウンターは前の値より大きい（差を記録する。休止などをローダーが数えていれば 2 以上）。サインインすると確認画面が開き（RDP でも）、「このままにする」が押せる。Keep で `Confirmed` |
+| MT-6 | 再起動（R9） | コンソールで スタート → 電源 → 再起動。イベント 27 は 0x0、カウンターは前の値より大きい（差を記録する。休止などをローダーが数えていれば 2 以上）。コンソールでサインインすると確認画面が開き、「このままにする」が押せる。**変更したキーボードで** Shift+2 を押し、その行の「打鍵」が ✓ になってから Keep → `Confirmed`（`mklm-cli journal --json` の `state` が `confirmed`） |
+| MT-6b | RDP での確認と Keep（打鍵の確認なし） | 再起動で反映する変更をもう 1 つ行い（MT-2 と同じ）、再起動する。コンソールでサインインせずに、RDP で接続して新しいセッションにサインインする。確認画面が開き（RunOnce）、「このままにする」が押せる。キーのテストの欄にリモート デスクトップの注意（「この PC の前で、この PC につないだキーボードで…」）が出て、Shift+2 を押しても「打鍵」の列は「未」のまま、判定の文も出ない（D.6）。Keep で `Confirmed` になり、`Conflict` にならない（TERMINPUT_BUS のセッション用キーボードは記録の対象外）。打鍵の確認はしていないので、その後コンソールで変更したキーボードの Shift+2 を確かめる（違えば元に戻す） |
 | MT-7 | 完全なシャットダウン | 再起動で反映する変更をもう 1 つ行い、コンソールで `shutdown /s /t 0`（`/hybrid` なしの `/s` は完全なシャットダウン。または Shift を押しながらシャットダウン）→ 電源を入れる。イベント 27 が 0x0 であること、カウンターは前の値より大きく（差を記録する）、再起動した扱い（ドライバーが読み直した）。その後、元に戻す |
 | MT-8 | 0.1.x の記録、再起動していない | 何も open でない状態で、修正版の上に 0.1.0 を入れる（ダウングレード）。0.1.0 で再起動で反映する変更を行う（`PendingReboot`、GUID の形）。再起動せずに修正版を入れ直す。ヒントが今の起動時刻と等しいので「まだ反映されていません」、Keep は押せない。スリープと復帰（MT-2 と同じ確かめ）の後もまだ（`SleepTimeBias` や `BootTime` が動いても `BootTime - BootTimeBias` は 10 秒以内）。再起動すると Keep が押せる。元に戻す |
 | MT-9 | 0.1.x の記録と高速スタートアップ | MT-8 と同じだが、再起動の前に高速スタートアップのシャットダウン（MT-4 と同じ手順と確かめ。0x1 でなければ結論なし）をする。0x1 の起動の後も、0.1.x の操作はまだ再起動していない扱い（`BootTime - BootTimeBias` がハイブリッドの起動をまたいで 10 秒以内に保たれることの確認。カウンターの安全網も同じ性質に頼る）。本当の再起動の後は再起動した扱い |
@@ -1590,7 +1594,7 @@ UTF-8（BOM 付き）で、日本語と英語。書く内容:
 1. **起動 ID の性質の確認**（C2）: 起動 ID を `BootTime`（時刻の補正でずれる）から、起動ごとの GUID（`SystemBootEnvironmentInformation.BootIdentifier`）に改めた。**0.1.0 は R9、R10 を行わないまま出荷し、デスクトップ PC でこの GUID が完全な再起動でも変わらず、`PendingReboot` が終わらなくなった**（`docs/research/boot-id.md`）。0.1.1 で `KUSER_SHARED_DATA.BootId`（ローダーが起動のたびに増やすカウンター）に切り替え、0.1.x の記録は履歴の起動時刻で判定する（C.10「起動 ID」）。残るリスク:
    - カウンターの性質は ntddk.h の注釈と解析（phnt/NtDoc: winload が `bootstat.dat` の `LastBootId` を増やす）でしか裏付けがない。休止からの復帰（winresume）と休止イメージの復元について書いた公開資料はなく、この PC の起動もまだすべて 0x0（イベント 27）。休止や高速スタートアップからの復帰で値が変わる Windows があれば、危険な側（再起動していないのに再起動したと判断する）に誤りうる。対策は 3 つ: (1) MT-2〜MT-4 と MT-9 を 0.1.1 の公開の条件にし、変わったら公開しない（C.10「公開する順序」）。(2) カウンターの安全網: 起動時刻が保たれていれば「同じ起動」のまま（C.10）。(3) Windows の機能更新の後にも R9/R10 をやり直す。
    - カウンターの安全網が誤るのは、本当の再起動の開始が、時刻の変更の前の RTC で 10 秒以内に重なる場合だけ（電源を入れるたびに同じ値から始まる RTC）。安全な側で、開始時刻の違う次の再起動で直り、取り消しはできる。
-   - ARM64: `KUSER_SHARED_DATA.BootId` を ARM64 で読んだ記録はまだない（CI は ARM64 のテストを実行しない。オフセットは同じ定義で、コンパイル時に確かめる）。値が 0 なら `boot_counter()` がエラーを返し、エンジンの `open()`、GUI、CLI が止まる（回復と取り消しも。安全な側だが使えない）。arm64 版の公開の前に ARM64 の実機か `windows-11-arm` ランナーで確かめる（C.10「公開する順序」）。
+   - ARM64: `KUSER_SHARED_DATA.BootId` を ARM64 で読んだ記録はまだない（CI は ARM64 のテストを実行しない。オフセットは同じ定義で、コンパイル時に確かめる）。値が 0 なら `boot_counter()` がエラーを返し、エンジンの `open()`、GUI、CLI が止まる（回復と取り消しも。安全な側だが使えない）。helper の更新も `Internal` で断るので、直した版は自動更新では届かず、手でのインストールになる。M5b の更新情報は arm64 のアセットを必ず持つので、ARM64 の実機か `windows-11-arm` ランナーでの確認は v0.2.0 のリリース全体の条件にした（C.10「公開する順序」）。
    - `bootstat.dat` が書かれない環境（UWF/HORM などの書き込みフィルター、読み取り専用や故障したディスク）では、続く起動が同じカウンターになり、再起動しても「再起動していない」と読む。安全な側（増える再起動まで止まる。取り消しはできる）。
    - カウンターが戻る（`bootstat.dat` の作り直し）と、未解決のエントリが記録した値と重なった場合だけ、その起動の間「再起動していない」と読む。安全な側で、次の再起動で直る。
    - 0.1.x の記録の判定は、起動の間 `BootTime - BootTimeBias` が 10 秒以内に保たれることを前提にする。休止からの復帰でバイアスなしに `BootTime` が動くと、修正版を入れた起動の中で作られた 0.1.x の操作を再起動したと読むおそれがある（危険な側。その 1 回の起動だけで、確認画面の Raw Input と Shift+2 のテストは残る）。MT-2、MT-3、MT-8、MT-9 で、`BootTime`、`BootTimeBias`、`SleepTimeBias` の生の値とあわせて確かめる（`print_boot_id`）。
@@ -1749,3 +1753,15 @@ M2 設計の 1 回目のレビュー（2 つの観点）への対応。すべて
 | WINDOWS-TESTS-4: `print_boot_id` が差しか表示せず、MT-5 がバイアスの動きを見ないまま通り、差が動いたときに原因を区別できない | 採用 | 生の `SystemTimeOfDayInformation`（`BootTime`、`CurrentTime`、`BootTimeBias`、`SleepTimeBias`）を読む crate 内の関数 `time_of_day` を足して表示する。MT-5 は「バイアスが時計を動かした分だけ変わり、差は変わらない」、MT-2、MT-3、MT-8、MT-9 は「生の値が動いても差は 10 秒以内」にした |
 | WINDOWS-TESTS-5: RESTART-2 と同じ（非昇格の読み替えにテストがない） | 採用 | RESTART-2 と同じ |
 | WINDOWS-TESTS-6: ARM64 では新しい unsafe の読み取りが一度も実行されず、値が 0 だとすべてが止まる | 採用（CI の job は足さない） | オフセットの確認をテストのモジュールの `const` にし、ARM64 の `clippy --all-targets` でも評価されるようにした（わざとずらして失敗することを確かめた）。arm64 版の公開の前に ARM64 の Windows 11 で `session::` のテストを一度実行することを公開の条件にした（C.10、I.1）。CI の `windows-11-arm` の job は、リポジトリの公開範囲によって使えるかが決まり、push せずに動作を確かめられないので、このコミットでは足さない |
+
+### v0.2.0 の統合（M5b、起動 ID、リモート デスクトップ）のレビュー（2026-09-29）
+
+m5b M.7 に全件がある。M2 の設計に関わるもの:
+
+| 指摘 | 採否 | 変更 / 理由 |
+|---|---|---|
+| INTERACTIONS-2: C.10 の「ARM64 を確かめられなければ arm64 版を出さない」を、M5b の更新情報（x64 と arm64 がちょうど 1 つずつ）と `xtask` は守れない。起動 ID を読めない PC では更新が `Internal` で断られ、手でのインストールが要ることがどこにも書かれていない | 採用（案 (a)） | ARM64 での確認を v0.2.0 のリリース全体の条件にした（C.10「公開する順序」、I.1、m5b B.5 と `release-signing.ja.md` の手順 0）。起動 ID を読めない PC の手でのインストールを C.10、I.1、`docs/recovery.md` 8 章に書いた。検証の規則は変えない |
+| INTERACTIONS-4: MT-6 と MT-1 が RDP のセッションでの Keep と打鍵の確認を求めているが、RDP で打ったキーは Raw Input に名前がなく、この PC のキーボードの確かめにならない。GUI の `last_key` はクリアされず、コンソールで押したキーボードの結果として判定されうる | 採用 | GUI のキーのテストは、直前（1 秒以内）の Raw Input の押下を 1 回だけ使う（`state::key_source`、`KEY_SOURCE_MAX_AGE`）。リモート セッションではキーのテストの案内をリモート デスクトップの注意にし、CLI の確認画面も注意を出す（D.6、D.7、m3 B.6、B.9）。MT-6 はコンソールでの打鍵の確認にし、RDP での Keep を MT-6b に分けた。回帰テスト: `a_key_without_its_own_raw_input_press_is_credited_to_no_keyboard`、`a_remote_desktop_key_fills_no_row_of_the_post_reboot_check`、`a_remote_desktop_key_checks_no_keyboard`、`the_post_reboot_check_in_a_remote_session_asks_for_the_test_at_the_pc` |
+| CLEAN-RUN-1: 利用者は 14:13 から RDP のセッションにいる（MT-1 はコンソール） | 事実として採用（コードの変更なし） | `qwinsta` と LocalSessionManager のイベント 25 で確かめた。H.2 に「MT-2〜MT-9 と打鍵の確認はコンソールで。各項目の前に `qwinsta` で確かめる」を足した |
+| CLEAN-RUN-3: MT の手順が、文字の形の `mklm-cli journal` にない履歴の理由と起動 ID を求めている | 採用 | H.2 の記録の手順、MT-1、MT-2、MT-6 を `mklm-cli journal --json` とその項目名（`state`、`attention`、`boot_id`、`history[].reason`、`history[].boot`）にした |
+| CLEAN-RUN-4: 閉じたエントリでも、CLI の `journal` が「Takes effect: restart the PC」と指示の形で表示する | 採用 | open なエントリだけ「Takes effect: …」、閉じたものは「Applied by: a PC restart」など（`journal_view::applied_by`）。回帰テスト `only_an_open_entry_says_what_to_do_for_it_to_take_effect` |

@@ -54,6 +54,10 @@ MKLM の自動更新は、メンテナーがオフラインで署名した `late
 
 ## 3. 毎回のリリース（安定版）
 
+0. **公開の条件を確かめる**（手順 1 の前。0.1.0 は、設計にだけ書いた完了条件を行わずに出荷した）。v0.2.0（起動 ID の修正を含む最初の公開版。設計 m2 C.10「公開する順序」）では:
+   - 設計 m2 H.2 の MT-1〜MT-9（MT-6b を含む）がすべて合格し、`docs/research/boot-id.md` に記録がある。止める規則（m2 C.10）に当たったものがない。
+   - ARM64 の Windows 11（実機か `windows-11-arm` のランナー）で `cargo test -p mklm-win session:: -- --include-ignored --nocapture` を実行し、カウンターが 0 でなく `PrefetchParameters\BootId` と等しいことを確かめ、`boot-id.md` に記録した。更新情報は arm64 のアセットを必ず持つので、arm64 だけを外して出すことはできない。確かめられなければ、リリース全体を延期する。
+   - 以後の版: Windows の機能更新の後は、MT-2〜MT-7 をやり直してから出す。
 1. `Cargo.toml` の `[workspace.package] version` を上げてコミットし、`main` に入れる。
 2. `git tag vX.Y.Z` → `git push origin vX.Y.Z`。
 3. Actions の「Release」が緑になり、題が「MKLM vX.Y.Z — UNSIGNED, DO NOT PUBLISH」の下書きに、2 つのインストーラーと `SHA256SUMS` が付くのを待つ（来歴の証明も CI が付ける）。

@@ -464,6 +464,10 @@ cargo xtask prepare-release --dev --tag vX.Y.Z --dist <dir> --dev-pub <file.pub>
 
 **毎回（安定版。gh CLI を使う）**
 
+0. **公開の条件を確かめる**（手順 1 の前。0.1.0 は設計にだけ書いた完了条件 R9/R10 を行わずに出荷した。同じ抜けを手順で防ぐ。v0.2.0 の統合のレビュー INTERACTIONS-3）。v0.2.0（起動 ID の修正を含む最初の公開版。m2 C.10「公開する順序」）では:
+   - m2 H.2 の MT-1〜MT-9（MT-6b を含む）がすべて合格し、`docs/research/boot-id.md` に記録がある。止める規則（m2 C.10）に当たったものがない。
+   - ARM64 の Windows 11（実機か `windows-11-arm` のランナー）で `cargo test -p mklm-win session:: -- --include-ignored --nocapture` を実行し、カウンターが 0 でなく `PrefetchParameters\BootId` と等しいことを確かめ、`boot-id.md` に記録した。更新情報は arm64 のアセットを必ず持つ（A.2）ので、arm64 だけを外して出すことはできない。確かめられなければ、リリース全体を延期する（m2 C.10、INTERACTIONS-2 の決定 (a)）。
+   - 以後の版: Windows の機能更新の後は、MT-2〜MT-7 をやり直してから出す（m2 H.2 の R9）。
 1. `Cargo.toml` の `[workspace.package] version` を上げてコミットし、`main` に入れる。
 2. `git tag vX.Y.Z` → `git push origin vX.Y.Z`。
 3. Actions の「Release」が緑になり、題が「MKLM vX.Y.Z — UNSIGNED, DO NOT PUBLISH」の下書きに、2 つのインストーラーと `SHA256SUMS` が付くのを待つ（来歴の証明も CI が付ける）。
@@ -1374,6 +1378,7 @@ Rust が組み立てる文は `i18n.rs` に、型ごとの網羅的な `match` �
 - `NotInstalled` と `Failed` の文には、キーボードの設定が変わっていないことを必ず添える（更新はキーボードに触れない。0.2 の 7）。文の ID によらず、結果のオーバーレイ（`vm::update::result_overlay`）が最後に確かめて足す（`i18n::update::with_keyboards_unchanged`。すでに言っていれば足さない）。
 - `NotInstalled(Refused(…))`（H2 の検証し直し、ロック、ジャーナル、記録の書き込みでの拒否。D.7 の 8〜10、16）は、中の `UpdateRefusal` の行の文の後に「MKLM は 0.2.0 のままで、キーボードの設定も変わっていません。」を添える（`i18n::update::with_version_kept`。`upd-disk-full` のようにすでに言っている文には足さない）。拒否の行の文は H1 の拒否（何も始まっていない）のためのもので、更新しなかったことも今の版も言わないため（M.4 の CONFORMANCE-1）。
 - 表記の決まりは m3 D.5 に従う（ボタンは［］、Windows の画面の語は「」、2 文以上は「。」で終える、「確定」を使わない）。
+- 起動 ID を読めない PC（m2 I.1。`KUSER_SHARED_DATA.BootId` が 0）では、H1 と H2 の `Build::current` が `Internal` で断る（`upd-prepare-failed`）。「PC を再起動して」では直らず、その PC には直した版を自動更新で届けられない。リリース ページから手で入れてもらう（`docs/recovery.md` 8 章。m2 C.10「公開する順序」）。
 - 「構造」の失敗は、30 日の知らせを待たず、その場の文でもリリース ページへ案内する。
 
 ### E.7 多言語とアクセシビリティ
@@ -3956,7 +3961,7 @@ JSON の例（形を固定するテストの期待値に使う）:
 
 ```json
 // Run
-{"schema":1,"run_id":"0.2.1-3f9a0c2b7d1e4a65","from_version":"0.2.0","to_version":"0.2.1","arch":"x64","phase":"installing","boot_id":"0b6d3c2a-9e1f-4d5a-8c7b-6a5f4e3d2c1b","started_at":1792022460000,"phase_at":1792022485000,"caller":{"pid":8532,"creation_time":134041234567890123},"caller_session":1,"stager":{"pid":9120,"creation_time":134041234600000000},"runner":{"pid":9344,"creation_time":134041234700000000},"installer":{"pid":9512,"creation_time":134041234800000000}}
+{"schema":1,"run_id":"0.2.1-3f9a0c2b7d1e4a65","from_version":"0.2.0","to_version":"0.2.1","arch":"x64","phase":"installing","boot_id":"00000007-0000-8000-8000-000000000000","started_at":1792022460000,"phase_at":1792022485000,"caller":{"pid":8532,"creation_time":134041234567890123},"caller_session":1,"stager":{"pid":9120,"creation_time":134041234600000000},"runner":{"pid":9344,"creation_time":134041234700000000},"installer":{"pid":9512,"creation_time":134041234800000000}}
 ```
 
 ```json
@@ -4120,8 +4125,8 @@ JSON の例（形を固定するテストの期待値に使う）:
 
 | 作業 | 内容と参照先 | M5b 側で合わせたこと |
 |---|---|---|
-| 起動 ID の修正（`fix/boot-id`） | 起動 ID を `KUSER_SHARED_DATA.BootId` のカウンター形式にし、0.1.x が記録した GUID はジャーナルを読むときに判定する。設計は m2 の C.10「起動 ID」と H.2 の MT-1〜MT-9、経緯と実機の結果は `docs/research/boot-id.md`。m2 C.10「公開する順序」のとおり、M5b の最初の公開版に含める（含まないと、止まった `PendingReboot` の PC は `check_journal` に断られる）。同じ修正を含むので、C.10 の公開の条件（MT-1〜MT-9。MT-1 は 2026-09-29 に合格）は v0.2.0 のタグにもかかる | `TidyingHost` が `Host::legacy_boot_guid` を中のホストに渡す。`Run.boot_id`、`classify_run`、`StagerEnv::boot_id`、クライアントの `update::status` はどれも `session::boot_id`（カウンター形式）を書き、比べる。`check_journal` は状態だけを見るので、カウンターと保存された GUID を比べる箇所はない。`install-guide.ja.md` は「v0.1.x には自動更新がない」とし、ダウングレードの注意を上書き更新の段落の後に 1 回だけ置いた |
-| リモート デスクトップのキーボード（`rdp/keyboard`） | `TERMINPUT_BUS` のキーボードを読み取り専用の仮想のキーボードとして示す、名前のない Raw Input のキーボードを飛ばす、`OsInfo::client_keyboard_type`、CLI と GUI の行、入力方式の案内の段落、診断の道具。調べた結果は `docs/research/rdp-keyboard.md`（E7 の打鍵の確かめは未実施）、設計は m2 の A.3（読み取りの問題の表）と D.2、m3 の B.2 と B.13 | `mklm-win::os` の import を両方残した（M5b の `fixed_install_dir` と RDP の `GetKeyboardType`）。M5b は `OsInfo` の値を作らないので、リテラルの追加はない。RDP の GUI の文言は i18n と Latin の検査を通る |
+| 起動 ID の修正（`fix/boot-id`） | 起動 ID を `KUSER_SHARED_DATA.BootId` のカウンター形式にし、0.1.x が記録した GUID はジャーナルを読むときに判定する。設計は m2 の C.10「起動 ID」と H.2 の MT-1〜MT-9、経緯と実機の結果は `docs/research/boot-id.md`。m2 C.10「公開する順序」のとおり、M5b の最初の公開版に含める（含まないと、止まった `PendingReboot` の PC は `check_journal` に断られる）。同じ修正を含むので、C.10 の公開の条件（MT-1〜MT-9。MT-1 は 2026-09-29 に合格）は v0.2.0 のタグにもかかる。ARM64 での起動 ID の確認も、更新情報が arm64 のアセットを必ず持つ（A.2）ため、arm64 版だけでなくリリース全体の条件になる（m2 C.10。統合のレビューの INTERACTIONS-2 の決定 (a)）。どちらも B.5 の手順 0 で確かめる | `TidyingHost` が `Host::legacy_boot_guid` を中のホストに渡す。`Run.boot_id`、`classify_run`、`StagerEnv::boot_id`、クライアントの `update::status` はどれも `session::boot_id`（カウンター形式）を書き、比べる。`check_journal` は状態だけを見るので、カウンターと保存された GUID を比べる箇所はない。`install-guide.ja.md` は「v0.1.x には自動更新がない」とし、ダウングレードの注意を上書き更新の段落の後に 1 回だけ置いた |
+| リモート デスクトップのキーボード（`rdp/keyboard`） | `TERMINPUT_BUS` のキーボードを読み取り専用の仮想のキーボードとして示す、名前のない Raw Input のキーボードを飛ばす、`OsInfo::client_keyboard_type`、CLI と GUI の行、入力方式の案内の段落、診断の道具。調べた結果は `docs/research/rdp-keyboard.md`（E7 の打鍵の確かめは未実施。調べた PC は 11:37 の再起動から標準配列 US なので、E7 の読み方を 0 節で直した）、設計は m2 の A.3（読み取りの問題の表）と D.2、m3 の B.2 と B.13。統合のレビューで、RDP のセッションで打ったキーを確認画面とキーのテストがどのキーボードの結果にもしないようにした（m2 D.6、m3 B.6、B.9） | `mklm-win::os` の import を両方残した（M5b の `fixed_install_dir` と RDP の `GetKeyboardType`）。M5b は `OsInfo` の値を作らないので、リテラルの追加はない。RDP の GUI の文言は i18n と Latin の検査を通る |
 
 ---
 
@@ -4337,3 +4342,19 @@ M.5 の後の実装（7f4b9ba）を、インストールも昇格もせずに、
 | BUILD-RUN-2 | minor | 採用 | `SIGN-OFFLINE.txt` と表示のコマンド（`prepare-release`、`prepare-release --dev`、`key-drill start` と `then:` の行）がパスを囲まずに書き、空白を含む絶対のパス（リポジトリは `D:\SHIN DATA CENTER\` の下）では、貼ったコマンドが `-m D:\SHIN` に分かれて失敗していた（署名はされないので安全側）。PowerShell に貼る形にした: 英数字と `\ / : . _ -` 以外を含むパスは `'…'`（中の `'` と、PowerShell が単一引用符として読む全角の引用符は 2 つ重ねる）、囲んだ `minisign.exe` には呼び出しの演算子 `&`。固定の形（`E:\…`、`F:\…`、相対の `release-work\vX.Y.Z`）は変わらない。回帰テスト: 引数の表と、空白を含むパスの 4 種類のコマンドを PowerShell 5.1 の `Parser::ParseInput` で読み戻し、各パスがそのまま 1 つの引数になること（実行はしない）。囲まない前のコードでは 4 つのテストが落ちることを確かめた。レビューと同じく、空白を含む `--out` と `--minisign` の `prepare-release --dev` の行を `Invoke-Expression` で実行し（`minisign.exe` の代わりに引数を表示するだけの exe）、9 つの引数がそのまま届くことも確かめた。F.6 の手順 1、5 は `%USERPROFILE%`（PowerShell は展開しない）を `"$env:USERPROFILE\…"` に直した。B.3 の手順 12、B.5 の手順 9、F.1、F.6、K の 62、`release-signing.ja.md` |
 | BUILD-RUN-3 | minor | 採用 | F.6 の後片付けと `release-signing.ja.md` の 5 章（署名に使う PC の条件）が、利用者ごとの更新のキャッシュ（`%LOCALAPPDATA%\SHIN DATA CENTER\MKLM\update\`）に触れていなかった。リハーサルはここに開発用の鍵で署名した `latest.json` と署名、デバッグ ビルドのインストーラー、リハーサルの時刻の `last_check` と `last_success` を残し、アンインストールでは消えない。後片付けの 1 に「アンインストールの後、リリース ビルドを入れ直す前に、リハーサルで MKLM を動かしたすべてのアカウントのこのフォルダーを消す」を、3 に確認を、B.6 と `release-signing.ja.md` の 5 章に条件を足した。文書の手順なので、テストはない |
 | BUILD-RUN-4 | minor | 採用 | `update-canary.yml` は毎週、無条件に `verify --remote` を実行し、信頼の起点ファイルに鍵ができ v0.2.0 が `latest.json` 付きで公開されるまで、毎回失敗していた（`release_anchors()?` で何も取る前に）。`verify --remote --skip-before-keyed-release` を足した: 安定版の形のタグのうち信頼の起点ファイルに鍵があるものが 1 つもなければ、何も取らず、この木の信頼の起点ファイルも読まずに notice を出して成功する。判断はリリースではなくタグ（リリースを消されても見張りは止まらない）。浅い clone、`v*` のタグがない、壊れた信頼の起点ファイルは失敗。checkout は `fetch-depth: 0`。`fetch-smoke` は v0.1.0 で通るので飛ばさない。`schedule` を v0.2.0 のコミットで足す案は、足し忘れると見張りがないまま気付かないので採らなかった。テスト: 飛ばす / 飛ばさない / 失敗の表（`xtask`）。B.3、F.1、F.8、G.6、K の 63、`release-signing.ja.md` |
+
+### M.7 3 つのブランチの統合のレビュー（2026-09-29。9 件）
+
+m5b/updater に fix/boot-id と rdp/keyboard をマージした後（4578f19）の、コードと文書の意味の上の相互作用のレビューと、きれいな作業ツリーからの全体の確認。
+
+| ID | 重さ | 対応 | 何を変えたか |
+|---|---|---|---|
+| INTERACTIONS-1 | major | 採用 | `docs/research/rdp-keyboard.md` は 06:57 の状態（`c10d2d38` が再起動待ち、標準 JIS へ移行）で書かれていたが、11:32〜11:37 の 3 回の起動、11:36 の `d724c149`（標準 US）、MT-1 の Keep の後、PC は標準 US で再起動待ちの操作はない。0 節（11:32 以降の状態と、標準 US での E7 の読み方）を足し、2 節、6.1 節、E6〜E9、9 節、12 節を直した。標準 US では 101 の表が出ても H2 とは言えないので、README に制限として書く判断は、標準 JIS の PC での E7c（利用者の同意を得た別の実験）の後にする |
+| INTERACTIONS-2 | major | 採用（案 (a)） | 更新情報は x64 と arm64 をちょうど 1 つずつ持つ（A.2、`verify::select_asset`）ので、m2 C.10 の「ARM64 を確かめられなければ arm64 版を出さない」は守れない。ARM64 での起動 ID の確認を v0.2.0 のリリース全体の条件にした（B.5 の手順 0、`release-signing.ja.md` 3 章の手順 0、m2 C.10、I.1、K の「v0.2.0 に含める」）。起動 ID を読めない PC は更新が `Internal` で断られ、手でのインストールになることを m2 C.10、I.1、E.6、`docs/recovery.md` 8 章に書いた。検証の規則は変えない（案 (b) は採らない） |
+| INTERACTIONS-3 | minor | 採用 | B.5 と `release-signing.ja.md` の「毎回」に、手順 1 の前の手順 0（MT-1〜MT-9 の合格と記録、ARM64 の確認）を足した。`prepare-release` の表示には足さない（手順 0 は `xtask` が確かめられない、人が見る記録のため） |
+| INTERACTIONS-4 | minor | 採用 | RDP で打ったキーは Raw Input に名前がなく、この PC のキーボードの確かめにならない。GUI の `last_key` はクリアされず、コンソールで押したキーボードの結果として判定されえた。キーのテストは直前（1 秒以内）の押下を 1 回だけ使い（`state::key_source`）、リモート セッションではキーのテストの案内と CLI の確認画面に注意を出す。m2 H.2 の MT-6 をコンソールでの打鍵の確認に、RDP での Keep を MT-6b に分けた（m2 D.6、D.7、m3 B.6、B.9） |
+| INTERACTIONS-5 | minor | 採用 | H.5 の `Run` の例と `run.rs` の 2 つの形のテストの `boot_id` を、H1 が実際に書くカウンターの形（`00000007-0000-8000-8000-000000000000`）にした。M5b のテストの `BOOT`（`run.rs`、`run_flow/tests.rs`、`mklm-ipc` と `mklm-client` の `staging` のテスト）も `BootId::from_boot_counter(7)` にし、`Run.boot_id` が legacy でないことを確かめる行を足した |
+| CLEAN-RUN-1 | minor | 事実として採用（コードの変更なし） | 14:13 から利用者は RDP のセッション（`rdp-tcp#0`、接続元は 0x7/0x2 を報告）にいる。MT-1 はコンソールで行ったので記録は正しい。MT-2〜MT-9 と打鍵の確認はコンソールで行うことを m2 H.2 に足した。この時点の `list`、`status`、GUI のリモート デスクトップの行は設計どおり |
+| CLEAN-RUN-2 | minor | 採用 | `installer/build-installer.ps1` のリリースの経路が、呼び出し元の `CARGO_TARGET_DIR` のままビルドし、`target\<triple>\release` から詰めて検査していた（古い exe を詰めて検査するか、「missing」で失敗する）。dev の経路と同じく、この cargo だけ `CARGO_TARGET_DIR` を `target` にして戻す。Pester のテスト `installer/tests/build-installer.Tests.ps1`（偽の cargo が受け取ったフォルダーを記録する。直す前のスクリプトでは失敗することを確かめた） |
+| CLEAN-RUN-3 | minor | 採用 | m2 H.2 の記録の手順と MT-1、MT-2、MT-6 を `mklm-cli journal --json` と項目名（`state`、`attention`、`boot_id`、`history[].reason`、`history[].boot`）にした。文字の形の `journal` は履歴と起動 ID を表示しない |
+| CLEAN-RUN-4 | minor | 採用 | CLI の `journal` が、閉じたエントリにも「Takes effect: restart the PC …」と指示の形で出していた。open なエントリだけに出し、閉じたものは「Applied by: a PC restart」など（`journal_view::applied_by`）。まだ反映されていないものは、これまでどおり `Attention` と `Not in effect yet` の行が示す |
