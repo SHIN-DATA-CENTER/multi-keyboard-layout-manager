@@ -175,6 +175,7 @@ pub fn request_kind(request: &mklm_ipc::Request) -> &'static str {
     match request {
         Request::SetLayout(_) => "SetLayout",
         Request::Migrate(_) => "Migrate",
+        Request::SetStandard(_) => "SetStandard",
         Request::Revert { .. } => "Revert",
         Request::Confirm { .. } => "Confirm",
         Request::RestoreBaseline(_) => "RestoreBaseline",

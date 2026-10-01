@@ -103,7 +103,7 @@ pub use devices::{
 pub use error::{Error, ReadIssue, ReadIssueKind};
 pub use global::read_global_settings;
 pub use input_lang::{loaded_layouts, read_input_methods};
-pub use os::read_os_info;
+pub use os::{is_remote_session, read_os_info};
 pub use process::{encode_for_redirected_output, restrict_dll_search};
 pub use rawinfo::{RawKeyboard, instance_id_from_interface_path, raw_keyboards};
 

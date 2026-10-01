@@ -98,6 +98,11 @@ pub struct FaultPlan {
     /// With `deny_target`: reads of that target fail with [`BackendError::AccessDenied`] too (a
     /// DACL that denies reading as well), also after [`MemoryRegistry::after_crash`].
     pub deny_reads: bool,
+    /// Once `n` mutating calls completed, the devnode with this instance ID disappears (removed in
+    /// Device Manager while the engine works, [`MemoryRegistry::remove_devnode`]): every later
+    /// read or write of it fails with [`BackendError::DeviceRemoved`]. `Some((0, id))` removes it
+    /// before the first call.
+    pub remove_devnode_after: Option<(usize, String)>,
     /// Read `n` (`read_value` and `list_values`, 1-based, counted separately from the mutating
     /// calls) fails with [`BackendError::Os`]; later reads work. Error-path tests of the reads
     /// (design review C3: no non-crash error may leave an entry in flight).
@@ -259,6 +264,7 @@ impl MemoryState {
     /// Counts one mutating call and applies `crash_after` / `fail_at`.
     fn begin_mutation(&mut self) -> Result<(), BackendError> {
         self.check_alive()?;
+        self.remove_when_due();
         self.mutating_calls += 1;
         if self
             .faults
@@ -279,6 +285,7 @@ impl MemoryState {
     /// Counts one read of `target` and applies `fail_read_at` and `deny_reads`.
     fn begin_read(&mut self, target: &WriteTarget) -> Result<(), BackendError> {
         self.check_alive()?;
+        self.remove_when_due();
         self.reads += 1;
         if self.faults.fail_read_at == Some(self.reads) {
             return Err(BackendError::Os {
@@ -292,6 +299,17 @@ impl MemoryState {
             });
         }
         Ok(())
+    }
+
+    /// Applies `remove_devnode_after` once its call count is reached.
+    fn remove_when_due(&mut self) {
+        if let Some((after, instance_id)) = &self.faults.remove_devnode_after
+            && self.mutating_calls >= *after
+        {
+            let id = instance_id.to_ascii_uppercase();
+            self.current.devices.remove(&id);
+            self.removed.insert(id);
+        }
     }
 
     fn check_device(&self, target: &WriteTarget) -> Result<(), BackendError> {
@@ -730,6 +748,9 @@ pub struct FakeDevices {
     restarted: Vec<String>,
     incomplete: bool,
     warnings: Vec<String>,
+    /// False: Raw Input lists no keyboard, as in a session born over Remote Desktop (design
+    /// standard-layout D.2). The drivers run as before; only what the caller can see changes.
+    raw_input_listed: bool,
 }
 
 impl FakeDevices {
@@ -751,6 +772,7 @@ impl FakeDevices {
             restarted: Vec::new(),
             incomplete: false,
             warnings: Vec::new(),
+            raw_input_listed: true,
         }
     }
 
@@ -787,6 +809,12 @@ impl FakeDevices {
     /// [`Inventory::warnings`] (names, Raw Input, a `REG_SZ` override…); writes must go on.
     pub fn set_warnings(&mut self, warnings: Vec<String>) {
         self.warnings = warnings;
+    }
+
+    /// False: this session's Raw Input lists none of the keyboards ([`DeviceController`] reports
+    /// no type for any of them), as a session born over Remote Desktop sees the PC's keyboards.
+    pub fn set_raw_input_listed(&mut self, listed: bool) {
+        self.raw_input_listed = listed;
     }
 
     /// Adds a keyboard to the inventory (e.g. a phantom PS/2 keyboard of a dock). Its running
@@ -860,7 +888,7 @@ impl FakeDevices {
             .map(|kb| {
                 let mut kb = kb.clone();
                 kb.overrides = self.registry.device_overrides(&kb.instance_id);
-                kb.reported_type = if kb.present {
+                kb.reported_type = if kb.present && self.raw_input_listed {
                     self.running_type(&kb.instance_id)
                 } else {
                     None
@@ -960,7 +988,7 @@ impl DeviceController for FakeDevices {
         let kb = self
             .find(instance_id)
             .ok_or_else(|| Self::not_found(instance_id))?;
-        if !kb.present {
+        if !kb.present || !self.raw_input_listed {
             return Ok(None);
         }
         Ok(self.running_type(instance_id))
@@ -1043,6 +1071,8 @@ pub struct FakeHost {
     warnings: Vec<String>,
     /// A quarantine moved the recovery files away since the last `take_recovery_assets_moved`.
     assets_moved: bool,
+    /// What [`Host::remote_session`] answers ([`FakeHost::set_remote_session`]).
+    remote: bool,
 }
 
 impl FakeHost {
@@ -1065,6 +1095,7 @@ impl FakeHost {
             missing_system32: Vec::new(),
             warnings: Vec::new(),
             assets_moved: false,
+            remote: false,
         }
     }
 
@@ -1162,6 +1193,11 @@ impl FakeHost {
     /// with a warning (design review C10).
     pub fn set_fail_assets(&mut self, fail: bool) {
         self.fail_assets = fail;
+    }
+
+    /// Makes [`Host::remote_session`] answer `remote` (a request from a Remote Desktop session).
+    pub fn set_remote_session(&mut self, remote: bool) {
+        self.remote = remote;
     }
 
     /// The last recovery files written.
@@ -1263,6 +1299,10 @@ impl Host for FakeHost {
 
     fn take_recovery_assets_moved(&mut self) -> bool {
         std::mem::take(&mut self.assets_moved)
+    }
+
+    fn remote_session(&self) -> bool {
+        self.remote
     }
 }
 

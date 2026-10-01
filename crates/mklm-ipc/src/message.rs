@@ -130,6 +130,7 @@ pub enum HelperMessage {
 pub enum Request {
     SetLayout(SetLayoutRequest),
     Migrate(MigrateRequest),
+    SetStandard(SetStandardRequest),
     Revert {
         op_id: OpId,
         apply: ApplyOptions,
@@ -203,6 +204,16 @@ pub struct RestoreBaselineRequest {
     pub scope: RestoreScope,
     pub on_conflict: ConflictPolicy,
     pub apply: ApplyOptions,
+}
+
+/// Change the standard in per-keyboard mode, preserving followers unless explicitly selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetStandardRequest {
+    pub standard: Layout,
+    pub follow: Vec<String>,
+    pub apply: ApplyOptions,
+    pub expected: Option<ExpectedPlan>,
 }
 
 /// Resolve an operation in `Conflict`. Records without a choice keep their current value.

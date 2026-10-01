@@ -726,4 +726,8 @@ impl Host for TidyingHost {
     fn take_recovery_assets_moved(&mut self) -> bool {
         self.inner.take_recovery_assets_moved()
     }
+
+    fn remote_session(&self) -> bool {
+        self.inner.remote_session()
+    }
 }

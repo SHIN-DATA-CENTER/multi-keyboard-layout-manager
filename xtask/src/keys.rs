@@ -194,8 +194,7 @@ pub fn verify_signer(zip_path: &Path, sig_path: &Path, out: &mut dyn Write) -> a
     Ok(())
 }
 
-/// Extracts the zip with Windows' own `tar.exe` into a fresh temporary folder and hashes the one
-/// `minisign.exe` in it.
+/// Extracts the authenticated official zip and hashes the host architecture's executable.
 fn hash_exe_in_zip(zip_path: &Path) -> anyhow::Result<(Sha256Digest, u64)> {
     let dir = std::env::temp_dir().join(format!(
         "mklm-xtask-verify-signer-{}-{}",
@@ -222,13 +221,25 @@ fn hash_exe_in_zip(zip_path: &Path) -> anyhow::Result<(Sha256Digest, u64)> {
             bail!("{} could not extract {}", tar.display(), zip_path.display());
         }
         let found = find_files(&dir, "minisign.exe")?;
-        let [exe] = found.as_slice() else {
-            bail!("the zip holds {} minisign.exe files, not one", found.len());
-        };
+        let exe = signer_for_arch(&dir, &found, std::env::consts::ARCH)?;
         hash_file(exe)
     })();
     let _ = std::fs::remove_dir_all(&dir);
     result
+}
+
+fn signer_for_arch<'a>(dir: &Path, found: &'a [PathBuf], arch: &str) -> anyhow::Result<&'a Path> {
+    if !matches!(arch, "x86_64" | "aarch64") {
+        bail!("unsupported minisign host architecture: {arch}");
+    }
+    // minisign 0.12's signed win64 archive contains exactly these two binaries.
+    let paths = ["x86_64", "aarch64"]
+        .map(|arch| dir.join("minisign-win64").join(arch).join("minisign.exe"));
+    if found.len() != paths.len() || paths.iter().any(|path| !found.contains(path)) {
+        bail!("unexpected minisign 0.12 archive layout; expected x86_64 and aarch64 binaries");
+    }
+    let expected = dir.join("minisign-win64").join(arch).join("minisign.exe");
+    Ok(found.iter().find(|path| **path == expected).unwrap())
 }
 
 fn find_files(dir: &Path, name: &str) -> anyhow::Result<Vec<PathBuf>> {
@@ -255,6 +266,22 @@ mod tests {
 
     use super::*;
     use crate::testing::{Key, anchors_text};
+
+    #[test]
+    fn official_signer_archive_selects_host_and_rejects_ambiguous_layouts() {
+        let dir = Path::new("verified");
+        let x64 = dir.join("minisign-win64/x86_64/minisign.exe");
+        let arm64 = dir.join("minisign-win64/aarch64/minisign.exe");
+        let found = vec![arm64.clone(), x64.clone()];
+        assert_eq!(signer_for_arch(dir, &found, "x86_64").unwrap(), x64);
+        assert_eq!(signer_for_arch(dir, &found, "aarch64").unwrap(), arm64);
+        assert!(signer_for_arch(dir, &found, "x86").is_err());
+        assert!(signer_for_arch(dir, std::slice::from_ref(&x64), "x86_64").is_err());
+        assert!(signer_for_arch(dir, &[x64.clone(), x64.clone()], "x86_64").is_err());
+        let mut extra = found;
+        extra.push(dir.join("unexpected/minisign.exe"));
+        assert!(signer_for_arch(dir, &extra, "x86_64").is_err());
+    }
 
     /// A repository of tags and their anchors files.
     #[derive(Default)]
@@ -420,11 +447,13 @@ mod tests {
         assert!(verify_zip(b"test", legacy.as_bytes(), MINISIGN_AUTHOR_KEY).is_ok());
     }
 
-    /// A stored (uncompressed) zip with one file, for Windows' tar.
-    fn stored_zip(name: &str, content: &[u8]) -> Vec<u8> {
-        let crc = crc32(content);
+    /// A stored (uncompressed) zip with architecture-specific files, for Windows' tar.
+    fn stored_zip_files(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut zip = Vec::new();
-        let local = |zip: &mut Vec<u8>| {
+        let mut offsets = Vec::new();
+        for &(name, content) in files {
+            let crc = crc32(content);
+            offsets.push(zip.len() as u32);
             zip.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
             zip.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
             zip.extend_from_slice(&crc.to_le_bytes());
@@ -434,21 +463,25 @@ mod tests {
             zip.extend_from_slice(&0u16.to_le_bytes());
             zip.extend_from_slice(name.as_bytes());
             zip.extend_from_slice(content);
-        };
-        local(&mut zip);
+        }
         let central_offset = zip.len() as u32;
-        zip.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-        zip.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        zip.extend_from_slice(&crc.to_le_bytes());
-        zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
-        zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
-        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        zip.extend_from_slice(&[0; 12]);
-        zip.extend_from_slice(&0u32.to_le_bytes());
-        zip.extend_from_slice(name.as_bytes());
+        for (&(name, content), offset) in files.iter().zip(offsets) {
+            let crc = crc32(content);
+            zip.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            zip.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            zip.extend_from_slice(&crc.to_le_bytes());
+            zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            zip.extend_from_slice(&(content.len() as u32).to_le_bytes());
+            zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            zip.extend_from_slice(&[0; 12]);
+            zip.extend_from_slice(&offset.to_le_bytes());
+            zip.extend_from_slice(name.as_bytes());
+        }
         let central_len = zip.len() as u32 - central_offset;
         zip.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-        zip.extend_from_slice(&[0, 0, 0, 0, 1, 0, 1, 0]);
+        zip.extend_from_slice(&[0, 0, 0, 0]);
+        zip.extend_from_slice(&(files.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&(files.len() as u16).to_le_bytes());
         zip.extend_from_slice(&central_len.to_le_bytes());
         zip.extend_from_slice(&central_offset.to_le_bytes());
         zip.extend_from_slice(&0u16.to_le_bytes());
@@ -473,7 +506,16 @@ mod tests {
     #[test]
     fn the_executable_in_the_zip_is_hashed() {
         let content = b"MZ not really minisign".to_vec();
-        let zip = stored_zip("minisign-win64/minisign.exe", &content);
+        let other = b"MZ other architecture";
+        let (x64, arm64): (&[u8], &[u8]) = if std::env::consts::ARCH == "aarch64" {
+            (other, &content)
+        } else {
+            (&content, other)
+        };
+        let zip = stored_zip_files(&[
+            ("minisign-win64/x86_64/minisign.exe", x64),
+            ("minisign-win64/aarch64/minisign.exe", arm64),
+        ]);
         let path = std::env::temp_dir().join(format!("mklm-xtask-test-{}.zip", std::process::id()));
         std::fs::write(&path, &zip).unwrap();
         let result = hash_exe_in_zip(&path);

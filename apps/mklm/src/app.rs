@@ -637,6 +637,19 @@ impl Controller {
             .global::<ui::Modal>()
             .set_open(state.overlay != OverlayKind::None);
         self.render_settings(&state, lang);
+        let standard_entry = vm::standard::entry(&state, lang);
+        self.window.set_standard_visible(standard_entry.visible);
+        self.window.set_standard_enabled(standard_entry.enabled);
+        self.window
+            .set_standard_entry_note(standard_entry.note.into());
+        self.window.set_standard_title(
+            if lang == Lang::Ja {
+                "PC の標準配列を変更…"
+            } else {
+                "Change the PC's standard layout…"
+            }
+            .into(),
+        );
         self.render_change(&state, lang);
         self.render_session(&state, lang);
         self.render_update(&state, lang);
@@ -731,10 +744,58 @@ impl Controller {
     }
 
     /// The change page (design m3 B.4, B.5; WP-U3), also for "今すぐ反映…" (design m3 B.12).
+    fn render_standard(&self, state: &AppState, draft: &state::ChangeDraft, lang: Lang) {
+        let display = state.read.as_ref().and_then(|read| read.snapshot.as_ref());
+        let page = vm::standard::page(
+            draft,
+            display,
+            state.elevated,
+            state.settings.change.uac_notice_seen,
+            lang,
+        );
+        self.window.set_standard_title(page.title.into());
+        self.window.set_standard_note(page.note.into());
+        self.window.set_standard_error(page.error.into());
+        self.window.set_standard_keep_label(page.keep_label.into());
+        self.window
+            .set_standard_reset_label(page.reset_label.into());
+        self.window.set_standard_reset_note(page.reset_note.into());
+        self.window
+            .set_standard_restart_note(page.restart_note.into());
+        self.window.set_standard_details(page.details.into());
+        self.window.set_standard_uac_line(page.uac_line.into());
+        self.window
+            .set_standard_apply_label(page.apply_label.into());
+        self.window.set_standard_ready(page.ready);
+        self.window.set_standard_editable(page.editable);
+        self.window.set_standard_can_reset(page.can_reset);
+        self.window.set_change_standard(page.selected);
+        self.window
+            .set_change_method(if page.reset { 0 } else { 1 });
+        self.window.set_standard_rows(ModelRc::new(VecModel::from(
+            page.rows
+                .into_iter()
+                .map(|row| ui::StandardRowVm {
+                    id: row.id.into(),
+                    text: format!("{}\n{}", row.name, row.text).into(),
+                    keep_label: row.keep_label.into(),
+                    selectable: row.selectable,
+                    keep: row.keep,
+                })
+                .collect::<Vec<_>>(),
+        )));
+    }
+
     fn render_change(&self, state: &AppState, lang: Lang) {
+        self.window
+            .set_standard_mode(state.draft.as_ref().is_some_and(|d| d.standard_change));
         let Some(draft) = &state.draft else {
             return;
         };
+        if draft.standard_change {
+            self.render_standard(state, draft, lang);
+            return;
+        }
         let page = if draft.apply_now {
             let blocked = state
                 .read
@@ -1776,6 +1837,13 @@ fn wire_updates(window: &AppWindow) {
 fn wire_change_flow(window: &AppWindow) {
     let index = |index: i32| usize::try_from(index).ok();
     window.on_assign(|row: SharedString| dispatch(AppMsg::OpenChange(row.to_string())));
+    window.on_open_standard(|| dispatch(AppMsg::OpenStandard));
+    window.on_standard_keep(|id: SharedString, keep| {
+        dispatch(AppMsg::StandardFollow {
+            instance_id: id.to_string(),
+            follow: !keep,
+        })
+    });
     window.on_change_choose(move |i| {
         if let Some(i) = index(i) {
             dispatch(AppMsg::ChangeChoose(i));

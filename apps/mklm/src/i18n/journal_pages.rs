@@ -255,6 +255,8 @@ pub fn check_setting(table: Option<&LayoutTable>, standard: bool, lang: Lang) ->
 /// What Windows reports, in words, against what the stored values predict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recognition {
+    RemoteNotVisible,
+    CannotCheck,
     Matches(KeyboardType),
     Differs(KeyboardType),
     NotConnected,
@@ -268,6 +270,12 @@ pub fn check_recognition(recognition: Recognition, lang: Lang) -> String {
             Lang::En => format!("{} ⚠ differs", reported(ty, lang)),
         },
         Recognition::NotConnected => pick(lang, "未接続", "not connected"),
+        Recognition::RemoteNotVisible => pick(
+            lang,
+            "このリモート デスクトップのセッションからは見えません",
+            "not visible in this Remote Desktop session",
+        ),
+        Recognition::CannotCheck => pick(lang, "確認できません", "cannot be checked"),
     }
 }
 
@@ -969,5 +977,22 @@ pub fn undo_state(state: OpState, lang: Lang) -> String {
     match state {
         OpState::Confirmed => history_kept(lang),
         other => super::state(other, lang),
+    }
+}
+
+pub fn shown_state(state: mklm_client::describe::ShownState, lang: Lang) -> String {
+    use mklm_client::describe::ShownState;
+    match state {
+        ShownState::Stored(state) => undo_state(state, lang),
+        ShownState::RestartedCheckDue => pick(
+            lang,
+            "再起動しました（再起動後の確認を待っています）",
+            "Restarted; waiting for the check after the restart",
+        ),
+        ShownState::RevertedAndRestarted => pick(
+            lang,
+            "元に戻しました（再起動で反映済み）",
+            "Reverted (in effect since the restart)",
+        ),
     }
 }

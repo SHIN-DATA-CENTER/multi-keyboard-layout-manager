@@ -306,7 +306,7 @@ mod tests {
         );
         assert!(
             test.prompt
-                .contains("この PC の前で、この PC につないだキーボードで"),
+                .contains("接続先の PC の前で、そこにつないだキーボードで"),
             "{}",
             test.prompt
         );

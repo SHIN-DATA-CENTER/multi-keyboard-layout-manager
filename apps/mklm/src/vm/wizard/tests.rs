@@ -142,7 +142,7 @@ fn the_remote_desktop_keyboard_is_shown_but_never_planned() {
         row.current == "Input from the client PC"
             && row
                 .note
-                .starts_with("Remote Desktop: keys sent by the PC you connect from.")
+                .starts_with("Remote Desktop: keys sent by the PC you connect from,")
     }));
 }
 

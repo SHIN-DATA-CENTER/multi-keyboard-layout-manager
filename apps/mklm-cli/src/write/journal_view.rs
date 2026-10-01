@@ -13,7 +13,7 @@ use mklm_core::{
 };
 use serde::Serialize;
 
-use super::render::{CurrentValue, entry_line, failure_text, put, records_text, value_text};
+use super::render::{CurrentValue, entry_line_at, failure_text, put, records_text, value_text};
 use crate::text::pending_name_long;
 
 /// Where the journal lives, as shown to the user.
@@ -132,7 +132,7 @@ fn entry_text(
     current: Option<CurrentValue<'_>>,
     time: TimeText<'_>,
 ) {
-    put!(out, "  {}", entry_line(entry));
+    put!(out, "  {}", entry_line_at(entry, boot));
     put!(
         out,
         "      {}  #{}  created {}, updated {}",
@@ -144,12 +144,21 @@ fn entry_text(
     if let Some(boot) = boot
         && let Some(text) = attention_text(attention(entry, boot, liveness(&entry.owner)))
     {
+        let text = if entry.state == mklm_core::OpState::PendingReboot && boot != entry.boot_id {
+            "the PC has restarted: keep or revert with `mklm-cli post-reboot` (or open MKLM)"
+        } else {
+            text
+        };
         put!(out, "      Attention: {text}");
     }
     // What to do only while the entry is open; a closed one says how it applied, which asks for
     // nothing (what is still not in effect has its own lines: `Attention`, `Not in effect yet`).
     if let Some(apply) = entry.apply {
-        if entry.state.is_open() {
+        if entry.state.is_open()
+            && !boot.is_some_and(|b| {
+                b != entry.boot_id && entry.state == mklm_core::OpState::PendingReboot
+            })
+        {
             put!(out, "      Takes effect: {}", pending_name_long(apply));
         } else {
             put!(out, "      Applied by: {}", applied_by(apply));
@@ -163,12 +172,16 @@ fn entry_text(
         );
     }
     if let Some(pending) = &entry.apply_pending {
-        put!(
-            out,
-            "      Not in effect yet for {}: {}",
-            pending.instance_ids.join(", "),
-            pending_name_long(pending.action)
-        );
+        if boot.is_some_and(|b| b != pending.since) {
+            put!(out, "      In effect since the restart");
+        } else {
+            put!(
+                out,
+                "      Not in effect yet for {}: {}",
+                pending.instance_ids.join(", "),
+                pending_name_long(pending.action)
+            );
+        }
     }
     for line in records_text(entry, current).lines() {
         put!(out, "    {line}");
@@ -212,6 +225,7 @@ pub struct EntryDocument<'a> {
     pub entry: &'a JournalEntry,
     /// `mklm_core::attention` for this boot; `null` when the boot ID could not be read.
     pub attention: Option<Attention>,
+    pub shown: mklm_client::describe::ShownState,
 }
 
 #[derive(Debug, Serialize)]
@@ -234,6 +248,7 @@ pub fn journal_document<'a>(
             .iter()
             .map(|entry| EntryDocument {
                 entry,
+                shown: mklm_client::describe::shown_state(entry, boot),
                 attention: boot.map(|boot| attention(entry, boot, liveness(&entry.owner))),
             })
             .collect(),
@@ -567,11 +582,9 @@ mod tests {
         assert!(text.contains("(reverted)"), "{text}");
         assert!(!text.contains("Attention"), "{text}");
         let text = text_of(OpState::PendingReboot);
-        assert!(
-            text.contains("      Takes effect: restart the PC (Restart, not Shut down)\n"),
-            "{text}"
-        );
-        assert!(!text.contains("Applied by"), "{text}");
+        assert!(text.contains("      Applied by: a PC restart\n"), "{text}");
+        assert!(text.contains("restarted; waiting for the check"), "{text}");
+        assert!(!text.contains("Takes effect"), "{text}");
         assert_eq!(applied_by(PendingAction::ResetKeyboard), "a keyboard reset");
         assert_eq!(
             applied_by(PendingAction::Reconnect),

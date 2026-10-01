@@ -31,7 +31,7 @@ JIS 配列（日本語 106/109）と US 配列（英語 101/104）の物理キ�
 | 再起動が必要 | 内蔵の PS/2 キーボードの変更と、PC 全体の設定の変更（Windows の仕様） |
 | できない | 英語（US）の入力方式に切り替えている間のキーボードごとの配列。すべてのキーボードが US になる |
 | できない | Logicool の Unifying / Bolt レシーバーや KVM につないだ複数のキーボードの区別。1 台として扱われる |
-| できない | リモートデスクトップの接続先で、キーボードごとに配列を変えること。接続中のキーは接続元の PC から届き、キー配列はセッションが始まったときに決まる（再起動を待つ変更は、再起動して新しくサインインするまで反映されない）。英数キーで日本語入力が切り替わらないときは Shift+英数 や Alt+半角/全角 が使える（[docs/research/rdp-keyboard.md](docs/research/rdp-keyboard.md)） |
+| できない | RDP 内で接続元のキーボードごとに配列を分けること。RDP のセッションは 1 つのキー配列で入力される。接続先の標準配列と接続元の報告のどちらで決まるか、変更がいつ反映されるかは未確認。英数が効かない場合は接続先の IME で Ctrl+Space の割り当てを試す（[調査](docs/research/rdp-keyboard.md)、[連携の設計](docs/design/rdp-link.md)） |
 
 ## 今の状態
 
@@ -91,6 +91,7 @@ cargo build --release
 |---|---|
 | `mklm-cli set <キーボード> --layout jis\|us\|standard` | キーボードに配列を割り当てる（`standard` は PC の標準配列に従う。外付けのキーボードだけ） |
 | `mklm-cli migrate [--standard jis\|us] [--also <キーボード>=<配列>]...` | 固定モード（すべてのキーボードが同じ配列）から、キーボードごとモードへ移行する。PC の再起動が 1 回必要 |
+| `mklm-cli standard jis\|us [--follow <キーボード>]... [--dry-run]` | キーボードごとモードのまま PC の標準配列を変える（v0.2.0 向け）。標準に従うキーボードは、指定したものだけ新しい標準に従い、ほかは今の配列に固定する。PC の再起動が必要 |
 | `mklm-cli undo` | 確認待ち、再起動待ち、衝突の変更をまとめて取り消す。**困ったときに最初に使うコマンド** |
 | `mklm-cli revert <操作 ID>` | 操作を 1 つ取り消す |
 | `mklm-cli restore --baseline (--all \| <キーボード>)` | MKLM を使う前の値に戻す |
@@ -100,7 +101,7 @@ cargo build --release
 | `mklm-cli reboot` | 変更を反映するために PC を再起動する |
 
 - `<キーボード>` はインスタンス ID か、`mklm-cli list` の行番号 `#n`。インスタンス ID には `&` が入るので、引用符で囲む。PowerShell では `#` が注釈の始まりになるので、`"#2"` のように囲む。
-- キーボードをリセットし得るコマンドには、`--other-input`（別のキーボードかマウスで操作できる。リセットしてよい）か `--no-reset`（リセットしない。再接続か再起動で反映する）を付けられる。どちらもなければ、必要になった時点で尋ねる。`set` と `restore` で `--yes`（確認を省く）を使うときは、どちらかが必須。
+- キーボードをリセットし得るコマンドには、`--other-input`（別のキーボードかマウスで操作できる。リセットしてよい）か `--no-reset`（リセットしない。再接続か再起動で反映する）を付けられる。どちらもなければ、必要になった時点で尋ねる。`set`、`standard`、`restore` で `--yes`（確認を省く）を使うときは、どちらかが必須。`--yes` では行番号 `#n` を使わず、インスタンス ID を指定する。
 - USB キーボードをその場でリセットした場合は、リセットの後に 20 秒のカウントダウンが始まる。Shift+2 を打って確かめ（JIS なら `"`、US なら `@`）、`y` で確定する。答えなければ自動で元に戻す。
 - 終了コード: 0 完了、1 失敗、2 使い方の誤り、3 取り消した、4 自動で元に戻した、5 衝突、6 止められた、10 再接続を待っている、3010 PC の再起動が必要。
 
@@ -120,6 +121,24 @@ mklm-cli reboot
 
 再起動してサインインすると確認画面（`mklm-cli post-reboot`）が開くので、Shift+2 で確かめてから答える。
 
+### PC の標準配列を変える（v0.2.0 向け）
+
+GUI では、キーボード一覧の［PC の標準配列を変更…］を開く。CLI では、まず下見を確認してから変更する。
+
+```bat
+mklm-cli standard jis --dry-run
+mklm-cli standard jis --no-reset
+mklm-cli reboot
+```
+
+今まで標準に従っていたキーボードは、既定では今の配列に固定され、再起動後もその配列を保つ。新しい標準に従わせたいものだけ GUI で選ぶか、CLI で `--follow "<インスタンス ID>"` を付ける（複数指定可）。割り当て済みのキーボードの配列は、この操作では変えない。
+
+変更後は、サインアウト・ユーザーの切り替え・シャットダウンではなく、**PC を再起動する**。再起動前に新しくサインインすると、配列が早めに変わる可能性がある（実機では未確認）。PIN など別のサインイン方法を用意する。取り消す場合は `mklm-cli undo`（確定後は `mklm-cli revert <操作 ID>`）を実行して再起動する。標準配列を含む変更の取り消しでは、`--other-input` があってもキーボードをその場でリセットしない。
+
+RDP で MKLM を開いた場合は、**接続先の PC** の設定を変える。セッションの配列を直接指定する機能ではなく、接続元の JIS と US をセッション内で使い分ける機能もない。標準配列と接続元の報告がセッションの配列をどう決めるか、いつ反映されるかは未確認。[RDP 連携の設計](docs/design/rdp-link.md)と[復旧ガイド](docs/recovery.md)を参照。
+
+この作業ツリーの v0.2.0 向け実装・自動検査と、未実施の実機検証は[検査記録](docs/design/v0.2.0-checks.md)で区別している。v0.2.0 は未公開で、workspace の版は 0.1.0 のまま。
+
 ## 困ったとき
 
 1. `mklm-cli undo` を実行し、PC を**再起動**する。
@@ -133,6 +152,8 @@ mklm-cli reboot
 | [docs/recovery.md](docs/recovery.md) | 復旧ガイド（日本語）。サインインできない、配列がおかしい、などのときの戻し方 |
 | [docs/install-guide.ja.md](docs/install-guide.ja.md) | インストール、自動更新、手での署名の確かめ方、終了コード |
 | [docs/design/m2-engine.md](docs/design/m2-engine.md) | M2 の設計（書き込み、ジャーナル、回復、helper との通信、CLI） |
+| [docs/design/standard-layout.md](docs/design/standard-layout.md) | 標準配列の変更、再起動後の確認と安全性、公開前の実機確認 |
+| [docs/design/rdp-link.md](docs/design/rdp-link.md) | RDP 連携の設計と未確認事項。試作は今回の範囲外 |
 | [docs/design/m5b-updater.md](docs/design/m5b-updater.md) | M5b の設計（自動更新、署名、検証、インストールの流れ） |
 | [docs/maintainer/release-signing.ja.md](docs/maintainer/release-signing.ja.md) | メンテナー向け: 鍵、署名、公開、鍵の点検、事故の対応 |
 | [docs/research/m0-results.md](docs/research/m0-results.md) | M0 の実機での検証結果 |
@@ -174,7 +195,7 @@ Today this means hand-editing the registry (each device's `Device Parameters` an
 | Needs a restart | Changes to a built-in PS/2 keyboard and to PC-wide settings (a Windows limitation) |
 | Cannot | Per-keyboard layouts while the English (US) input method is active; every keyboard is US then |
 | Cannot | Tell apart several keyboards behind one Logitech Unifying / Bolt receiver or a KVM; they count as one |
-| Cannot | Per-keyboard layouts inside a Remote Desktop session. Keys there come from the client PC, with a key table fixed when the session starts (a change that waits for a restart reaches Remote Desktop only after the restart and a new sign-in). If the 英数 key does not switch Japanese input there, Shift+英数 and Alt+半角/全角 work ([docs/research/rdp-keyboard.md](docs/research/rdp-keyboard.md), Japanese) |
+| Cannot | Give each client keyboard its own layout inside one Remote Desktop session. How the host standard and client report determine the session layout, and when a change reaches it, remain unverified. For IME switching, try assigning Ctrl+Space in the host IME ([research](docs/research/rdp-keyboard.md), [integration design](docs/design/rdp-link.md), Japanese) |
 
 ### Status
 
@@ -233,6 +254,7 @@ A write command shows a UAC prompt and starts `mklm-helper.exe`. Before writing 
 |---|---|
 | `mklm-cli set <keyboard> --layout jis\|us\|standard` | Assign a layout to a keyboard (`standard` follows the PC's standard layout; external keyboards only) |
 | `mklm-cli migrate [--standard jis\|us] [--also <keyboard>=<layout>]...` | Switch from fixed mode (every keyboard has the same layout) to per-keyboard mode; needs one PC restart |
+| `mklm-cli standard jis\|us [--follow <keyboard>]... [--dry-run]` | Change the PC's standard in per-keyboard mode (for v0.2.0); only selected followers change with it, while others keep their layout. Requires a PC restart |
 | `mklm-cli undo` | Undo every change that waits for a confirmation, a restart, or a conflict decision. **The first command to try when something is wrong** |
 | `mklm-cli revert <op>` | Undo one operation |
 | `mklm-cli restore --baseline (--all \| <keyboard>)` | Put back the values from before MKLM |
@@ -242,7 +264,7 @@ A write command shows a UAC prompt and starts `mklm-helper.exe`. Before writing 
 | `mklm-cli reboot` | Restart the PC to apply pending changes |
 
 - `<keyboard>` is an instance ID or `#n`, the row number in `mklm-cli list`. Instance IDs contain `&`, so quote them. In PowerShell `#` starts a comment, so write `"#2"`.
-- Commands that may reset a keyboard accept `--other-input` (you have another keyboard or a mouse; a reset is fine) or `--no-reset` (never reset; apply on reconnect or restart). With neither, the CLI asks when a reset becomes necessary. `set` and `restore` require one of them with `--yes` (which skips the confirmation).
+- Commands that may reset a keyboard accept `--other-input` (you have another keyboard or a mouse; a reset is fine) or `--no-reset` (never reset; apply on reconnect or restart). With neither, the CLI asks when a reset becomes necessary. `set`, `standard` and `restore` require one of them with `--yes` (which skips the confirmation). With `--yes`, use instance IDs instead of `#n` row numbers.
 - When a USB keyboard is reset in place, a 20-second countdown starts after the reset. Type Shift+2 to check (`"` means JIS, `@` means US) and answer `y` to keep it. Without an answer it is reverted automatically.
 - Exit codes: 0 done, 1 failed, 2 usage error, 3 cancelled, 4 reverted automatically, 5 conflict, 6 blocked, 10 waiting for a reconnect, 3010 a PC restart is needed.
 
@@ -262,6 +284,22 @@ mklm-cli reboot
 
 After the restart and sign-in, a confirmation (`mklm-cli post-reboot`) opens; check with Shift+2 before answering.
 
+#### Changing the PC's standard layout (for v0.2.0)
+
+Open "Change the PC's standard layout…" on the GUI keyboard list, or preview and apply it with the CLI:
+
+```bat
+mklm-cli standard jis --dry-run
+mklm-cli standard jis --no-reset
+mklm-cli reboot
+```
+
+Existing followers are assigned their current layout by default so they keep it after the restart. Select only those that should follow the new standard in the GUI, or repeat `--follow "<instance ID>"` in the CLI. Already assigned keyboards keep their assignments.
+
+**Restart the PC** after applying; do not sign out, switch users, or shut down in its place. Signing in again before restarting may change the layout early (not yet verified on real hardware). Have another sign-in method, such as a PIN, ready. To undo, use `mklm-cli undo` (or `mklm-cli revert <op>` after keeping it), then restart. Reverting a change that includes global settings does not reset keyboards live, even with `--other-input`.
+
+In RDP, MKLM changes settings on **the PC you connect to**. This does not directly select the session layout or provide separate JIS and US input within that session. How the host standard and client report determine the session layout, and when a change reaches it, remain unverified. See the [RDP integration design](docs/design/rdp-link.md) and [recovery guide](docs/recovery.md) (Japanese).
+
 ### When something goes wrong
 
 1. Run `mklm-cli undo`, then **restart** the PC.
@@ -275,6 +313,8 @@ After the restart and sign-in, a confirmation (`mklm-cli post-reboot`) opens; ch
 | [docs/recovery.md](docs/recovery.md) | Recovery guide (Japanese): what to do when you cannot sign in or a layout is wrong |
 | [docs/install-guide.ja.md](docs/install-guide.ja.md) | Installing, automatic updates, verifying signatures by hand, exit codes (English summary at the end) |
 | [docs/design/m2-engine.md](docs/design/m2-engine.md) | M2 design (Japanese): writes, journal, recovery, helper protocol, CLI |
+| [docs/design/standard-layout.md](docs/design/standard-layout.md) | Standard layout changes, restart confirmation and required hardware checks (Japanese) |
+| [docs/design/rdp-link.md](docs/design/rdp-link.md) | RDP integration design and open questions; prototyping is outside this change (Japanese) |
 | [docs/design/m5b-updater.md](docs/design/m5b-updater.md) | M5b design (Japanese): automatic updates, signatures, verification, the install flow |
 | [docs/maintainer/release-signing.ja.md](docs/maintainer/release-signing.ja.md) | For the maintainer (Japanese): keys, signing, publishing, key drills, incidents |
 | [docs/research/m0-results.md](docs/research/m0-results.md) | M0 results on real hardware (Japanese) |

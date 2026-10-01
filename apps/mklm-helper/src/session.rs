@@ -6,7 +6,7 @@ use mklm_core::OperationResult;
 use mklm_engine::{
     CleanupParams, DeviceController, Engine, EngineError, EventSink, Host, MachineSettingsParams,
     MigrateParams, RegistryBackend, ResolveParams, RestoreBaselineParams, RestoreMode,
-    SetLayoutParams,
+    SetLayoutParams, SetStandardParams,
 };
 use mklm_ipc::{Request, command_line_tail};
 
@@ -44,6 +44,15 @@ where
                     .iter()
                     .map(|a| (a.instance_id.clone(), a.layout))
                     .collect(),
+                expected: request.expected.clone(),
+            },
+            sink,
+        ),
+        Request::SetStandard(request) => engine.set_standard(
+            &SetStandardParams {
+                standard: request.standard,
+                follow: request.follow.clone(),
+                apply: request.apply,
                 expected: request.expected.clone(),
             },
             sink,

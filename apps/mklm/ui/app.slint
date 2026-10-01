@@ -13,6 +13,7 @@ import {
 } from "structs.slint";
 import { UpdateHandOffDialog, UpdateResultDialog, UpdateScreen } from "screens/update.slint";
 import { MainScreen } from "screens/main.slint";
+import { StandardScreen, StandardRowVm } from "screens/standard.slint";
 import { WizardScreen } from "screens/wizard.slint";
 import { ChangeScreen, UacNoticeScreen } from "screens/change.slint";
 import {
@@ -107,6 +108,26 @@ export component AppWindow inherits Window {
     in property <string> identify-announcement;
     in-out property <bool> show-hidden;
     callback assign(string);
+    callback open-standard();
+    callback standard-keep(string, bool);
+    in property <bool> standard-mode;
+    in property <string> standard-title;
+    in property <string> standard-note;
+    in property <string> standard-error;
+    in property <string> standard-keep-label;
+    in property <string> standard-reset-label;
+    in property <string> standard-apply-label;
+    in property <[StandardRowVm]> standard-rows;
+    in property <bool> standard-ready;
+    in property <bool> standard-can-reset;
+    in property <bool> standard-visible;
+    in property <bool> standard-enabled;
+    in property <string> standard-entry-note;
+    in property <bool> standard-editable;
+    in property <string> standard-reset-note;
+    in property <string> standard-restart-note;
+    in property <string> standard-details;
+    in property <string> standard-uac-line;
     callback apply-now(string);
     callback toggle-hidden(string);
     callback show-hidden-toggled(bool);
@@ -356,6 +377,11 @@ export component AppWindow inherits Window {
             accessible-role: AccessibleRole.main;
 
             if root.screen == Screen.main: MainScreen {
+                standard-label: root.standard-title;
+                standard-visible: root.standard-visible;
+                standard-enabled: root.standard-enabled;
+                standard-note: root.standard-entry-note;
+                open-standard => { root.open-standard(); }
                 status: root.status;
                 keyboards: root.keyboards;
                 identify-active: root.identify-active;
@@ -430,7 +456,30 @@ export component AppWindow inherits Window {
                     root.wizard-use-detected();
                 }
             }
-            if root.screen == Screen.change: ChangeScreen {
+            if root.screen == Screen.change && root.standard-mode: StandardScreen {
+                title: root.standard-title;
+                note: root.standard-note;
+                error: root.standard-error;
+                keep-label: root.standard-keep-label;
+                reset-label: root.standard-reset-label;
+                apply-label: root.standard-apply-label;
+                rows: root.standard-rows;
+                selected: root.change-standard;
+                reset: root.change-method == 0;
+                can-reset: root.standard-can-reset;
+                ready: root.standard-ready;
+                editable: root.standard-editable;
+                reset-note: root.standard-reset-note;
+                restart-note: root.standard-restart-note;
+                details: root.standard-details;
+                uac-line: root.standard-uac-line;
+                choose(index) => { root.change-choose-standard(index); }
+                keep(id, keep) => { root.standard-keep(id, keep); }
+                reset-changed(reset) => { root.change-choose-method(reset ? 0 : 1); }
+                apply => { root.change-apply(); }
+                cancel => { root.cancel-change(); }
+            }
+            if root.screen == Screen.change && !root.standard-mode: ChangeScreen {
                 keyboard-name: root.change-keyboard-name;
                 choices: root.change-choices;
                 method-choices: root.change-method-choices;

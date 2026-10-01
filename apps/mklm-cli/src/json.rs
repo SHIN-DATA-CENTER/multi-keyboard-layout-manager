@@ -23,6 +23,71 @@ pub struct StatusDocument<'a> {
     pub assessment: &'a Assessment,
     /// Non-fatal read failures. Anything about to write must stop while this is non-empty.
     pub issues: &'a [Issue],
+    pub journal: Vec<JournalStatus>,
+    pub journal_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JournalStatus {
+    pub op_id: mklm_core::OpId,
+    pub state: mklm_core::OpState,
+    pub shown: mklm_client::describe::ShownState,
+    pub attention: Option<mklm_core::Attention>,
+}
+
+pub fn journal_status(
+    journal: &mklm_core::Journal,
+    boot: Option<mklm_core::BootId>,
+) -> Vec<JournalStatus> {
+    journal
+        .entries
+        .iter()
+        .map(|entry| JournalStatus {
+            op_id: entry.op_id.clone(),
+            state: entry.state,
+            shown: mklm_client::describe::shown_state(entry, boot),
+            attention: boot.map(|boot| {
+                mklm_core::attention(entry, boot, mklm_client::journal::liveness(&entry.owner))
+            }),
+        })
+        .collect()
+}
+
+pub fn journal_note(rows: &[JournalStatus], error: Option<&str>) -> String {
+    if let Some(error) = error {
+        return format!("Journal: could not be read ({error})\n");
+    }
+    let waiting: Vec<_> = rows
+        .iter()
+        .filter_map(|row| {
+            use mklm_client::describe::ShownState;
+            let text = match row.shown {
+                ShownState::RestartedCheckDue => {
+                    "waits for the check after the restart (`mklm-cli post-reboot`, or open MKLM)"
+                }
+                ShownState::RevertedAndRestarted => return None,
+                _ => match row.attention {
+                    Some(mklm_core::Attention::None) => return None,
+                    Some(mklm_core::Attention::WaitingForReboot) => "waits for a PC restart",
+                    Some(mklm_core::Attention::Recover) => "needs recovery (`mklm-cli recover`)",
+                    Some(mklm_core::Attention::AwaitingUser) => "waits for keep or revert",
+                    Some(mklm_core::Attention::Conflict) => "is in conflict",
+                    Some(mklm_core::Attention::Busy) => "is being processed",
+                    Some(mklm_core::Attention::NeedsApply) => "waits to be put into effect",
+                    None => "has an unknown current state (boot ID unavailable)",
+                },
+            };
+            Some(format!("{} {text}", row.op_id.short()))
+        })
+        .collect();
+    format!(
+        "Journal: {}\n",
+        if waiting.is_empty() {
+            "nothing waits".into()
+        } else {
+            waiting.join("; ")
+        }
+    )
 }
 
 /// `global status --json`: the global values and the input methods, without keyboards.
@@ -83,6 +148,42 @@ fn escape_non_ascii(json: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn journal_summary_and_json_preserve_stored_states_after_restarting() {
+        use mklm_core::{BootId, Journal, OpState, fixtures};
+        let (ops, baselines) = fixtures::schema_1_journal();
+        let mut journal = Journal::parse(&ops, &baselines);
+        journal.entries.truncate(1);
+        let boot = journal.entries[0].boot_id;
+        for state in [OpState::PendingReboot, OpState::RevertedPendingReboot] {
+            journal.entries[0].state = state;
+            let rows = journal_status(&journal, Some(BootId(boot.0 + 1)));
+            let value = serde_json::to_value(&rows).unwrap();
+            assert_eq!(value[0]["state"], serde_json::to_value(state).unwrap());
+            assert_eq!(
+                value[0]["shown"]["kind"],
+                if state == OpState::PendingReboot {
+                    "restarted-check-due"
+                } else {
+                    "reverted-and-restarted"
+                }
+            );
+            let note = journal_note(&rows, None);
+            if state == OpState::PendingReboot {
+                assert!(note.contains("post-reboot"));
+                assert!(!note.contains("waits for a PC restart"));
+            } else {
+                assert_eq!(note, "Journal: nothing waits\n");
+            }
+            let same_boot = journal_status(&journal, Some(boot));
+            assert_eq!(
+                same_boot[0].shown,
+                mklm_client::describe::ShownState::Stored(state)
+            );
+        }
+        assert!(journal_note(&[], Some("denied")).contains("could not be read (denied)"));
+    }
 
     #[test]
     fn ascii_escaping_round_trips() {

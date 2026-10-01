@@ -545,6 +545,7 @@ pub fn journal_view(state: &AppState, time_text: &dyn Fn(Timestamp) -> String) -
     let summary = read.map(|read| read.summary.clone()).unwrap_or_default();
     history::journal_page(
         read.and_then(|read| read.journal.as_ref()),
+        read.and_then(|read| read.boot),
         &summary,
         time_text,
         &|id| display_name(state, id),
@@ -673,7 +674,7 @@ fn recovery_page_of(state: &AppState, time_text: &dyn Fn(Timestamp) -> String) -
             let journal = journal.unwrap_or(&empty);
             let current = |record: &ValueRecord| current_of(state, record);
             let preview = undo_preview(journal, &current);
-            recovery::undo_page(&preview, &name_of, live, lang)
+            recovery::undo_page_at(&preview, &name_of, live, lang, read.and_then(|r| r.boot))
         }
         RecoveryMode::Revert => {
             let entry = state
@@ -686,7 +687,15 @@ fn recovery_page_of(state: &AppState, time_text: &dyn Fn(Timestamp) -> String) -
                 !reverts_blocked(state) && history::revertible(journal, entry)
             });
             let when = entry.map_or_else(String::new, |entry| time_text(entry.created_at));
-            recovery::revert_page(entry, revertible, &when, &name_of, live, lang)
+            recovery::revert_page_at(
+                entry,
+                revertible,
+                &when,
+                &name_of,
+                live,
+                lang,
+                read.and_then(|r| r.boot),
+            )
         }
     }
 }

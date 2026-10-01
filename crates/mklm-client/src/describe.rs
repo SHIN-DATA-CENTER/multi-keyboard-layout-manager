@@ -8,6 +8,25 @@
 
 use mklm_core::{JournalEntry, OpState};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "state", rename_all = "kebab-case")]
+pub enum ShownState {
+    Stored(OpState),
+    RestartedCheckDue,
+    RevertedAndRestarted,
+}
+
+pub fn shown_state(entry: &JournalEntry, boot: Option<mklm_core::BootId>) -> ShownState {
+    if boot.is_some_and(|boot| boot != entry.boot_id) {
+        match entry.state {
+            OpState::PendingReboot => return ShownState::RestartedCheckDue,
+            OpState::RevertedPendingReboot => return ShownState::RevertedAndRestarted,
+            _ => {}
+        }
+    }
+    ShownState::Stored(entry.state)
+}
+
 /// Whether the operation got as far as resetting the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResetPhase {
@@ -42,6 +61,38 @@ pub fn reset_phase_from(from: OpState) -> ResetPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_display_is_read_only_and_requires_a_known_different_boot() {
+        let (ops, baselines) = mklm_core::fixtures::schema_1_journal();
+        let mut entry = mklm_core::Journal::parse(&ops, &baselines)
+            .entries
+            .remove(0);
+        for state in [
+            OpState::PendingReboot,
+            OpState::RevertedPendingReboot,
+            OpState::Confirmed,
+            OpState::Conflict,
+        ] {
+            entry.state = state;
+            let before = entry.to_json().unwrap();
+            assert_eq!(shown_state(&entry, None), ShownState::Stored(state));
+            assert_eq!(
+                shown_state(&entry, Some(entry.boot_id)),
+                ShownState::Stored(state)
+            );
+            let expected = match state {
+                OpState::PendingReboot => ShownState::RestartedCheckDue,
+                OpState::RevertedPendingReboot => ShownState::RevertedAndRestarted,
+                _ => ShownState::Stored(state),
+            };
+            assert_eq!(
+                shown_state(&entry, Some(mklm_core::BootId(entry.boot_id.0 + 1))),
+                expected
+            );
+            assert_eq!(entry.to_json().unwrap(), before);
+        }
+    }
 
     #[test]
     fn phases_from_states() {

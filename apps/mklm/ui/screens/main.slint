@@ -228,6 +228,11 @@ component KeyboardRow inherits Rectangle {
 // The page. The root only collects keys its parts do not use: F5 reads everything again (design
 // m3 E.1). It never takes the focus itself.
 export component MainScreen inherits FocusScope {
+    in property <string> standard-label;
+    in property <bool> standard-visible;
+    in property <bool> standard-enabled;
+    in property <string> standard-note;
+    callback open-standard();
     in property <StatusVm> status;
     in property <[KeyboardRowVm]> keyboards;
     in property <bool> identify-active;
@@ -272,6 +277,8 @@ export component MainScreen inherits FocusScope {
         PageHeader {
             title: @tr("Keyboards");
         }
+        if root.standard-visible: Button { text: root.standard-label; enabled: root.standard-enabled; clicked => { root.open-standard(); } }
+        Body { text: root.standard-note; }
 
         // The status line (plan 3.2): input method, mode, standard layout, sign-in screen, in
         // four columns of equal width whose values wrap.

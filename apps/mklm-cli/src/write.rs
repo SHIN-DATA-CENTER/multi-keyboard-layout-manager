@@ -202,7 +202,7 @@ impl FromStr for AlsoArg {
 /// end with a live reset (design review C9). Neither flag: the CLI asks; with `--yes` (where
 /// allowed) and neither flag, nothing is reset.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Args)]
-#[group(id = "reset_choice", multiple = true)]
+#[group(id = "reset_choice", multiple = false)]
 pub struct ApplyArgs {
     /// Never reset a keyboard in place; apply on reconnect or PC restart instead.
     #[arg(long)]
@@ -281,6 +281,31 @@ pub struct RecoverArgs {
     /// helper is not started.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// `mklm-cli migrate`.
+#[derive(Debug, Clone, Args)]
+pub struct StandardArgs {
+    #[arg(value_enum)]
+    pub standard: StandardArg,
+    /// Keyboards to switch with the standard; all other followers keep their layout.
+    #[arg(long, value_name = "KEYBOARD")]
+    pub follow: Vec<KeyboardRef>,
+    #[command(flatten)]
+    pub apply: ApplyArgs,
+    #[arg(long, requires = "reset_choice")]
+    pub yes: bool,
+    /// Preview only; never starts the helper or writes settings.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+pub fn standard(args: &StandardArgs) -> Result<i32> {
+    if let Err(message) = target::check_yes_with_rows(args.yes, args.follow.iter()) {
+        eprintln!("error: {message}");
+        return Ok(exit_code::USAGE);
+    }
+    platform::standard(args)
 }
 
 /// `mklm-cli migrate`.
@@ -424,6 +449,9 @@ mod platform {
         unsupported()
     }
     pub fn migrate(_: &MigrateArgs) -> Result<i32> {
+        unsupported()
+    }
+    pub fn standard(_: &super::StandardArgs) -> Result<i32> {
         unsupported()
     }
     pub fn revert(_: &RevertArgs) -> Result<i32> {

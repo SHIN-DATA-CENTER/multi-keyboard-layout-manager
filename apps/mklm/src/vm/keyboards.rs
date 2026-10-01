@@ -150,7 +150,7 @@ pub fn keyboard_rows(
             .find(|(kb, _)| kb.present)
             .unwrap_or(members[0]);
         // The keys the Remote Desktop client sends (plan 3.2: read-only). Its row names no
-        // layout: the session types with the table it started with, which MKLM cannot read.
+        // layout: MKLM cannot read the session's key table or its selection timing.
         let remote = kb.is_remote_desktop();
         let read_only = remote
             || kb.transport == Transport::Virtual
@@ -165,7 +165,21 @@ pub fn keyboard_rows(
             (Some(layout), false) => i18n::effective(layout, lang),
             (None, false) => "—".to_string(),
         };
-        let pending_action = members.iter().filter_map(|(_, ka)| ka.pending_action).max();
+        let standard_wait = options.restart.standard_changed
+            && members.iter().any(|(_, ka)| {
+                ka.current
+                    .as_ref()
+                    .is_some_and(|layout| layout.basis == LayoutBasis::Standard)
+                    || ka
+                        .after_restart
+                        .as_ref()
+                        .is_some_and(|layout| layout.basis == LayoutBasis::Standard)
+            });
+        let pending_action = if standard_wait {
+            Some(mklm_core::PendingAction::RestartPc)
+        } else {
+            members.iter().filter_map(|(_, ka)| ka.pending_action).max()
+        };
         // Not in effect yet, and the journal waits for the restart: that is what puts it into
         // effect, whatever the device would allow (the banner says the same).
         let pending_action = pending_action.map(|action| {
@@ -202,10 +216,26 @@ pub fn keyboard_rows(
             .unwrap_or_default();
         let (current, current_tone) = if remote && kb.present {
             (i18n::remote_current(lang), Tone::Neutral)
+        } else if kb.present && ka.reported_type.is_none() && snapshot.os.remote_session {
+            (i18n::remote_not_visible(lang), Tone::Neutral)
+        } else if kb.present && standard_wait {
+            (
+                if lang == Lang::Ja {
+                    "標準配列は再起動後に打鍵で確認してください"
+                } else {
+                    "Check the standard layout by typing after restarting"
+                }
+                .into(),
+                Tone::Neutral,
+            )
         } else {
             current_state(ka, kb.present, lang)
         };
-        let physical_note = physical_note(options.settings, &members, ka, lang);
+        let physical_note = if standard_wait {
+            String::new()
+        } else {
+            physical_note(options.settings, &members, ka, lang)
+        };
         let mut badges = Vec::new();
         let mut badge = |kind, tone| badges.push(super::Badge::new(kind, tone, lang));
         if highlighted {
@@ -491,7 +521,7 @@ pub fn main_screen(input: &MainInput<'_>) -> MainScreen {
     let assessment = assess(input.snapshot);
     let needs_apply = main_needs_apply(input);
     let blocked = blocked_reason(input.summary, lang);
-    let status = status_line(
+    let mut status = status_line(
         &assessment,
         &input.snapshot.input,
         input.active_hkl,
@@ -503,6 +533,12 @@ pub fn main_screen(input: &MainInput<'_>) -> MainScreen {
         .journal
         .map(|(journal, boot)| restart_waits(journal, boot))
         .unwrap_or_default();
+    if restart.standard_changed {
+        status.standard = match lang {
+            Lang::Ja => format!("{}（保存済み、再起動後に確認）", status.standard),
+            Lang::En => format!("{} (saved; check after restarting)", status.standard),
+        };
+    }
     let rows = keyboard_rows(
         input.snapshot,
         &assessment,
@@ -970,6 +1006,64 @@ mod tests {
         "VXE R1SE+",
         "X3-5.4 Mouse",
     ];
+
+    #[test]
+    fn standard_forward_and_revert_wait_only_for_following_tables_in_the_same_boot() {
+        use mklm_core::{Layout, OpKind, OpState, RegValue, ValueRecord, WriteTarget, value_names};
+        for state in [OpState::PendingReboot, OpState::RevertedPendingReboot] {
+            let mut entry = keychron_entry("pending-reboot", "null");
+            entry.state = state;
+            entry.kind = OpKind::SetStandard {
+                from: Layout::Jis,
+                to: Layout::Us,
+                keyboards: vec![],
+            };
+            let before = RegValue::Sz {
+                value: "kbd106.dll".into(),
+            };
+            let intended = RegValue::Sz {
+                value: "kbd101.dll".into(),
+            };
+            entry.records = vec![ValueRecord {
+                target: WriteTarget::Global,
+                key_path: String::new(),
+                name: value_names::LAYER_DRIVER_JPN.into(),
+                baseline: before.clone(),
+                before,
+                intended,
+                last_written: None,
+                conflict: None,
+                resolve_to: None,
+                write_error: None,
+                skipped: None,
+            }];
+            let mut snapshot = fixtures::dev_machine();
+            if state == OpState::PendingReboot {
+                snapshot.global.layer_driver_jpn = Some("kbd101.dll".into());
+                snapshot.global.override_keyboard_identifier = Some("PCAT_101KEY".into());
+            }
+            let mut scene = Scene::new(snapshot, vec![entry]);
+            let screen = scene.screen(Lang::Ja);
+            assert!(screen.status.standard.contains("保存済み"));
+            let following = screen.rows.iter().find(|r| r.name == "VXE R1SE+").unwrap();
+            assert!(following.pending.contains("再起動"));
+            assert!(following.current.contains("打鍵"));
+            let assigned = screen
+                .rows
+                .iter()
+                .find(|r| r.name == "Keychron Receiver")
+                .unwrap();
+            assert!(assigned.pending.is_empty());
+            assert!(!assigned.current.contains("打鍵"));
+            scene.boot = BootId(scene.boot.0 + 1);
+            scene.summary = mklm_client::startup::summarize(&scene.journal, scene.boot, &|_| {
+                mklm_core::Liveness::Dead
+            });
+            let later = scene.screen(Lang::Ja);
+            assert!(!later.status.standard.contains("保存済み"));
+            assert!(later.rows.iter().all(|r| r.pending.is_empty()));
+        }
+    }
 
     #[test]
     fn a_saved_reset_is_offered_on_its_row_and_the_banner() {

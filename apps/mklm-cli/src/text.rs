@@ -104,6 +104,10 @@ fn write_list(
         .max_width(1, NAME_COLUMN);
         let mut markers = Markers::default();
         for (n, kb, ka) in rows(snapshot, assessment) {
+            let invisible = snapshot.os.remote_session
+                && kb.present
+                && !kb.is_remote_desktop()
+                && ka.reported_type.is_none();
             table.row(vec![
                 n.to_string(),
                 ka.display_name.clone(),
@@ -112,8 +116,16 @@ fn write_list(
                 internal_short(kb, ka.is_internal).to_string(),
                 vid_pid(kb),
                 type_text(ka.stored_type),
-                reported_text(ka),
-                markers.cell(ka.current.as_ref()),
+                if invisible {
+                    "not visible in this Remote Desktop session".into()
+                } else {
+                    reported_text(ka)
+                },
+                if invisible {
+                    "not visible in this Remote Desktop session".into()
+                } else {
+                    markers.cell(ka.current.as_ref())
+                },
                 markers.cell(ka.after_restart.as_ref()),
                 ka.pending_action.map_or("-", pending_name).to_string(),
             ]);
@@ -231,7 +243,7 @@ fn write_status(
         writeln!(out, "  No keyboards found.")?;
     }
     for (n, kb, ka) in rows(snapshot, assessment) {
-        write_keyboard(out, n, kb, ka)?;
+        write_keyboard(out, n, kb, ka, snapshot.os.remote_session)?;
     }
 
     writeln!(out)?;
@@ -271,6 +283,7 @@ fn write_keyboard(
     n: usize,
     kb: &KeyboardDevice,
     ka: &KeyboardAssessment,
+    remote: bool,
 ) -> fmt::Result {
     writeln!(out)?;
     writeln!(out, "  [{n}] {}", ka.display_name)?;
@@ -314,8 +327,7 @@ fn write_keyboard(
         item(
             out,
             "Remote Desktop",
-            "types the keys the Remote Desktop client sends, with the key table fixed when the \
-             session started; read-only",
+            "types the keys the Remote Desktop client sends using one session key table; read-only",
         )?;
     } else {
         item(out, "Transport", transport_name(kb.transport))?;
@@ -324,9 +336,26 @@ fn write_keyboard(
     item(out, "USB serial", or_dash(kb.usb_serial.as_deref()))?;
     item(out, "Device values", &overrides_text(&kb.overrides))?;
     item(out, "Stored type", &type_text(ka.stored_type))?;
-    item(out, "Reported type", &reported_text(ka))?;
+    let invisible = remote && kb.present && !kb.is_remote_desktop() && ka.reported_type.is_none();
+    item(
+        out,
+        "Reported type",
+        &if invisible {
+            "not visible in this Remote Desktop session".into()
+        } else {
+            reported_text(ka)
+        },
+    )?;
     item(out, "Predicted type", &type_text(ka.predicted_type))?;
-    item(out, "Types now", &layout_detail(ka.current.as_ref()))?;
+    item(
+        out,
+        "Types now",
+        &if invisible {
+            "not visible in this Remote Desktop session".into()
+        } else {
+            layout_detail(ka.current.as_ref())
+        },
+    )?;
     item(
         out,
         "After restart",
@@ -1073,7 +1102,7 @@ mod tests {
         );
         assert!(
             line_with(&text, "the Remote Desktop client sends")
-                .ends_with("session started; read-only")
+                .ends_with("one session key table; read-only")
         );
         assert!(line_with(&text, r"TERMINPUT_BUS\UMB").contains("Instance ID"));
         assert!(text.contains(r"UMB\UMB\1&841921D&0&TERMINPUT_BUS"));

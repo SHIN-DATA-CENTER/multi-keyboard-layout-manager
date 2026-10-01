@@ -68,6 +68,8 @@ enum Command {
     Set(write::SetArgs),
     /// Switch from fixed mode to per-keyboard mode (needs one PC restart).
     Migrate(write::MigrateArgs),
+    /// Change the PC's standard layout in per-keyboard mode (one PC restart).
+    Standard(write::StandardArgs),
     /// Undo an operation (IDs as shown by `mklm-cli journal`).
     Revert(write::RevertArgs),
     /// Undo every change that still waits for you (keep/revert, a restart, or a conflict).
@@ -111,6 +113,7 @@ impl Command {
         match self {
             Command::Set(_)
             | Command::Migrate(_)
+            | Command::Standard(_)
             | Command::Revert(_)
             | Command::Undo(_)
             | Command::Resolve(_)
@@ -138,6 +141,7 @@ impl Command {
             Command::Update(_) => Err(anyhow::anyhow!("mklm-cli runs on Windows only")),
             Command::Set(args) => write::set(args),
             Command::Migrate(args) => write::migrate(args),
+            Command::Standard(args) => write::standard(args),
             Command::Revert(args) => write::revert(args),
             Command::Undo(args) => write::undo(args),
             Command::Resolve(args) => write::resolve(args),
@@ -268,21 +272,27 @@ fn run(command: &Command) -> Result<String> {
         Command::List { all } => {
             let report = read_snapshot(*all)?;
             let assessment = assess_with(&report.snapshot, *all);
-            Ok(text::list(&report.snapshot, &assessment, *all))
+            let (journal, error) = read_journal_status();
+            Ok(text::list(&report.snapshot, &assessment, *all)
+                + &json::journal_note(&journal, error.as_deref()))
         }
         Command::Status { json, all } => {
             let report = read_snapshot(*all)?;
             let assessment = assess_with(&report.snapshot, *all);
+            let (journal, journal_error) = read_journal_status();
             if *json {
                 let issues = json_issues(&report.issues);
                 let document = json::StatusDocument {
                     snapshot: &report.snapshot,
                     assessment: &assessment,
                     issues: &issues,
+                    journal,
+                    journal_error,
                 };
                 Ok(json::to_json(&document, ascii_json)?)
             } else {
-                Ok(text::status(&report.snapshot, &assessment, *all))
+                Ok(text::status(&report.snapshot, &assessment, *all)
+                    + &json::journal_note(&journal, journal_error.as_deref()))
             }
         }
         Command::Global {
@@ -314,6 +324,26 @@ fn run(_command: &Command) -> Result<String> {
     anyhow::bail!("mklm-cli runs on Windows only")
 }
 
+#[cfg(windows)]
+fn read_journal_status() -> (Vec<json::JournalStatus>, Option<String>) {
+    match mklm_client::journal::read_journal() {
+        Ok(read) => {
+            let boot = mklm_client::journal::boot_id();
+            let rows = json::journal_status(&read.journal, boot.as_ref().ok().copied());
+            let error = if !read.journal.unreadable.is_empty() {
+                Some(format!(
+                    "{} unreadable entries",
+                    read.journal.unreadable.len()
+                ))
+            } else {
+                boot.err().map(|error| error.to_string())
+            };
+            (rows, error)
+        }
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    }
+}
+
 /// Takes the read-only snapshot and reports its problems on standard error.
 #[cfg(windows)]
 fn read_snapshot(include_non_present: bool) -> Result<mklm_win::SnapshotReport> {
@@ -341,12 +371,12 @@ fn warn_os(os: &mklm_core::OsInfo) {
 
 /// The note of a Remote Desktop session (docs/research/rdp-keyboard.md). Whether a new session
 /// follows the client's keyboard or the PC's standard layout is not known, so it says neither:
-/// only when the table is fixed and when a change that waits for a restart reaches it.
+/// how or when the session's key table is selected remains unverified.
 const REMOTE_SESSION_NOTE: &str = "note: this is a Remote Desktop session. Keys typed here come \
-    from the Remote Desktop keyboard; its key table is fixed when the session starts and MKLM \
-    cannot read which one it is. A change that waits for a restart reaches it only after the \
-    restart and a new sign-in. MKLM's per-keyboard layouts apply to the keyboards attached to this \
-    PC.";
+    from the PC you connect from, through one Remote Desktop keyboard and one session key table. \
+    MKLM's per-keyboard assignments affect keyboards attached to the PC you connect to; they do \
+    not change the session's key table. How the host standard and client report determine that \
+    table, and when a standard change reaches it, are not yet verified. Check Shift+2 in the session.";
 
 #[cfg(windows)]
 fn warn_issues(issues: &[mklm_win::ReadIssue]) {
@@ -382,8 +412,9 @@ mod tests {
     fn the_remote_session_note_says_only_what_is_known() {
         let note = REMOTE_SESSION_NOTE;
         assert!(note.starts_with("note: this is a Remote Desktop session. "));
-        assert!(note.contains("its key table is fixed when the session starts"));
-        assert!(note.contains("reaches it only after the restart and a new sign-in"));
+        assert!(note.contains("one session key table"));
+        assert!(note.contains("are not yet verified"));
+        assert!(!note.contains("fixed when the session starts"));
         for unverified in [
             "follow the client",
             "console",
@@ -535,6 +566,10 @@ mod tests {
             Ok(Command::Migrate(write::MigrateArgs { dry_run: true, .. }))
         ));
         assert!(matches!(
+            parse(&["mklm-cli", "standard", "us", "--dry-run"]),
+            Ok(Command::Standard(write::StandardArgs { dry_run: true, .. }))
+        ));
+        assert!(matches!(
             parse(&["mklm-cli", "restore", "--baseline", "--all", "--dry-run"]),
             Ok(Command::Restore(write::RestoreArgs { dry_run: true, .. }))
         ));
@@ -549,6 +584,30 @@ mod tests {
         // Not on the commands that have nothing to plan.
         assert!(parse(&["mklm-cli", "revert", "0f8c2d4e", "--dry-run"]).is_err());
         assert!(parse(&["mklm-cli", "keep", "0f8c2d4e", "--dry-run"]).is_err());
+    }
+
+    #[test]
+    fn standard_accepts_repeated_followers_and_requires_a_reset_choice_with_yes() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|cli| cli.command);
+        let id = r"HID\VID_3434&PID_D027&MI_00&COL01\8&148AD7E3&0&0000";
+        assert!(matches!(
+            parse(&["mklm-cli", "standard", "jis", "--follow", id, "--follow", "#2"]),
+            Ok(Command::Standard(write::StandardArgs {
+                standard: write::StandardArg::Jis, follow, ..
+            })) if follow == vec![write::KeyboardRef::InstanceId(id.into()), write::KeyboardRef::ListRow(2)]
+        ));
+        for choice in ["--other-input", "--no-reset"] {
+            assert!(parse(&["mklm-cli", "standard", "us", "--yes", choice]).is_ok());
+        }
+        for bad in [
+            &["mklm-cli", "standard"][..],
+            &["mklm-cli", "standard", "standard"][..],
+            &["mklm-cli", "standard", "us", "--yes"][..],
+            &["mklm-cli", "standard", "us", "--follow"][..],
+            &["mklm-cli", "standard", "us", "--other-input", "--no-reset"][..],
+        ] {
+            assert_eq!(parse(bad).unwrap_err().exit_code(), 2, "{bad:?}");
+        }
     }
 
     /// `update` takes exactly one of `--check` and `--status` (a usage error, exit code 2,
@@ -605,6 +664,8 @@ mod tests {
             (&["mklm-cli", "restore", "--baseline", "--all"][..], true),
             (&["mklm-cli", "set", "#1", "--layout", "jis"][..], true),
             (&["mklm-cli", "migrate"][..], true),
+            (&["mklm-cli", "standard", "jis"][..], true),
+            (&["mklm-cli", "standard", "jis", "--dry-run"][..], true),
             (
                 &["mklm-cli", "resolve", "0f8c2d4e", "--all", "keep-current"][..],
                 true,
@@ -640,6 +701,25 @@ mod tests {
                 "--dry-run",
             ][..],
             &["mklm-cli", "migrate", "--also", "#2=us", "--yes"][..],
+            &[
+                "mklm-cli",
+                "standard",
+                "jis",
+                "--follow",
+                "#2",
+                "--yes",
+                "--no-reset",
+            ][..],
+            &[
+                "mklm-cli",
+                "standard",
+                "us",
+                "--follow",
+                "#2",
+                "--yes",
+                "--other-input",
+                "--dry-run",
+            ][..],
             &[
                 "mklm-cli",
                 "restore",

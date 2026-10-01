@@ -137,21 +137,38 @@ fn the_japanese_catalogue_is_complete() {
 #[test]
 fn the_remote_desktop_paragraph_keeps_its_terms_apart() {
     let entries = po_entries(&manifest_dir().join("translations/ja/LC_MESSAGES/mklm.po"));
-    let (_, remote) = entries
+    let (english, remote) = entries
         .iter()
-        .find(|(id, _)| id.starts_with("Over Remote Desktop,"))
+        .find(|(id, _)| id.starts_with("Remote Desktop uses one keyboard layout per session."))
         .expect("the Remote Desktop paragraph");
+    assert!(remote.contains("セッションのキー配列は 1 つ"), "{remote}");
+    assert!(remote.contains("セッションの配列は変えません"), "{remote}");
     assert!(
-        remote.contains("キー配列はセッションが始まったときに決まる"),
+        remote.contains("変更がいつ反映されるかは未確認"),
         "{remote}"
     );
+    assert!(english.contains("are not yet verified"), "{english}");
+    assert!(remote.contains("Shift+2"), "{remote}");
+    // Neither language claims an unverified session-start or sign-in boundary.
+    for claim in [
+        "セッションが始まったときに決まる",
+        "サインインするまで反映されません",
+    ] {
+        assert!(!remote.contains(claim), "{claim}: {remote}");
+    }
+    for claim in [
+        "fixed when the session starts",
+        "reaches it only after",
+        "after signing in again",
+    ] {
+        assert!(!english.contains(claim), "{claim}: {english}");
+    }
     assert!(!remote.contains("キーの割り当て"), "{remote}");
-    assert_eq!(remote.matches("割り当て").count(), 1, "{remote}");
     assert!(
         remote.contains("上の手順で Ctrl+Space を割り当てて"),
         "{remote}"
     );
     // Every sentence says where it applies; none starts with the conjunction-like "そこで".
     assert!(!remote.contains("そこで"), "{remote}");
-    assert!(remote.contains("Shift+英数（英数キーの働き）"), "{remote}");
+    assert!(remote.contains("Shift+英数"), "{remote}");
 }

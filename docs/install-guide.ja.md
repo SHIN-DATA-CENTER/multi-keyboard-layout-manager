@@ -46,8 +46,8 @@ v0.2.0 以降の Release には、メンテナーがオフラインで署名し�
 
 | 役割 | 鍵 ID | 公開鍵 |
 |---|---|---|
-| 通常用 | （v0.2.0 の前に載せます） | （v0.2.0 の前に載せます） |
-| バックアップ用 | （v0.2.0 の前に載せます） | （v0.2.0 の前に載せます） |
+| 通常用 | `D25C95894801CEE6` | `RWTmzgFIiZVc0ooRIP6vgNPGaN+OgLelDvccLF0MMqspl/oqiZTfHFrH` |
+| バックアップ用 | `F65C01E2BA6A6156` | `RWRWYWq64gFc9uj4YnziIbenhebU5l1/aLlqyRNM++cDqcEkAK/L8v3b` |
 
 鍵を替えている間は、`latest.json.alt.minisig`（副署名）もあります。どちらかの署名が上の表の鍵で確かめられれば正しい更新情報です。
 
@@ -151,6 +151,22 @@ Start-Process .\MKLM-Setup-0.2.1-x64.exe -ArgumentList '/S' -Verb RunAs -Wait -P
 
 初回はセットアップのウィザードが開きます。キーボードごとに JIS か US かを決め、必要なら PC を 1 回再起動します。詳しい使い方は、アプリの画面の説明に従ってください。
 
+### PC の標準配列を変える（v0.2.0 向け）
+
+キーボードごとモードでは、キーボード一覧の［PC の標準配列を変更…］から JIS / US を選べます。標準に従っているキーボードは、既定では今の配列に固定され、再起動後もその配列を保ちます。新しい標準に従わせたいキーボードだけを選んでください。固定モードでは、初回の移行で標準配列を選びます。
+
+CLI で下見だけをするには `mklm-cli standard jis --dry-run`、適用するには `mklm-cli standard jis --no-reset` を使います。`--follow "<インスタンス ID>"` を繰り返して、新しい標準に従わせるキーボードを指定できます。USB をその場でリセットでき、別の入力手段がある場合は `--other-input` を選べます。`--yes` には `--other-input` か `--no-reset` が必須で、行番号 `#n` は使えません。
+
+変更後は **PC を再起動**してください。サインアウト・ユーザーの切り替え・シャットダウンでは代用できません。再起動前に新しくサインインすると、配列が早めに変わる可能性があります（実機では未確認）。PIN など別のサインイン方法を用意してください。取り消しは `mklm-cli undo`（確定後は `mklm-cli revert <操作 ID>`）を実行して再起動します。詳しくは[復旧ガイド](recovery.md)を参照してください。
+
+### リモート デスクトップで使うとき
+
+RDP の画面で MKLM を動かした場合、設定を変えるのは **接続先の PC（その画面の PC）** です。接続元の PC（手元の PC）で動く MKLM が書くのは接続元の設定です。両方の MKLM が設定を同期する機能はありません。
+
+RDP のセッションのキー配列は 1 つで、接続元の JIS / US キーボードを別々には扱えません。接続先の標準配列と接続元の報告がどう影響するか、変更がいつ反映されるかは未確認です。接続元の MKLM で移行や標準配列の変更をした場合に報告が変わるかも未確認なので、変更後は接続先の `mklm-cli list` の報告と、セッション内の Shift+2 を確認してください。
+
+英数キーで切り替わらない場合は、接続先の Microsoft IME の「キーとタッチのカスタマイズ」で Ctrl+Space に「IME-オン/オフ」を割り当てる方法があります。[RDP の調査](research/rdp-keyboard.md)と[連携の設計](design/rdp-link.md)に、観察したことと未確認事項をまとめています。
+
 ## アンインストール
 
 「設定 → アプリ → インストールされているアプリ」で「Multi Keyboard Layout Manager」を選び、「アンインストール」を押します。
@@ -191,6 +207,8 @@ Start-Process .\MKLM-Setup-0.2.1-x64.exe -ArgumentList '/S' -Verb RunAs -Wait -P
 - MKLM is not code-signed yet. Keep the download in the browser, choose "More info → Run anyway" in SmartScreen, and "Yes" in UAC ("Unknown publisher"). It cannot run where Smart App Control is on.
 - It installs into `C:\Program Files\SHIN DATA CENTER\MKLM` with a Start menu entry. Running a newer installer upgrades in place and keeps your settings. Do not go back to an older version while a change waits for a PC restart: the older version may take it for already restarted.
 - Uninstall from Settings → Apps. You are asked whether to put the keyboard settings back to how they were before MKLM; the journal and the recovery files stay.
+- In per-keyboard mode, use "Change the PC's standard layout…" on the keyboard list, or preview `mklm-cli standard jis --dry-run` and apply with `mklm-cli standard jis --no-reset` (for v0.2.0). Existing followers keep their layout after restarting unless selected with `--follow "<instance ID>"`. Restart after applying; signing in again before restarting may change the layout early (unverified). Keep another sign-in method ready. Undo with `mklm-cli undo` or, after confirmation, `mklm-cli revert <op>`, then restart.
+- In Remote Desktop, MKLM edits the PC you connect to. MKLM on the PC you connect from edits only that PC; the two do not synchronize. The session uses one keyboard layout. How the host standard and client report determine it, and when changes apply, remain unverified. Check the client report and Shift+2 after changes. Ctrl+Space can be assigned to IME on/off in Microsoft IME settings on the PC you connect to. See the [RDP design](design/rdp-link.md) (Japanese).
 - **Automatic updates (from v0.2.0; install v0.2.0 by hand once).** MKLM checks GitHub once a day (it sends only its version and x64/ARM64; you can turn this off in Settings), downloads a new installer automatically and verifies it against the maintainer's offline minisign signature of `latest.json` and its SHA-256. It installs **only when you press "Update now"**. The UAC prompt shows "Unknown publisher": click "Show more details" and check that the program location is `C:\Program Files\SHIN DATA CENTER\MKLM\mklm-helper.exe`; MKLM asks for permission only right after you press a button. MKLM closes and reopens by itself; keyboard settings are not touched. It stays on the same architecture (no automatic x64 → ARM64 switch).
 - Manifests expire 180 days after they are issued; an expired one only shows a notice. Behind a proxy that needs Windows integrated authentication, automatic updates do not work (MKLM never sends Windows credentials); download from the release page instead.
 - To verify by hand: `minisign -Vm latest.json -x latest.json.minisig -P <public key>` (the keys are listed above once they exist), then compare the installer's SHA-256 with `assets[].sha256` in `latest.json`. When approving an update as an administrator on someone else's PC, download and verify the installer yourself.

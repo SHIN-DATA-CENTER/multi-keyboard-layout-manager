@@ -19,7 +19,7 @@ use mklm_core::{Journal, JournalEntry, OperationResult, Outcome};
 
 use super::exit_code;
 use super::outcome::{error_exit_code, lost_recovery_exit_code, result_exit_code};
-use super::render::{entry_line, error_text, next_steps, result_text};
+use super::render::{entry_line_at, error_text, next_steps, result_text};
 
 /// What to add after a session's result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +44,9 @@ pub fn helper_stopped_text(exit: Option<HelperExit>, detail: &str) -> String {
 
 /// The journal as the report reads it after the request (unelevated).
 pub trait JournalAfter {
+    fn boot(&self) -> Option<mklm_core::BootId> {
+        None
+    }
     /// Some entry needs recovery now (`mklm_client::orchestrator::JournalSource`); `Err`: an
     /// English message.
     fn needs_recovery(&mut self) -> Result<bool, String>;
@@ -230,7 +233,7 @@ impl Report<'_> {
         for entry in waiting {
             self.say(&format!(
                 "Still waiting for you: {}. `mklm-cli undo` puts it back.",
-                entry_line(entry)
+                entry_line_at(entry, self.journal.boot())
             ))?;
         }
         Ok(())

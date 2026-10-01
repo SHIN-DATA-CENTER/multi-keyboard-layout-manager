@@ -110,7 +110,7 @@ impl LangChoice {
     }
 }
 
-fn pick(lang: Lang, ja: &str, en: &str) -> String {
+pub(crate) fn pick(lang: Lang, ja: &str, en: &str) -> String {
     match lang {
         Lang::Ja => ja.to_string(),
         Lang::En => en.to_string(),
@@ -615,8 +615,16 @@ pub fn remote_transport(lang: Lang) -> String {
     pick(lang, "リモート デスクトップ", "Remote Desktop")
 }
 
+pub fn remote_not_visible(lang: Lang) -> String {
+    pick(
+        lang,
+        "このリモート デスクトップのセッションからは見えません",
+        "Not visible in this Remote Desktop session",
+    )
+}
+
 /// "現在の動作" of the Remote Desktop keyboard. No layout is named: the session types with the key
-/// table it started with, which MKLM cannot read (docs/research/rdp-keyboard.md).
+/// session key table, which MKLM cannot read (docs/research/rdp-keyboard.md).
 pub fn remote_current(lang: Lang) -> String {
     pick(lang, "接続元の PC からの入力", "Input from the client PC")
 }
@@ -694,9 +702,9 @@ pub fn badge(kind: BadgeKind, lang: Lang) -> (String, String) {
         ),
         BadgeKind::RemoteDesktop => (
             "リモート デスクトップ",
-            "リモート デスクトップ: 接続元の PC から届くキー入力です。このキーボードは変更できません。キー配列はセッションが始まったとき（サインインしたとき）に決まるため、再起動を待つ変更は、再起動して新しくサインインするまで反映されません",
+            "リモート デスクトップ: 接続元の PC から届くキー入力です。セッションのキー配列は 1 つです。このキーボードは変更できません。キーボードごとの割り当ては、接続先の PC につないだキーボードに適用されます。標準配列の変更がこのセッションにいつ反映されるかは未確認です",
             "Remote Desktop",
-            "Remote Desktop: keys sent by the PC you connect from. This keyboard cannot be changed. Its key table is fixed when the session starts (at sign-in), so a change that waits for a restart reaches it only after the restart and a new sign-in",
+            "Remote Desktop: keys sent by the PC you connect from, using one session key table. This keyboard cannot be changed. Per-keyboard assignments affect keyboards attached to the PC you connect to. When a standard change reaches this session is not verified",
         ),
         BadgeKind::NotConnected => (
             "未接続",
@@ -1755,8 +1763,8 @@ pub fn key_test_prompt(lang: Lang) -> String {
 pub fn key_test_remote_prompt(lang: Lang) -> String {
     pick(
         lang,
-        "リモート デスクトップで接続しています。ここで押したキーは接続元の PC から届くため、この PC のキーボードの確認にはなりません。この PC の前で、この PC につないだキーボードで押してください（Shift+2 で @ なら US、\" なら JIS）。",
-        "This is a Remote Desktop session. Keys pressed here come from the remote PC, so they check none of this PC's keyboards. Press them at this PC, on the keyboards attached to it (Shift+2: @ means US, \" means JIS).",
+        "リモート デスクトップで接続しています。ここで押したキーは接続元の PC から届くため、接続先の PC のキーボードの確認にはなりません。接続先の PC の前で、そこにつないだキーボードで押してください（Shift+2 で @ なら US、\" なら JIS）。",
+        "This is a Remote Desktop session. Keys pressed here come from the PC you connect from, so they check none of the keyboards attached to the PC you connect to. Test at that PC on its own keyboards (Shift+2: @ means US, \" means JIS).",
     )
 }
 
@@ -2414,17 +2422,11 @@ mod tests {
         assert!(!long.contains("MKLM"), "{long}");
         assert!(!long.contains("キーの割り当て"), "{long}");
         assert!(long.contains("このキーボードは変更できません"), "{long}");
-        assert!(
-            long.ends_with("再起動を待つ変更は、再起動して新しくサインインするまで反映されません"),
-            "{long}"
-        );
+        assert!(long.ends_with("未確認です"), "{long}");
         let (_, long) = badge(BadgeKind::RemoteDesktop, Lang::En);
         assert!(!long.contains("MKLM"), "{long}");
         assert!(long.contains("This keyboard cannot be changed."), "{long}");
-        assert!(
-            long.ends_with("reaches it only after the restart and a new sign-in"),
-            "{long}"
-        );
+        assert!(long.ends_with("is not verified"), "{long}");
     }
 
     #[test]

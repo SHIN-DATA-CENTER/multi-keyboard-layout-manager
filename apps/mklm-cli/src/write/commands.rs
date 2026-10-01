@@ -30,7 +30,7 @@ use super::input::{self, Input, Line, StdinInput, YesNo};
 use super::launch::{self, LaunchError};
 use super::preview;
 use super::relay::{CliFrontend, Presenter};
-use super::render::{CurrentValue, entry_line, model_value, records_text};
+use super::render::{CurrentValue, entry_line_at, model_value, records_text};
 use super::report::{After, JournalAfter, Report};
 use super::target::{self, ResolvedKeyboard};
 use super::{
@@ -120,6 +120,9 @@ impl Ui {
 struct LiveJournalAfter;
 
 impl JournalAfter for LiveJournalAfter {
+    fn boot(&self) -> Option<BootId> {
+        boot_id().ok()
+    }
     fn needs_recovery(&mut self) -> Result<bool, String> {
         mklm_client::journal::LiveJournal.needs_recovery()
     }
@@ -256,8 +259,9 @@ fn show_post_reboot_rule(ui: &mut Ui, outcome: Result<RunOnceOutcome, RunOnceErr
         Ok(RunOnceOutcome::NotNeeded | RunOnceOutcome::Registered(_)) => {}
         Ok(RunOnceOutcome::TellUser) => {
             let _ = ui.say(
-                "After the restart, run `mklm-cli post-reboot` to keep or revert the change \
-                 (this elevated process may belong to another account, so it registers nothing).",
+                "This process is running as administrator, so no automatic check after restart \
+                 was registered. After restarting and signing in, open MKLM or run \
+                 `mklm-cli post-reboot` to keep or revert the change.",
             );
         }
         Err(RunOnceError::Register(error)) => eprintln!(
@@ -568,6 +572,121 @@ pub fn set(args: &SetArgs) -> Result<i32> {
 }
 
 /// `mklm-cli migrate` (design D.3).
+pub fn standard(args: &super::StandardArgs) -> Result<i32> {
+    guarded(|| {
+        let mut ui = Ui::new();
+        let (journal, boot) = start(&mut ui, args.dry_run)?;
+        let snapshot = inventory()?.snapshot;
+        let mut follow = Vec::new();
+        for target in &args.follow {
+            let Some(kb) = echo_keyboard(&mut ui, &snapshot, target)? else {
+                return Ok(exit_code::FAILURE);
+            };
+            follow.push(kb.instance_id);
+        }
+        let blocked = gate(&mut ui, &journal, boot, Gate::NewOp, args.dry_run)?;
+        let standard = match args.standard {
+            StandardArg::Jis => Layout::Jis,
+            StandardArg::Us => Layout::Us,
+        };
+        let plan = match mklm_core::plan_set_standard(
+            &snapshot.keyboards,
+            &snapshot.global,
+            standard,
+            &follow,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => return operation_error(&mut ui, &error),
+        };
+        if plan.change.is_empty() {
+            ui.say("Nothing to change: the PC's standard layout already matches.")?;
+            if args.dry_run {
+                dry_run_done(&mut ui)?;
+            }
+            return Ok(blocked.unwrap_or(exit_code::OK));
+        }
+        let dll = match standard {
+            Layout::Jis => "kbd106.dll",
+            Layout::Us => "kbd101.dll",
+        };
+        if !elevation::system32_file_exists(dll).unwrap_or(false) {
+            return operation_error(
+                &mut ui,
+                &OperationError::LayerDriverMissing { dll: dll.into() },
+            );
+        }
+        let rows = mklm_client::preview::standard_rows(&snapshot, &plan);
+        let mut apply = apply_flags(&args.apply).unwrap_or_default();
+        if rows.iter().any(|row| row.can_reset) && apply_flags(&args.apply).is_none() {
+            ui.say("Followers can be reset now to apply their assigned layout; each stops for a few seconds. Without a reset, signing in again before restarting may change what they type.")?;
+            if !args.dry_run && ui.ask(OTHER_INPUT_QUESTION)? == YesNo::Yes {
+                apply.allow_live_reset = true;
+                apply.other_input_available = true;
+            }
+        }
+        ui.say(&format!(
+            "The PC's standard layout: {:?} -> {:?}",
+            plan.change.from, standard
+        ))?;
+        for row in &rows {
+            use mklm_client::preview::StandardRole;
+            let action = match row.role {
+                StandardRole::Assigned { .. } => "assigned (unchanged)",
+                StandardRole::Pinned | StandardRole::Mixed => {
+                    "current layout assigned (unchanged after restart)"
+                }
+                StandardRole::Follows => "follows the new standard (changes after restart)",
+                StandardRole::RemoteDesktop => {
+                    "Remote Desktop: one session layout; not selected by this operation"
+                }
+                StandardRole::NotAssignable { .. } => {
+                    "cannot be assigned; may follow the new standard"
+                }
+            };
+            ui.say(&format!(
+                "  {}: {}{}{}",
+                row.name,
+                action,
+                if row.present { "" } else { " (not connected)" },
+                if row.can_reset && apply.allow_live_reset && apply.other_input_available {
+                    "; reset now"
+                } else {
+                    ""
+                }
+            ))?;
+        }
+        ui.say(&preview::plan_text(&snapshot, &plan.plan, None))?;
+        ui.say(
+            "Check: no global OverrideKeyboardType/Subtype; the PC stays in per-keyboard mode.",
+        )?;
+        ui.say("Restart the PC now (Restart, not Shut down). Signing out, switching users or shutting down before the restart may change layouts early (not verified). This also affects typing passwords at sign-in. After the restart, MKLM or `mklm-cli post-reboot` asks whether to keep the change.")?;
+        ui.say("To switch a follower with the standard instead, add --follow <keyboard>.")?;
+        if standard == Layout::Jis && !plan.change.following.is_empty() {
+            ui.say("Following the JIS standard has not been verified by typing; check Shift+2 after restarting.")?;
+        }
+        if args.dry_run {
+            dry_run_done(&mut ui)?;
+            return Ok(blocked.unwrap_or(exit_code::OK));
+        }
+        if !confirm(&mut ui, args.yes, elevated()?)? {
+            return Ok(exit_code::CANCELLED);
+        }
+        run_request(
+            &mut ui,
+            Request::SetStandard(mklm_ipc::SetStandardRequest {
+                standard,
+                follow,
+                apply,
+                expected: Some(preview::expected(&plan.plan)),
+            }),
+            None,
+            apply,
+            After::Migrate,
+        )
+    })
+}
+
+/// `mklm-cli migrate` (design D.3).
 pub fn migrate(args: &MigrateArgs) -> Result<i32> {
     guarded(|| {
         let mut ui = Ui::new();
@@ -583,6 +702,16 @@ pub fn migrate(args: &MigrateArgs) -> Result<i32> {
         let blocked = gate(&mut ui, &journal, boot, Gate::NewOp, args.dry_run)?;
         let global = &snapshot.global;
         if global.mode() != GlobalMode::Fixed {
+            if let Some(requested) = args.standard {
+                let requested = match requested {
+                    StandardArg::Jis => Layout::Jis,
+                    StandardArg::Us => Layout::Us,
+                };
+                if mklm_core::stored_standard(global) != Some(requested) {
+                    ui.say("The PC is already in per-keyboard mode; use `mklm-cli standard jis` or `mklm-cli standard us` to change its standard layout.")?;
+                    return Ok(exit_code::FAILURE);
+                }
+            }
             // Design F.5: already in per-keyboard mode is "no change" (0), like `set` with
             // nothing to change, unless `--also` asked for assignments migrate cannot make (1).
             if !assignments.is_empty() {
@@ -709,9 +838,19 @@ pub fn revert(args: &RevertArgs) -> Result<i32> {
             return Ok(exit_code::FAILURE);
         }
         let snapshot = display_snapshot();
-        ui.say(&preview::revert_text(entry, &current_of(snapshot.as_ref())))?;
+        ui.say(&preview::revert_text(
+            entry,
+            &current_of(snapshot.as_ref()),
+            Some(boot),
+        ))?;
         let apply = apply_or_no_reset(&args.apply);
-        if !apply.allow_live_reset || !apply.other_input_available {
+        if entry
+            .records
+            .iter()
+            .any(|r| r.target == WriteTarget::Global && !r.is_check_only())
+        {
+            ui.say("This operation changed PC-wide values. Keyboards are not reset in place when reverting it; restart the PC to restore their old layouts.")?;
+        } else if !apply.allow_live_reset || !apply.other_input_available {
             ui.say(
                 "Keyboards are not reset in place (add --other-input to allow it); the result \
                  says how the old layout comes back.",
@@ -762,7 +901,15 @@ pub fn undo(args: &RecoverArgs) -> Result<i32> {
         ui.say(&preview::undo_text(
             &journal,
             &current_of(snapshot.as_ref()),
+            Some(boot),
         ))?;
+        if journal.open_entries().iter().any(|e| {
+            e.records
+                .iter()
+                .any(|r| r.target == WriteTarget::Global && !r.is_check_only())
+        }) {
+            ui.say("Operations that changed PC-wide values do not reset keyboards when undone. Restart the PC to restore their old layouts.")?;
+        }
         if journal.open_entries().is_empty() {
             if args.dry_run {
                 dry_run_done(&mut ui)?;
@@ -813,7 +960,7 @@ pub fn recover(args: &RecoverArgs) -> Result<i32> {
                 mklm_core::Attention::NeedsApply => "not in effect yet",
                 mklm_core::Attention::Busy | mklm_core::Attention::None => continue,
             };
-            ui.say(&format!("{}: {text}", entry_line(entry)))?;
+            ui.say(&format!("{}: {text}", entry_line_at(entry, Some(boot))))?;
             listed = true;
         }
         if !listed {
@@ -929,7 +1076,7 @@ pub fn resolve(args: &ResolveArgs) -> Result<i32> {
         }
         let snapshot = display_snapshot();
         let current = current_of(snapshot.as_ref());
-        ui.say(&entry_line(entry))?;
+        ui.say(&entry_line_at(entry, Some(boot)))?;
         let current: Option<CurrentValue<'_>> =
             snapshot.as_ref().map(|_| &current as CurrentValue<'_>);
         ui.say(&records_text(entry, current))?;
@@ -1132,7 +1279,7 @@ pub fn keep(op: &str) -> Result<i32> {
             );
             return Ok(exit_code::FAILURE);
         }
-        ui.say(&entry_line(entry))?;
+        ui.say(&entry_line_at(entry, Some(boot)))?;
         if checks::takes_effect_at_restart(entry) {
             if entry.state == OpState::PendingReboot && entry.boot_id == boot {
                 eprintln!(
@@ -1179,7 +1326,7 @@ pub fn reboot(yes: bool) -> Result<i32> {
     }
     ui.say("These changes need a PC restart:")?;
     for entry in &reasons {
-        ui.say(&format!("  {}", entry_line(entry)))?;
+        ui.say(&format!("  {}", entry_line_at(entry, Some(boot))))?;
     }
     ui.say(
         "If you cannot type at the sign-in screen: use the on-screen keyboard (the Accessibility \
@@ -1243,7 +1390,7 @@ pub fn post_reboot() -> Result<i32> {
     let snapshot = display_snapshot();
     let mut code = exit_code::OK;
     for entry in entries {
-        ui.say(&entry_line(entry))?;
+        ui.say(&entry_line_at(entry, Some(boot)))?;
         if entry.state == OpState::PendingReboot && entry.boot_id == boot {
             ui.say(
                 "Not in effect yet: the PC has not restarted since the change was written. \

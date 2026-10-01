@@ -32,17 +32,17 @@ use mklm_core::{
     ConflictPolicy, ContextValue, Countdown, CurrentBoot, DN_STARTED, Decision, DeviceOverrides,
     Event, Expect, ExpectedKeyboard, ExpectedPlan, FailureReason, GlobalSettings, InputMethods,
     InvPs2Violation, Journal, JournalEntry, JournalError, KeyboardDevice, KeyboardDriver,
-    KeyboardType, LayoutChoice, MAX_HISTORY, Observation, OpId, OpKind, OpState, OperationError,
-    OperationPlan, OperationResult, OsInfo, Outcome, PendingAction, PlanError, PlanStep,
-    PlannedWrite, ProcessIdentity, RESTORE_ON_UNINSTALL_VALUE, RecoveredOp, RecoveryContext,
-    RecoveryDecision, RegValue, ResolutionChoice, RestoreError, RestorePlan, RestoreScope,
-    RestoreTo, RevertMode, STORE_VERSION, STORE_VERSION_VALUE, SkipReason, SystemSnapshot,
-    Timestamp, TransitionRecord, Transport, UnreadableEntry, ValueKey, ValueOp, ValueRecord,
-    WriteTarget, apply_method, apply_pending_cleared, apply_pending_on_close, assess,
+    KeyboardType, Layout, LayoutChoice, MAX_HISTORY, Observation, OpId, OpKind, OpState,
+    OperationError, OperationPlan, OperationResult, OsInfo, Outcome, PendingAction, PlanError,
+    PlanStep, PlannedWrite, ProcessIdentity, RESTORE_ON_UNINSTALL_VALUE, RecoveredOp,
+    RecoveryContext, RecoveryDecision, RegValue, ResolutionChoice, RestoreError, RestorePlan,
+    RestoreScope, RestoreTo, RevertMode, STORE_VERSION, STORE_VERSION_VALUE, SkipReason,
+    SystemSnapshot, Timestamp, TransitionRecord, Transport, UnreadableEntry, ValueKey, ValueOp,
+    ValueRecord, WriteTarget, apply_method, apply_pending_cleared, apply_pending_on_close, assess,
     check_cleanup, check_inv_ps2, check_restore_record, decide_recovery_with_removed,
     is_unread_value, live_reset_bans, observe, physical_device_members, plan_migration,
-    plan_restore, plan_set_layout, render_recovery_assets, state_after_resolution,
-    structural_reset_bans, value_eq, value_names,
+    plan_restore, plan_set_layout, plan_set_standard, render_recovery_assets, standard_guards,
+    state_after_resolution, structural_reset_bans, value_eq, value_names,
 };
 
 use crate::backend::{BackendError, JournalSlot, RegistryBackend};
@@ -51,7 +51,7 @@ use crate::error::EngineError;
 use crate::host::{Host, HostError};
 use crate::params::{
     CleanupParams, MachineSettingsParams, MigrateParams, ResolveParams, RestoreBaselineParams,
-    RestoreMode, SetLayoutParams,
+    RestoreMode, SetLayoutParams, SetStandardParams,
 };
 use crate::sink::{DecisionPoll, EventSink};
 
@@ -126,9 +126,14 @@ enum Forward {
     NothingWritten {
         name: String,
     },
-    /// A write, flush or compare-and-swap failed after something was written.
+    /// A write, flush or compare-and-swap failed after something was written, or a write or read
+    /// failed. `record`: the record it failed on (its target names the key in the failure,
+    /// design standard-layout UX-16). `wrote_boot_time`: a value read at boot was written before
+    /// it failed; without one, the rollback needs no restart (B.6, SAFETY-8).
     Failed {
         message: String,
+        record: Option<usize>,
+        wrote_boot_time: bool,
     },
 }
 
@@ -255,6 +260,22 @@ fn is_cleanup(entry: &JournalEntry) -> bool {
     matches!(entry.kind, OpKind::Cleanup { .. })
 }
 
+fn is_standard_change(entry: &JournalEntry) -> bool {
+    matches!(entry.kind, OpKind::SetStandard { .. })
+}
+
+/// True when the entry writes a global value (a standard change, a migration, a restore that
+/// includes the global values; check-only records do not count). Windows reads those at sign-in
+/// and boot, so putting the entry back never resets a keyboard in place: a HID keyboard whose pin
+/// is removed would follow the standard this session still uses, the one being put back (design
+/// standard-layout B.7, SAFETY-3). The old layouts come back at the PC restart.
+fn touches_global_values(entry: &JournalEntry) -> bool {
+    entry
+        .records
+        .iter()
+        .any(|r| r.target == WriteTarget::Global && !r.is_check_only())
+}
+
 /// Design m3 WP-E3: a countdown of 20 or 60 s only; checked before anything else happens.
 fn check_countdown(apply: &ApplyOptions) -> Result<(), EngineError> {
     if apply.countdown_allowed() {
@@ -361,10 +382,14 @@ fn group_steps(records: &[ValueRecord]) -> Vec<(WriteTarget, Vec<usize>)> {
     steps
 }
 
-/// The records as plan steps (for [`Event::Planned`]); `Other` values have no planned form.
+/// The records as plan steps (for [`Event::Planned`]); `Other` values have no planned form, and
+/// check-only records write nothing (design standard-layout B.2).
 fn plan_steps(records: &[ValueRecord]) -> Vec<PlanStep> {
     let mut steps: Vec<PlanStep> = Vec::new();
-    for record in records.iter().filter(|r| r.skipped.is_none()) {
+    for record in records
+        .iter()
+        .filter(|r| r.skipped.is_none() && !r.is_check_only())
+    {
         let write = match &record.intended {
             RegValue::Dword { value } => PlannedWrite::set(&record.name, *value),
             RegValue::Sz { value } => PlannedWrite::set_string(&record.name, value),
@@ -633,25 +658,7 @@ where
             params.standard,
             &params.assignments,
         )?;
-        // Plan 1.5 / S8: the layer driver MKLM writes must exist.
-        for step in plan
-            .checked
-            .steps
-            .iter()
-            .filter(|step| step.target == WriteTarget::Global)
-        {
-            for write in &step.writes {
-                if let (true, ValueOp::SetString(dll)) = (
-                    write
-                        .name
-                        .eq_ignore_ascii_case(value_names::LAYER_DRIVER_JPN),
-                    &write.op,
-                ) && !self.host.system32_file_exists(dll)?
-                {
-                    return Err(OperationError::LayerDriverMissing { dll: dll.clone() }.into());
-                }
-            }
-        }
+        self.check_layer_driver(&plan.checked.steps)?;
         check_expected(params.expected.as_ref(), &plan)?;
         let context = self.snapshot_context(&mut s)?;
         let records = self.build_records(&s, &plan.checked.steps)?;
@@ -676,6 +683,132 @@ where
             return Ok(result);
         }
         self.apply_change(&mut s, &mut entry, lock, ApplyOptions::default())
+    }
+
+    /// Design standard-layout B.5 (m2 D.13): change the PC's standard layout in per-keyboard
+    /// mode. Every keyboard that follows the standard now is pinned to its current layout first
+    /// (except those of `params.follow`), then the standard is written; always ends in
+    /// `PendingReboot`. With the caller's permission (`params.apply`), the pinned followers that
+    /// can be reset in place are reset right after the writes, so that the pins take effect now;
+    /// what they type does not change, and one that does not come back only warns.
+    pub fn set_standard(
+        &mut self,
+        params: &SetStandardParams,
+        sink: &mut dyn EventSink,
+    ) -> Result<OperationResult, EngineError> {
+        check_countdown(&params.apply)?;
+        let lock = self.lock(sink)?;
+        let mut s = self.open(sink, Gate::NewOp)?;
+        let standard = plan_set_standard(&s.keyboards, &s.global, params.standard, &params.follow)?;
+        let plan = &standard.plan;
+        self.check_layer_driver(&plan.checked.steps)?;
+        check_expected(params.expected.as_ref(), plan)?;
+        let context = self.snapshot_context(&mut s)?;
+        let mut records = self.build_records(&s, &plan.checked.steps)?;
+        if records.is_empty() {
+            return Ok(empty_result(None, Outcome::NoChange, &s.warnings));
+        }
+        // The check-only records of the fixed-mode pair lead the global step (B.2): a pair that
+        // appeared after the plan stops the writes before any global value.
+        let guards = self.check_only_records(&s, &standard_guards());
+        let first_global = records
+            .iter()
+            .position(|r| r.target == WriteTarget::Global)
+            .unwrap_or(records.len());
+        records.splice(first_global..first_global, guards);
+        if !standard.change.following.is_empty() && params.standard == Layout::Jis {
+            s.warn(STANDARD_UNVERIFIED);
+        }
+        let keyboards =
+            self.expected_keyboards(&s, &plan.checked.keyboards, &plan.checked.global, None);
+        let pinned_choice = match standard.change.from {
+            Layout::Jis => LayoutChoice::Jis,
+            Layout::Us => LayoutChoice::Us,
+        };
+        let kind = OpKind::SetStandard {
+            from: standard.change.from,
+            to: standard.change.to,
+            keyboards: standard
+                .change
+                .pinned
+                .iter()
+                .map(|id| (id.clone(), pinned_choice))
+                .chain(
+                    standard
+                        .change
+                        .following
+                        .iter()
+                        .map(|id| (id.clone(), LayoutChoice::Standard)),
+                )
+                .collect(),
+        };
+        let mut entry = self.create(
+            &mut s,
+            kind,
+            records,
+            Some(PendingAction::RestartPc),
+            context,
+            keyboards,
+        )?;
+        if let Some(result) = self.write_new(&mut s, &mut entry)? {
+            return Ok(result);
+        }
+        // B.5 step 11: the pins take effect now where a reset may apply them. The entry stays
+        // `Written`: a crash here rolls forward to `PendingReboot`.
+        let mut reapplied = Vec::new();
+        if params.apply.allow_live_reset
+            && params.apply.other_input_available
+            && !s.sink.check_cancelled()
+        {
+            self.refresh(&mut s)?;
+            let ids: Vec<String> = standard
+                .change
+                .pinned
+                .iter()
+                .filter(|id| {
+                    entry
+                        .records
+                        .iter()
+                        .any(|r| r.skipped.is_none() && r.target == device_target(id))
+                })
+                .filter(|id| {
+                    s.keyboard(id)
+                        .is_some_and(|kb| kb.present && live_reset_bans(kb, false).is_empty())
+                })
+                .cloned()
+                .collect();
+            // One that does not come back is only warned about (`reset_keyboards`): its pin is
+            // its current layout, so what it types does not change, and it takes effect at the
+            // restart like every other pin (`apply_pending` keeps it).
+            reapplied = self.reset_keyboards(&mut s, &ids, false).0;
+        }
+        self.move_to(&s, &mut entry, OpState::PendingReboot, "restart-pc")?;
+        entry.apply_pending = self.close_pending(&mut s, &entry, &reapplied, false)?;
+        self.commit(&mut s, &entry)?;
+        drop(lock);
+        Ok(self.entry_result(&s, &entry))
+    }
+
+    /// Plan 1.5 / S8: the layer driver MKLM writes must exist (`LayerDriver JPN` of the global
+    /// step).
+    fn check_layer_driver(&self, steps: &[PlanStep]) -> Result<(), EngineError> {
+        for step in steps
+            .iter()
+            .filter(|step| step.target == WriteTarget::Global)
+        {
+            for write in &step.writes {
+                if let (true, ValueOp::SetString(dll)) = (
+                    write
+                        .name
+                        .eq_ignore_ascii_case(value_names::LAYER_DRIVER_JPN),
+                    &write.op,
+                ) && !self.host.system32_file_exists(dll)?
+                {
+                    return Err(OperationError::LayerDriverMissing { dll: dll.clone() }.into());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Section D.4: restore `before` of the latest operation on its values (compare-and-swap).
@@ -799,6 +932,26 @@ where
             let reported = self.devices.reported_type(&id).ok().flatten();
             if reported.is_some() && reported == expected {
                 reapplied.push(id);
+            } else if reported.is_none() {
+                let visibility = if self.host.remote_session() {
+                    "not visible in this Remote Desktop session"
+                } else {
+                    "not listed by Raw Input in this session"
+                };
+                let next = if entry.boot_id != s.boot {
+                    "The values have been in effect since the restart; check the layout with Shift+2 at the PC."
+                } else {
+                    "MKLM cannot tell whether it runs with the stored values yet. Check it at the PC; if it still types the old layout there, reconnect it."
+                };
+                s.warn(format!(
+                    "{id}: {visibility}, so its type could not be checked here. {next}"
+                ));
+            } else if entry.boot_id != s.boot {
+                let reported = reported.expect("the missing report was handled above");
+                let expected = expected.map_or_else(|| "unknown".into(), |kind| kind.to_string());
+                s.warn(format!(
+                    "{id}: reports {reported} although the PC has restarted since the change (expected {expected}); the change may not apply to it. Check it with Shift+2 at the PC and revert if it types the wrong layout."
+                ));
             } else {
                 s.warn(format!(
                     "{id}: Raw Input does not report the stored type yet; reconnect the keyboard"
@@ -1906,6 +2059,30 @@ where
         Ok(records)
     }
 
+    /// The check-only records of `keys` (design standard-layout B.2): `before` = `intended` =
+    /// `Absent`, never written. The baseline is the store's when MKLM has one, else `Absent`; none
+    /// is captured for them (`create`).
+    fn check_only_records(&self, s: &Session<'_>, keys: &[ValueKey]) -> Vec<ValueRecord> {
+        keys.iter()
+            .map(|key| ValueRecord {
+                target: key.target.clone(),
+                key_path: key.key_path(),
+                name: key.name.clone(),
+                baseline: s
+                    .journal
+                    .baseline(key)
+                    .map_or(RegValue::Absent, |b| b.value.clone()),
+                before: RegValue::Absent,
+                intended: RegValue::Absent,
+                last_written: None,
+                conflict: None,
+                resolve_to: None,
+                write_error: None,
+                skipped: None,
+            })
+            .collect()
+    }
+
     /// Plan 1.3 step 1: every value of the global key and of every keyboard's key.
     fn snapshot_context(&self, s: &mut Session<'_>) -> Result<Vec<ContextValue>, EngineError> {
         let mut targets = vec![WriteTarget::Global];
@@ -2016,7 +2193,12 @@ where
         let op_id = self.new_op_id(s)?;
         let now = self.host.now();
         let mut new_baselines: Vec<BaselineRecord> = Vec::new();
-        for record in records.iter().filter(|r| r.skipped.is_none()) {
+        // A check-only record changes nothing, so it captures no baseline (design
+        // standard-layout B.2): MKLM never changed that value.
+        for record in records
+            .iter()
+            .filter(|r| r.skipped.is_none() && !r.is_check_only())
+        {
             let key = record.key();
             let canonical = key.canonical();
             let known = s.journal.baseline(&key).is_some()
@@ -2036,7 +2218,7 @@ where
         }
         let boot_time = records
             .iter()
-            .any(|r| r.skipped.is_none() && r.is_boot_time());
+            .any(|r| r.skipped.is_none() && !r.is_check_only() && r.is_boot_time());
         if !new_baselines.is_empty() || boot_time {
             let mut all = s.journal.baselines.clone();
             all.extend(new_baselines.iter().cloned());
@@ -2140,24 +2322,37 @@ where
         Ok(entry)
     }
 
-    /// C.5 step 6: per step, compare-and-swap on `before` and write, then flush the key.
+    /// C.5 step 6: per step, compare-and-swap on `before` and write, then flush the key. A
+    /// check-only record is compared and never written (design standard-layout B.2). A pin of a
+    /// standard change whose devnode is gone is skipped (`SkipReason::DeviceRemoved`: there is
+    /// nothing left to pin, B.6); for every other record that is a failure, as before.
     fn write_forward(
         &mut self,
         s: &mut Session<'_>,
-        entry: &JournalEntry,
+        entry: &mut JournalEntry,
     ) -> Result<Forward, EngineError> {
         let steps = group_steps(&entry.records);
         let of = steps.len();
+        let skip_removed = is_standard_change(entry);
         let mut wrote = false;
+        let mut wrote_boot_time = false;
         for (number, (target, indices)) in steps.iter().enumerate() {
+            let mut removed = false;
             for &index in indices {
                 let record = &entry.records[index];
+                let removable = skip_removed && !record.is_boot_time();
                 let current = match self.registry.read_value(target, &record.name) {
                     Ok(value) => value,
                     Err(BackendError::Crashed) => return Err(BackendError::Crashed.into()),
+                    Err(BackendError::DeviceRemoved { .. }) if removable => {
+                        removed = true;
+                        break;
+                    }
                     Err(error) => {
                         return Ok(Forward::Failed {
                             message: error.to_string(),
+                            record: Some(index),
+                            wrote_boot_time,
                         });
                     }
                 };
@@ -2168,6 +2363,8 @@ where
                                 "{}\\{} changed while MKLM was writing",
                                 record.key_path, record.name
                             ),
+                            record: Some(index),
+                            wrote_boot_time,
                         }
                     } else {
                         Forward::NothingWritten {
@@ -2175,27 +2372,61 @@ where
                         }
                     });
                 }
+                if record.is_check_only() {
+                    continue;
+                }
                 match self
                     .registry
                     .write_value(target, &record.name, &record.intended)
                 {
-                    Ok(()) => wrote = true,
+                    Ok(()) => {
+                        wrote = true;
+                        wrote_boot_time |= record.is_boot_time();
+                    }
                     Err(BackendError::Crashed) => return Err(BackendError::Crashed.into()),
+                    Err(BackendError::DeviceRemoved { .. }) if removable => {
+                        removed = true;
+                        break;
+                    }
                     Err(error) => {
                         return Ok(Forward::Failed {
                             message: error.to_string(),
+                            record: Some(index),
+                            wrote_boot_time,
                         });
                     }
                 }
             }
-            match self.registry.flush_target(target) {
-                Ok(()) => {}
-                Err(BackendError::Crashed) => return Err(BackendError::Crashed.into()),
-                Err(error) => {
-                    return Ok(Forward::Failed {
-                        message: error.to_string(),
-                    });
+            if !removed {
+                match self.registry.flush_target(target) {
+                    Ok(()) => {}
+                    Err(BackendError::Crashed) => return Err(BackendError::Crashed.into()),
+                    Err(BackendError::DeviceRemoved { .. })
+                        if skip_removed && matches!(target, WriteTarget::Device { .. }) =>
+                    {
+                        removed = true;
+                    }
+                    Err(error) => {
+                        return Ok(Forward::Failed {
+                            message: error.to_string(),
+                            record: indices.first().copied(),
+                            wrote_boot_time,
+                        });
+                    }
                 }
+            }
+            if removed {
+                for &index in indices {
+                    entry.records[index].skipped = Some(SkipReason::DeviceRemoved);
+                }
+                // Persist the removal before any later target changes. If this process dies
+                // after changing the standard, recovery must still know that no pin was
+                // written for this devnode, even if Windows has since recreated it.
+                self.save(s, entry)?;
+                let key_path = entry.records[indices[0]].key_path.clone();
+                s.warn(format!(
+                    "{key_path}: the keyboard was removed before MKLM could pin it; skipped"
+                ));
             }
             s.sink.event(&Event::StepWritten {
                 op_id: entry.op_id.clone(),
@@ -2207,7 +2438,10 @@ where
     }
 
     /// Forward writes and the `Written` transition. `Some(result)` when the operation ended
-    /// early: nothing written (`Failed(ConcurrentChange)`) or rolled back after an error.
+    /// early: nothing written (`Failed(ConcurrentChange)`) or rolled back after an error. A
+    /// failure before any value read at boot was written ends `Reverted`, without a restart: the
+    /// engine knows what it wrote (design standard-layout B.6, SAFETY-8); a crash is still
+    /// recovered on the safe side.
     fn write_new(
         &mut self,
         s: &mut Session<'_>,
@@ -2215,7 +2449,7 @@ where
     ) -> Result<Option<OperationResult>, EngineError> {
         match self.write_forward(s, entry)? {
             Forward::Done => {
-                for record in &mut entry.records {
+                for record in entry.records.iter_mut().filter(|r| r.skipped.is_none()) {
                     record.last_written = Some(record.intended.clone());
                 }
                 self.transition(s, entry, OpState::Written, "written")?;
@@ -2229,18 +2463,23 @@ where
                 self.prune(s)?;
                 Ok(Some(self.entry_result(s, entry)))
             }
-            Forward::Failed { message } => {
+            Forward::Failed {
+                message,
+                record,
+                wrote_boot_time,
+            } => {
                 s.warn(format!("{}: writing failed: {message}", entry.op_id));
-                self.roll_back(
+                let target = record
+                    .and_then(|index| entry.records.get(index))
+                    .map(|r| r.target.clone());
+                self.roll_back_as(
                     s,
                     entry,
-                    FailureReason::WriteError {
-                        message,
-                        target: None,
-                    },
+                    Some(FailureReason::WriteError { message, target }),
                     "write-error",
                     &[],
                     false,
+                    wrote_boot_time,
                 )?;
                 self.prune(s)?;
                 Ok(Some(self.entry_result(s, entry)))
@@ -2805,6 +3044,23 @@ where
         reset: &[String],
         pending: bool,
     ) -> Result<(), EngineError> {
+        self.roll_back_as(s, entry, failure, reason, reset, pending, true)
+    }
+
+    /// [`Self::roll_back_with`]; `boot_time_written` false when this process knows that it wrote
+    /// no value read at boot (a forward write that failed before the global step): the rollback
+    /// then ends `Reverted`, not `RevertedPendingReboot` (design standard-layout B.6).
+    #[allow(clippy::too_many_arguments)]
+    fn roll_back_as(
+        &mut self,
+        s: &mut Session<'_>,
+        entry: &mut JournalEntry,
+        failure: Option<FailureReason>,
+        reason: &str,
+        reset: &[String],
+        pending: bool,
+        boot_time_written: bool,
+    ) -> Result<(), EngineError> {
         let completed = match self.revert_values(s, entry, RevertMode::Rollback, failure, reason) {
             Ok(completed) => completed,
             Err(EngineError::Restore(error)) => {
@@ -2817,7 +3073,15 @@ where
         }
         self.refresh(s)?;
         let (reapplied, all_back, _) = self.reset_keyboards(s, reset, false);
-        self.close_reverted(s, entry, &reapplied, !all_back, reason, pending)
+        self.close_reverted_as(
+            s,
+            entry,
+            &reapplied,
+            !all_back,
+            reason,
+            pending,
+            boot_time_written,
+        )
     }
 
     fn roll_back(
@@ -2866,7 +3130,23 @@ where
         reason: &str,
         pending: bool,
     ) -> Result<(), EngineError> {
-        let to = if did_not_return || entry.touches_boot_time_values() {
+        self.close_reverted_as(s, entry, reapplied, did_not_return, reason, pending, true)
+    }
+
+    /// [`Self::close_reverted`]; with `boot_time_written` false, values read at boot do not ask
+    /// for a restart (none was written, [`Self::roll_back_as`]).
+    #[allow(clippy::too_many_arguments)]
+    fn close_reverted_as(
+        &mut self,
+        s: &mut Session<'_>,
+        entry: &mut JournalEntry,
+        reapplied: &[String],
+        did_not_return: bool,
+        reason: &str,
+        pending: bool,
+        boot_time_written: bool,
+    ) -> Result<(), EngineError> {
+        let to = if did_not_return || (boot_time_written && entry.touches_boot_time_values()) {
             OpState::RevertedPendingReboot
         } else {
             OpState::Reverted
@@ -3028,7 +3308,9 @@ where
         apply: &ApplyOptions,
         in_effect: bool,
     ) -> Result<(Vec<String>, bool), EngineError> {
-        if !(in_effect && apply.allow_live_reset && apply.other_input_available) {
+        if touches_global_values(entry)
+            || !(in_effect && apply.allow_live_reset && apply.other_input_available)
+        {
             return Ok((Vec::new(), true));
         }
         self.refresh(s)?;
@@ -3054,6 +3336,7 @@ where
         let in_effect = values_in_effect(entry, s.boot);
         let mut writable = Vec::new();
         let mut conflicting = false;
+        let mut global_conflict = false;
         for index in 0..entry.records.len() {
             let record = &entry.records[index];
             if record.skipped.is_some() {
@@ -3074,7 +3357,14 @@ where
             };
             match current {
                 None => entry.records[index].skipped = Some(SkipReason::DeviceRemoved),
-                Some(current) if value_eq(&record.name, &current, &record.before) => {}
+                Some(current) if value_eq(&record.name, &current, &record.before) => {
+                    // Keep the standard change's global checks in the restore plan even when
+                    // they already equal `before`. Settings may change them after this read;
+                    // the global step must notice that before removing any follower's pin.
+                    if is_standard_change(entry) && record.target == WriteTarget::Global {
+                        writable.push(index);
+                    }
+                }
                 Some(current)
                     if value_eq(
                         &record.name,
@@ -3085,10 +3375,16 @@ where
                     writable.push(index);
                 }
                 Some(current) => {
+                    global_conflict |= record.target == WriteTarget::Global;
                     entry.records[index].conflict = Some(current);
                     conflicting = true;
                 }
             }
+        }
+        if is_standard_change(entry) && global_conflict {
+            s.warn("the standard layout was changed outside MKLM: resolve the conflict instead");
+            self.commit(s, entry)?;
+            return Ok(());
         }
         let failure = entry.failure.clone();
         if writable.is_empty() {
@@ -3635,6 +3931,24 @@ where
                 // continues it the same way (I4): the values that are neither back at `before`
                 // nor at what MKLM wrote are left out, as `undo_conflict` left them out.
                 let undoing_conflict = mode == RevertMode::Revert && reverts_a_conflict(entry);
+                if undoing_conflict && is_standard_change(entry) {
+                    let mut global_conflict = false;
+                    for (record, value) in entry.records.iter_mut().zip(current) {
+                        if record.target == WriteTarget::Global
+                            && record.skipped.is_none()
+                            && let Some(value) = value
+                            && !value_eq(&record.name, value, &record.before)
+                            && !expect_matches(&expect_written(record), &record.name, value)
+                        {
+                            record.conflict = Some(value.clone());
+                            global_conflict = true;
+                        }
+                    }
+                    if global_conflict {
+                        s.warn("the standard layout was changed outside MKLM: resolve the conflict instead");
+                        return self.transition(s, entry, OpState::Conflict, label);
+                    }
+                }
                 let mut left_out = false;
                 let mut subset: Vec<usize> = Vec::new();
                 for (i, record) in entry.records.iter_mut().enumerate() {

@@ -25,6 +25,18 @@ pub struct MigrateParams {
     pub expected: Option<ExpectedPlan>,
 }
 
+/// Design standard-layout B.5: change the PC's standard layout in per-keyboard mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetStandardParams {
+    pub standard: Layout,
+    /// Instance IDs (any collection of each physical keyboard) left to follow the new standard.
+    pub follow: Vec<String>,
+    /// Only the in-place reset of the pinned followers (B.5 step 11): the change itself always
+    /// takes effect at a PC restart. `countdown_seconds` is checked (20 or 60) but not used.
+    pub apply: ApplyOptions,
+    pub expected: Option<ExpectedPlan>,
+}
+
 /// How a restore-to-baseline runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RestoreMode {

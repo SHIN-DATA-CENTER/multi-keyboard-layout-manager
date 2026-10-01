@@ -120,6 +120,13 @@ pub struct AttentionEntry<'a> {
 
 /// True when `entry` writes a HID keyboard's type (a reset in place can apply it).
 pub fn touches_hid(entry: &JournalEntry) -> bool {
+    if entry
+        .records
+        .iter()
+        .any(|r| r.target == WriteTarget::Global && !r.is_check_only())
+    {
+        return false;
+    }
     entry.records.iter().any(|record| {
         matches!(record.target, WriteTarget::Device { .. })
             && (record.name.eq_ignore_ascii_case(value_names::HID_TYPE)
@@ -343,11 +350,22 @@ pub fn recovery_page(
 
 /// The preview of "確認待ちの変更をすべて元に戻す" (design m2 D.10): interrupted entries are
 /// recovered first, then every entry that waits for the user is put back, newest first.
+#[cfg(test)]
 pub fn undo_page(
     preview: &UndoPreview<'_>,
     name_of: NameOf<'_>,
     live: bool,
     lang: Lang,
+) -> RecoveryPage {
+    undo_page_at(preview, name_of, live, lang, None)
+}
+
+pub fn undo_page_at(
+    preview: &UndoPreview<'_>,
+    name_of: NameOf<'_>,
+    live: bool,
+    lang: Lang,
+    boot: Option<mklm_core::BootId>,
 ) -> RecoveryPage {
     let mode = RecoveryMode::Undo;
     let mut items: Vec<RecoveryItem> = preview
@@ -379,7 +397,7 @@ pub fn undo_page(
                 op_id: undo.entry.op_id.to_string(),
                 operation: text::recovery_operation(
                     &kind_text(&undo.entry.kind, name_of, lang),
-                    &text::undo_state(undo.entry.state, lang),
+                    &text::shown_state(mklm_client::describe::shown_state(undo.entry, boot), lang),
                     lang,
                 ),
                 outcome: text::undo_outcome(
@@ -421,6 +439,7 @@ pub fn undo_page(
 
 /// The preview of the history's "元に戻す…" (design m2 D.4): `entry` when the helper would
 /// revert it (`revertible`), else why not.
+#[cfg(test)]
 pub fn revert_page(
     entry: Option<&JournalEntry>,
     revertible: bool,
@@ -429,6 +448,18 @@ pub fn revert_page(
     live: bool,
     lang: Lang,
 ) -> RecoveryPage {
+    revert_page_at(entry, revertible, when, name_of, live, lang, None)
+}
+
+pub fn revert_page_at(
+    entry: Option<&JournalEntry>,
+    revertible: bool,
+    when: &str,
+    name_of: NameOf<'_>,
+    live: bool,
+    lang: Lang,
+    boot: Option<mklm_core::BootId>,
+) -> RecoveryPage {
     let mode = RecoveryMode::Revert;
     let entry = entry.filter(|_| revertible);
     let items: Vec<RecoveryItem> = entry
@@ -436,7 +467,7 @@ pub fn revert_page(
             op_id: entry.op_id.to_string(),
             operation: text::recovery_operation(
                 &format!("{when} {}", kind_text(&entry.kind, name_of, lang)),
-                &text::undo_state(entry.state, lang),
+                &text::shown_state(mklm_client::describe::shown_state(entry, boot), lang),
                 lang,
             ),
             outcome: text::undo_outcome(

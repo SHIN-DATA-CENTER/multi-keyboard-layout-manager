@@ -209,12 +209,20 @@ pub fn failure_text(failure: &FailureReason, phase: ResetPhase) -> String {
 }
 
 /// `3f2a9c1e  set … to JIS  (waiting for keep or revert)`.
-pub fn entry_line(entry: &JournalEntry) -> String {
+pub fn entry_line_at(entry: &JournalEntry, boot: Option<mklm_core::BootId>) -> String {
+    use mklm_client::describe::{ShownState, shown_state};
+    let state = match shown_state(entry, boot) {
+        ShownState::Stored(state) => state_text(state),
+        ShownState::RestartedCheckDue => {
+            "restarted; waiting for the check after the restart (keep or revert)"
+        }
+        ShownState::RevertedAndRestarted => "reverted (in effect since the restart)",
+    };
     format!(
         "{}  {}  ({})",
         entry.op_id.short(),
         kind_text(&entry.kind),
-        state_text(entry.state)
+        state
     )
 }
 

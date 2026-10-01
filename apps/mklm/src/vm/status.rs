@@ -157,6 +157,8 @@ pub fn needs_apply(
 pub struct RestartWaits {
     /// A global value waits (a migration): every keyboard.
     pub all: bool,
+    /// The stored standard table changed in this boot; Raw Input cannot prove it is loaded.
+    pub standard_changed: bool,
     /// Instance IDs.
     pub keyboards: Vec<String>,
 }
@@ -186,7 +188,16 @@ pub fn restart_waits(journal: &Journal, boot: BootId) -> RestartWaits {
                     WriteTarget::Device { instance_id } => {
                         waits.keyboards.push(instance_id.clone());
                     }
-                    WriteTarget::Global => waits.all = true,
+                    WriteTarget::Global => {
+                        waits.all = true;
+                        if record
+                            .name
+                            .eq_ignore_ascii_case(mklm_core::value_names::LAYER_DRIVER_JPN)
+                            && !mklm_core::value_eq(&record.name, &record.before, &record.intended)
+                        {
+                            waits.standard_changed = true;
+                        }
+                    }
                 }
             }
             match &entry.kind {

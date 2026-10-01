@@ -111,7 +111,11 @@ fn follows_standard(entry: &JournalEntry, instance_id: &str) -> bool {
             layout: LayoutChoice::Standard,
             ..
         } => instance_ids.iter().any(same),
-        OpKind::Migrate { assignments, .. } => assignments
+        OpKind::Migrate { assignments, .. }
+        | OpKind::SetStandard {
+            keyboards: assignments,
+            ..
+        } => assignments
             .iter()
             .any(|(id, choice)| same(id) && *choice == LayoutChoice::Standard),
         _ => false,
@@ -120,7 +124,9 @@ fn follows_standard(entry: &JournalEntry, instance_id: &str) -> bool {
 
 fn line(entry: &JournalEntry, row: &CheckRow, typed: Typed, lang: Lang) -> CheckLine {
     let (recognition, tone) = match row.reported {
-        None => (text::Recognition::NotConnected, Tone::Neutral),
+        None if !row.present => (text::Recognition::NotConnected, Tone::Neutral),
+        None if row.remote => (text::Recognition::RemoteNotVisible, Tone::Neutral),
+        None => (text::Recognition::CannotCheck, Tone::Neutral),
         Some(reported) if row.matches() => (text::Recognition::Matches(reported), Tone::Success),
         Some(reported) => (text::Recognition::Differs(reported), Tone::Warning),
     };
@@ -161,9 +167,42 @@ pub fn post_reboot(
             .find(|(typed_id, _)| typed_id.eq_ignore_ascii_case(id))
             .map_or(Typed::NotYet, |(_, typed)| *typed)
     };
-    let lines: Vec<CheckLine> = rows
-        .iter()
-        .map(|row| line(entry, row, typed_of(&row.instance_id), lang))
+    let lines: Vec<CheckLine> = mklm_client::preview::group_check_rows(rows)
+        .into_iter()
+        .map(|group| {
+            let selected = group
+                .rows
+                .iter()
+                .find(|r| r.reported.is_some() && !r.matches())
+                .or_else(|| group.rows.iter().find(|r| r.not_reported()))
+                .unwrap_or(&group.rows[0]);
+            let typed = if group
+                .rows
+                .iter()
+                .any(|r| typed_of(&r.instance_id) == Typed::Differs)
+            {
+                Typed::Differs
+            } else if group
+                .rows
+                .iter()
+                .any(|r| typed_of(&r.instance_id) == Typed::AsExpected)
+            {
+                Typed::AsExpected
+            } else {
+                Typed::NotYet
+            };
+            let mut line = line(entry, selected, typed, lang);
+            line.name = group.name;
+            if group.rows.iter().any(|r| r.layout != selected.layout) {
+                line.setting = if lang == Lang::Ja {
+                    "配列が混在しています"
+                } else {
+                    "Mixed layouts"
+                }
+                .into();
+            }
+            line
+        })
         .collect();
     let differs = rows
         .iter()
@@ -174,7 +213,13 @@ pub fn post_reboot(
         operation: kind_text(&entry.kind, name_of, lang),
         not_restarted,
         rows: lines,
-        migration_note: if matches!(entry.kind, OpKind::Migrate { .. }) {
+        migration_note: if matches!(entry.kind, OpKind::SetStandard { .. }) {
+            if rows.is_empty() {
+                if lang == Lang::Ja { "この一覧で確認するキーボードはありません。今の配列を維持するために割り当てたキーボードは一覧に含めていません。標準配列に従う入力とリモート デスクトップの配列は別途確認してください。" }
+                else { "There are no keyboards to check in this list. Assignments that preserve the current layout are omitted. Check input following the standard and the Remote Desktop session layout separately." }
+            } else if lang == Lang::Ja { "配列が変わるキーボードを表示しています。接続先の PC の前で Shift+2 を打って確かめてください。" }
+            else { "These keyboards change layout. Test Shift+2 at the PC they are attached to." }.into()
+        } else if matches!(entry.kind, OpKind::Migrate { .. }) {
             text::check_migration_note(lang)
         } else {
             String::new()
@@ -242,6 +287,36 @@ mod tests {
     use crate::vm::test_journal::{BOOT, BUILT_IN, KEYCHRON, LATER_BOOT, entry, hid_record};
 
     const JAPANESE: u32 = 0x0411_0411;
+
+    #[test]
+    fn grouped_collections_prioritize_disagreement_and_unobserved_members() {
+        let (change, snapshot) = keychron_to_jis();
+        let mut rows = check_rows(&snapshot, &change);
+        let mut other = rows[0].clone();
+        other.instance_id = "another-collection".into();
+        other.reported = Some(KeyboardType::US);
+        rows.push(other);
+        let page = post_reboot(&change, &rows, &[], LATER_BOOT, &name_of, Lang::Ja);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].tone, Tone::Warning);
+        rows[1].reported = None;
+        rows[1].remote = true;
+        let page = post_reboot(&change, &rows, &[], LATER_BOOT, &name_of, Lang::Ja);
+        assert_eq!(page.rows.len(), 1);
+        assert_ne!(page.rows[0].tone, Tone::Success);
+        assert!(
+            page.rows[0]
+                .recognized
+                .contains("セッションからは見えません")
+        );
+        let typed = [
+            (rows[0].instance_id.clone(), Typed::AsExpected),
+            (rows[1].instance_id.clone(), Typed::Differs),
+        ];
+        let page = post_reboot(&change, &rows, &typed, LATER_BOOT, &name_of, Lang::Ja);
+        assert_eq!(page.rows[0].typed_tone, Tone::Warning);
+        assert!(!page.keep_warning.is_empty());
+    }
 
     fn name_of(id: &str) -> String {
         if id.eq_ignore_ascii_case(KEYCHRON) {

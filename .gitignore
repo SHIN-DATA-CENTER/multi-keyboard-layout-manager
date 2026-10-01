@@ -3,3 +3,4 @@
 *.log
 /dist
 /dist-dev
+/release-work

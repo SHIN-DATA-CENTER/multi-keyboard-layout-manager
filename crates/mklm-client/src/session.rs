@@ -412,6 +412,7 @@ pub fn plans_first(request: &Request) -> bool {
     match request {
         Request::SetLayout(_)
         | Request::Migrate(_)
+        | Request::SetStandard(_)
         | Request::RestoreBaseline(_)
         | Request::CleanupValues { .. } => true,
         Request::Revert { .. }

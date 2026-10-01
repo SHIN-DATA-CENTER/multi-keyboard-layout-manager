@@ -137,6 +137,23 @@ fn check_baselines(sc: &Scenario, world: &World, journal: &Journal, ctx: &str) {
 
 /// Checks on a crash image, before recovery: I2, I5, I6.
 fn check_image(sc: &Scenario, base: &World, base_journal: &Journal, world: &World, ctx: &str) {
+    if sc.name.starts_with("standard ") {
+        let global = world.registry.global_settings();
+        for kb in world.devices.listed() {
+            if kb.instance_id == KEYCHRON {
+                let table = mklm_core::effective_layout(
+                    global.mode(),
+                    &global.standard_layout(),
+                    kb.predicted_type(&global).unwrap(),
+                );
+                assert_eq!(
+                    table.table,
+                    mklm_core::LayoutTable::Jis,
+                    "{ctx}: I8: follower changed layout"
+                );
+            }
+        }
+    }
     if inv_ps2_holds(base) {
         assert!(
             inv_ps2_holds(world),
@@ -502,6 +519,54 @@ fn crash_migrate() {
     let w = World::pre_m0();
     run_scenario(&scenario("migrate", w.fork(), &w, |w| {
         w.migrate(Layout::Jis, &[(KEYCHRON, LayoutChoice::Jis)])
+    }));
+}
+
+fn standard_world() -> World {
+    let mut snapshot = mklm_core::fixtures::dev_machine();
+    snapshot
+        .keyboards
+        .iter_mut()
+        .find(|kb| kb.instance_id == KEYCHRON)
+        .unwrap()
+        .overrides = mklm_core::DeviceOverrides::default();
+    World::new(snapshot.keyboards, snapshot.global)
+}
+
+fn change_standard(w: &mut World) -> Result<OperationResult, EngineError> {
+    w.run(|e| {
+        e.set_standard(
+            &mklm_engine::SetStandardParams {
+                standard: Layout::Us,
+                follow: Vec::new(),
+                apply: LIVE,
+                expected: None,
+            },
+            &mut ScriptedSink::default(),
+        )
+    })
+}
+
+#[test]
+fn crash_standard_preserves_the_followers_layout() {
+    let w = standard_world();
+    run_scenario(&scenario(
+        "standard forward",
+        w.clone(),
+        &w,
+        change_standard,
+    ));
+}
+
+#[test]
+fn crash_standard_revert_preserves_the_followers_layout() {
+    let pristine = standard_world();
+    let mut w = pristine.fork();
+    let op = op_of(&World::ok(change_standard(&mut w)));
+    w.reboot();
+    World::ok(w.confirm(&op));
+    run_scenario(&scenario("standard revert", w, &pristine, move |w| {
+        w.revert(&op, LIVE)
     }));
 }
 

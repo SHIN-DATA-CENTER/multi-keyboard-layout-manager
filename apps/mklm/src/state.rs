@@ -221,6 +221,9 @@ impl PrepareFailure {
 /// A change being prepared on the change page (design m3 B.4, B.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeDraft {
+    pub standard_change: bool,
+    pub follow: Vec<String>,
+    pub standard_plan: Option<Result<mklm_core::StandardPlan, mklm_core::OperationError>>,
     /// The row's ID (the container ID, or the instance ID of a keyboard without one).
     pub row: String,
     /// The device's display name.
@@ -264,6 +267,9 @@ pub struct ChangeDraft {
 impl ChangeDraft {
     pub fn new(row: String, name: String, members: Vec<String>) -> Self {
         Self {
+            standard_change: false,
+            follow: Vec::new(),
+            standard_plan: None,
             row,
             name,
             detection: Detection::for_keyboards(members.clone()),
@@ -488,6 +494,11 @@ pub enum AppMsg {
     Refresh,
     /// "変更…" on a keyboard row (its ID): the change page (design m3 B.4).
     OpenChange(String),
+    OpenStandard,
+    StandardFollow {
+        instance_id: String,
+        follow: bool,
+    },
     /// A layout choice on the change page (its index).
     ChangeChoose(usize),
     /// An apply method (0 = switch now, 1 = at the restart, review U1).
@@ -933,6 +944,54 @@ pub fn update(state: &mut AppState, msg: AppMsg) -> Vec<Effect> {
             Vec::new()
         }
         AppMsg::OpenChange(row) => open_change(state, &row),
+        AppMsg::OpenStandard => {
+            if !crate::vm::standard::entry(state, state.lang.unwrap_or(Lang::Ja)).enabled {
+                return Vec::new();
+            }
+            let Some(snapshot) = state.read.as_ref().and_then(|r| r.snapshot.as_ref()) else {
+                return Vec::new();
+            };
+            let mut draft = ChangeDraft::new(
+                String::new(),
+                String::new(),
+                snapshot
+                    .keyboards
+                    .iter()
+                    .map(|kb| kb.instance_id.clone())
+                    .collect(),
+            );
+            draft.standard_change = true;
+            draft.standard = mklm_core::stored_standard(&snapshot.global);
+            draft.preparing = Some(state.next_prepare);
+            let token = state.next_prepare;
+            state.next_prepare += 1;
+            state.draft = Some(draft);
+            stop_identifying(state);
+            state.page = Page::Change;
+            vec![
+                Effect::PrepareChange {
+                    token,
+                    gate: Gate::NewOp,
+                },
+                Effect::Render,
+            ]
+        }
+        AppMsg::StandardFollow {
+            instance_id,
+            follow,
+        } => {
+            let Some(draft) = editable_draft(state).filter(|d| d.standard_change) else {
+                return Vec::new();
+            };
+            draft
+                .follow
+                .retain(|id| !id.eq_ignore_ascii_case(&instance_id));
+            if follow {
+                draft.follow.push(instance_id);
+            }
+            replan(draft);
+            vec![Effect::Render]
+        }
         AppMsg::ChangeChoose(index) => choose_layout(state, index),
         AppMsg::ChangeChooseMethod(index) => {
             let Some(method) = ApplyMethod::from_index(index) else {
@@ -1354,6 +1413,9 @@ fn editable_change(state: &mut AppState) -> Option<&mut ChangeDraft> {
 /// still lists a keyboard a reset puts into effect and "reset now" is chosen (design m3 B.12).
 fn ready_request(state: &AppState) -> Option<(Request, ApplyOptions)> {
     let draft = state.draft.as_ref()?;
+    if draft.standard_change {
+        return crate::vm::standard::request(draft);
+    }
     if !draft.apply_now {
         return crate::vm::change::draft_request(draft);
     }
@@ -1500,6 +1562,17 @@ fn replan(draft: &mut ChangeDraft) {
         draft.plan = None;
         return;
     };
+    if draft.standard_change {
+        draft.standard_plan = draft.standard.map(|standard| {
+            mklm_core::plan_set_standard(
+                &prepared.snapshot.keyboards,
+                &prepared.snapshot.global,
+                standard,
+                &draft.follow,
+            )
+        });
+        return;
+    }
     if draft.restore_all {
         draft.plan = Some(crate::vm::change::plan_restore_scope(
             &prepared.snapshot,
@@ -1607,7 +1680,7 @@ fn draft_targets(state: &AppState) -> Vec<SessionTarget> {
         return Vec::new();
     };
     let snapshot = draft_snapshot(state, draft);
-    if draft.apply_now || draft.restore_all {
+    if draft.apply_now || draft.restore_all || draft.standard_change {
         let Some(snapshot) = snapshot else {
             return Vec::new();
         };
@@ -2376,6 +2449,127 @@ mod tests {
             visible: true,
             ..AppState::default()
         }
+    }
+
+    #[test]
+    fn standard_change_prepares_previews_followers_and_sends_a_checked_request() {
+        let mut state = ready_state();
+        let effects = update(&mut state, AppMsg::OpenStandard);
+        let Effect::PrepareChange {
+            token,
+            gate: Gate::NewOp,
+        } = effects[0]
+        else {
+            panic!("{effects:?}")
+        };
+        update(
+            &mut state,
+            AppMsg::ChangePrepared {
+                token,
+                at: Instant::now(),
+                prepared: Box::new(Ok(prepared())),
+            },
+        );
+        let view = |state: &AppState| {
+            crate::vm::standard::page(
+                state.draft.as_ref().unwrap(),
+                None,
+                state.elevated,
+                state.settings.change.uac_notice_seen,
+                Lang::Ja,
+            )
+        };
+        assert!(!view(&state).ready); // The current standard is a no-op.
+        update(&mut state, AppMsg::ChangeChooseStandard(1));
+        assert!(view(&state).ready);
+        assert!(view(&state).rows.iter().any(|row| row.selectable));
+        let follower = state
+            .draft
+            .as_ref()
+            .unwrap()
+            .standard_plan
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .change
+            .pinned[0]
+            .clone();
+        update(
+            &mut state,
+            AppMsg::StandardFollow {
+                instance_id: follower.clone(),
+                follow: true,
+            },
+        );
+        assert!(view(&state).rows.iter().any(|row| !row.keep));
+        assert_eq!(
+            update(&mut state, AppMsg::ChangeApply),
+            vec![Effect::Render]
+        );
+        assert_eq!(state.page, Page::UacNotice);
+        update(&mut state, AppMsg::CancelChange);
+        assert_eq!(state.page, Page::Change);
+        assert!(view(&state).ready);
+        state.settings.change.uac_notice_seen = true;
+        let effects = update(&mut state, AppMsg::ChangeApply);
+        let request = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::StartSession {
+                    request: Request::SetStandard(request),
+                    ..
+                } => Some(request),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(request.standard, Layout::Us);
+        assert_eq!(request.follow, vec![follower]);
+        assert!(request.expected.is_some());
+    }
+
+    #[test]
+    fn standard_entry_refuses_fixed_mode_and_blocked_preparations() {
+        let mut state = ready_state();
+        state
+            .read
+            .as_mut()
+            .unwrap()
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .global = fixtures::global_fixed_jis();
+        assert!(update(&mut state, AppMsg::OpenStandard).is_empty());
+        assert!(state.draft.is_none());
+        state = ready_state();
+        let effects = update(&mut state, AppMsg::OpenStandard);
+        let Effect::PrepareChange { token, .. } = effects[0] else {
+            panic!("{effects:?}")
+        };
+        let mut preparation = prepared();
+        preparation.blocker = Some(mklm_client::gate::BlockReason::AwaitingUser(
+            mklm_client::gate::OpRef {
+                op_id: mklm_core::OpId::parse("0000000a-0000-4000-8000-000000000000").unwrap(),
+                kind: mklm_core::OpKind::Migrate {
+                    standard: Layout::Jis,
+                    assignments: vec![],
+                },
+                state: mklm_core::OpState::AwaitingConfirm,
+            },
+        ));
+        update(
+            &mut state,
+            AppMsg::ChangePrepared {
+                token,
+                at: Instant::now(),
+                prepared: Box::new(Ok(preparation)),
+            },
+        );
+        let page =
+            crate::vm::standard::page(state.draft.as_ref().unwrap(), None, false, false, Lang::Ja);
+        assert!(!page.ready && !page.editable);
+        assert!(!page.error.is_empty());
+        assert!(update(&mut state, AppMsg::ChangeApply).is_empty());
     }
 
     // --- The main screen (WP-U1) ---

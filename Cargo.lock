@@ -2891,7 +2891,7 @@ dependencies = [
 
 [[package]]
 name = "mklm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "embed-resource",
  "mklm-client",
@@ -2907,7 +2907,7 @@ dependencies = [
 
 [[package]]
 name = "mklm-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2924,7 +2924,7 @@ dependencies = [
 
 [[package]]
 name = "mklm-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mklm-core",
  "mklm-ipc",
@@ -2936,7 +2936,7 @@ dependencies = [
 
 [[package]]
 name = "mklm-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2945,7 +2945,7 @@ dependencies = [
 
 [[package]]
 name = "mklm-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mklm-core",
  "mklm-win",
@@ -2956,7 +2956,7 @@ dependencies = [
 
 [[package]]
 name = "mklm-helper"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "embed-resource",
  "mklm-core",
@@ -2968,7 +2968,7 @@ dependencies = [
 
 [[package]]
 name = "mklm-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mklm-core",
  "mklm-update",
@@ -2979,7 +2979,7 @@ dependencies = [
 
 [[package]]
 name = "mklm-update"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "minisign",
  "minisign-verify",
@@ -2994,7 +2994,7 @@ dependencies = [
 
 [[package]]
 name = "mklm-win"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mklm-core",
  "thiserror 2.0.21",
@@ -6081,7 +6081,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",

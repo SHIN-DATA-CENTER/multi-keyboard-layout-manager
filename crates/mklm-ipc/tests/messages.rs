@@ -175,6 +175,21 @@ fn requests(op: &OpId) -> Vec<(&'static str, Request)> {
             assignments: Vec::new(),
             expected: None,
         }),
+        SetStandard => Request::SetStandard(mklm_ipc::SetStandardRequest {
+            standard: Layout::Us,
+            follow: vec![KEYCHRON.to_string()],
+            apply: apply_all(),
+            expected: Some(ExpectedPlan {
+                steps: migration_steps(),
+                apply: Some(PendingAction::RestartPc),
+            }),
+        }),
+        SetStandard => Request::SetStandard(mklm_ipc::SetStandardRequest {
+            standard: Layout::Jis,
+            follow: Vec::new(),
+            apply: ApplyOptions::default(),
+            expected: None,
+        }),
         Revert => Request::Revert {
             op_id: op.clone(),
             apply: ApplyOptions {

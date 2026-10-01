@@ -27,8 +27,7 @@ const CURRENT_VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
 /// Reads the OS facts. Only a failing `RtlGetVersion` is an error; a missing UBR is `None` and an
 /// unknown architecture falls back to the one this binary was built for, with an issue.
 pub fn read_os_info(issues: &mut Vec<ReadIssue>) -> Result<OsInfo, Error> {
-    // SAFETY: GetSystemMetrics has no preconditions.
-    let remote_session = unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0;
+    let remote_session = is_remote_session();
     Ok(OsInfo {
         build: build_number()?,
         ubr: ubr(issues),
@@ -61,6 +60,14 @@ fn computer_name() -> Option<String> {
     let name = String::from_utf16_lossy(buffer.get(..size as usize)?);
     let name = name.trim();
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// True when this process runs in a Remote Desktop session (`GetSystemMetrics(SM_REMOTESESSION)`;
+/// `OsInfo::remote_session`, and the engine's `Host::remote_session` in the helper, which runs in
+/// its caller's session).
+pub fn is_remote_session() -> bool {
+    // SAFETY: GetSystemMetrics has no preconditions.
+    (unsafe { GetSystemMetrics(SM_REMOTESESSION) }) != 0
 }
 
 /// The keyboard type the Remote Desktop client reported (`OsInfo::client_keyboard_type`):

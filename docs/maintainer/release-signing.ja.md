@@ -37,6 +37,14 @@ MKLM の自動更新は、メンテナーがオフラインで署名した `late
 
 ## 2. 準備（初回だけ）
 
+### この開発機での保管方針（2026-10-01）
+
+利用者の指定で USB ではなく `%USERPROFILE%\MKLM-signing\` に保管する。通常用とバックアップ用は `primary\` / `backup\`、検証済みの公式ツールは `tools\minisign.exe`。秘密鍵は minisign のパスワードで暗号化し、フォルダーのアクセス権は本人と SYSTEM に限定する。両方が同じ PC にあるため、PC の故障・侵害に対する独立したバックアップにはならない。リポジトリには公開鍵だけを登録する。
+
+この構成での初回の署名は `Sign-Release.ps1` を専用コンソールで実行できる。`prepare-release` が検証した manifest と `key-drill start` の nonce の SHA-256 を引数として渡し、内容・trusted comment・公式ツールのハッシュを確認した後にオフラインで署名する。パスワード入力は公式 minisign が直接受け取り、スクリプトは秘密鍵を開かない。点検と公開はその後 `cargo xtask key-drill check` / `publish` で検証してから行う。
+
+`New-SigningKeys.ps1` は直接入力用の別コンソールで実行する。オフラインにして開発アプリを閉じた確認後に、公式 minisign がパスワードを直接受け取る。秘密鍵やパスワードをスクリプト・AI・ログへ渡さない。既存の鍵フォルダーは上書きしない。以下の USB の例は元の保管構成の例であり、この PC では上記パスへ読み替える。`SIGN-OFFLINE.txt` の生成はまだ USB の例を使用するため、実際の保管先との照合が必要。
+
 最初の項目（公式の `minisign` の用意と確認）は、設計 F.6 のリハーサルの**前に**行う（リハーサルも同じ道具で署名するため）。2 つ目以降（本物の鍵の生成など）は、F.6 の後片付けが済んでから行う（設計 G.1 の順序）。
 
 - [ ] 公式の `minisign` を用意する: `https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip` とその `.minisig` をダウンロード → `cargo xtask verify-signer --zip … --sig …` → 表示された SHA-256 を下の「記録」の表に書く → 確かめた zip を残しておく（F.6 はここから取り出した `minisign.exe` を使う）。
@@ -55,6 +63,8 @@ MKLM の自動更新は、メンテナーがオフラインで署名した `late
 ## 3. 毎回のリリース（安定版）
 
 0. **公開の条件を確かめる**（手順 1 の前。0.1.0 は、設計にだけ書いた完了条件を行わずに出荷した）。v0.2.0（起動 ID の修正を含む最初の公開版。設計 m2 C.10「公開する順序」）では:
+   - **今回の利用者指定の例外（2026-10-01）**: ARM64 Windows 11 がないため、下記 ARM64 ネイティブ実行検証だけを見送る。未実施をリリースノートに明記し、ARM64 のコンパイル・CI ビルド・配布アセットは維持する。他の公開前検査は免除しない。詳しくは `docs/design/v0.2.0-release.md`。
+   - **その後の追加指定（今回限り）**: 利用者が追加の長い実機検証の省略を承認。実施済みの変更・再起動・Keep・取り消しの結果と、未実施の残りの MT / T-STD-6/6b / R-PHANTOM / RDP 等を区別して公開する。上記 ARM64 だけの例外を、この範囲まで拡張する。自動テスト、署名検証、配布検証は省略しない。実施・未実施の記録は `docs/research/v0.2.0-real-tests.md`。
    - 設計 m2 H.2 の MT-1〜MT-9（MT-6b を含む）がすべて合格し、`docs/research/boot-id.md` に記録がある。止める規則（m2 C.10）に当たったものがない。
    - ARM64 の Windows 11（実機か `windows-11-arm` のランナー）で `cargo test -p mklm-win session:: -- --include-ignored --nocapture` を実行し、カウンターが 0 でなく `PrefetchParameters\BootId` と等しいことを確かめ、`boot-id.md` に記録した。更新情報は arm64 のアセットを必ず持つので、arm64 だけを外して出すことはできない。確かめられなければ、リリース全体を延期する。
    - 以後の版: Windows の機能更新の後は、MT-2〜MT-7 をやり直してから出す。
@@ -198,15 +208,16 @@ F:\tools\minisign.exe -S -s F:\mklm-keys-backup\mklm-backup.key -m <out>\nonce.b
 
 | 日付 | ファイル | SHA-256 | 確かめた人 |
 |---|---|---|---|
-| （未記入） | `minisign-0.12-win64.zip` | （`verify-signer` の出力） | |
-| （未記入） | `minisign.exe`（zip の中） | （`verify-signer` の出力） | |
+| 2026-10-01 | `minisign-0.12-win64.zip` | `37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479` | Codex（作者の署名を xtask で検証） |
+| 2026-10-01 | `minisign.exe`（zip の x86_64） | `5535be9e4e123831ebe6ef324aafe9dde507015c176191f9e20c3ad60567f9e1` | Codex（xtask） |
+| 2026-10-01 | `minisign.exe`（同じ署名済み zip の aarch64） | `f39e065e649d5ed7075675accfe0ada234175d63479df650654ec4365d7c4513` | Codex（Get-FileHash） |
 
 ### 埋め込んだ鍵
 
 | 役割 | 鍵 ID | 指紋（`pubkey-line` の出力） | 最初に入れた版 | 失効させた版 |
 |---|---|---|---|---|
-| primary | （未作成） | | | |
-| backup | （未作成） | | | |
+| primary | `D25C95894801CEE6` | `248efb06699a5ff1261e8607f4950fb5347539c8dc5777932dbe58cd211cd013` | v0.2.0（公開準備中） | |
+| backup | `F65C01E2BA6A6156` | `3dfd02790c2d50f303728358fff1bfed706170cc2f8571b400461d334ae64379` | v0.2.0（公開準備中） | |
 
 ### 鍵の点検の記録
 

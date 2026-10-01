@@ -72,6 +72,13 @@ pub trait Host {
     /// that was quarantined, design review S1). The engine appends them to the result.
     fn drain_warnings(&mut self) -> Vec<String>;
 
+    /// True when the request comes from a Remote Desktop session (the helper runs in its
+    /// caller's session: `GetSystemMetrics(SM_REMOTESESSION)`). Only the wording of the
+    /// confirmation's warnings depends on it (design standard-layout D.2: a session born over
+    /// Remote Desktop was seen to list none of the PC's keyboards in Raw Input). No default: every
+    /// host must say.
+    fn remote_session(&self) -> bool;
+
     /// True, once, when a quarantine since the last call moved the recovery files away: a level
     /// of the base directory failed validation and was renamed aside with everything under it,
     /// `Recovery` included (design review S1). The engine then writes the recovery files again in

@@ -154,6 +154,7 @@ fn tone(entry: &JournalEntry) -> Tone {
 /// not "途中で止まりました").
 pub fn journal_rows(
     journal: &Journal,
+    boot: Option<mklm_core::BootId>,
     time_text: TimeText<'_>,
     name_of: NameOf<'_>,
     revertible: &dyn Fn(&JournalEntry) -> bool,
@@ -170,12 +171,28 @@ pub fn journal_rows(
                 op: entry.op_id.short().to_string(),
                 op_id: entry.op_id.to_string(),
                 what: kind_text(&entry.kind, name_of, lang),
-                state: i18n::entry_state(
-                    entry.state,
-                    entry.failure.as_ref(),
-                    attention(entry),
-                    lang,
-                ),
+                state: match mklm_client::describe::shown_state(entry, boot) {
+                    mklm_client::describe::ShownState::RestartedCheckDue => if lang == Lang::Ja {
+                        "再起動しました（再起動後の確認を待っています）"
+                    } else {
+                        "Restarted; waiting for the check after the restart"
+                    }
+                    .into(),
+                    mklm_client::describe::ShownState::RevertedAndRestarted => {
+                        if lang == Lang::Ja {
+                            "元に戻しました（再起動で反映済み）"
+                        } else {
+                            "Reverted (in effect since the restart)"
+                        }
+                        .into()
+                    }
+                    _ => i18n::entry_state(
+                        entry.state,
+                        entry.failure.as_ref(),
+                        attention(entry),
+                        lang,
+                    ),
+                },
                 reason: entry
                     .failure
                     .as_ref()
@@ -193,6 +210,7 @@ pub fn journal_rows(
 /// The history page from the last read (`journal` is `None` when it could not be read).
 pub fn journal_page(
     journal: Option<&Journal>,
+    boot: Option<mklm_core::BootId>,
     summary: &StartupSummary,
     time_text: TimeText<'_>,
     name_of: NameOf<'_>,
@@ -215,6 +233,7 @@ pub fn journal_page(
     let rows = journal.map_or_else(Vec::new, |journal| {
         journal_rows(
             journal,
+            boot,
             time_text,
             name_of,
             &|entry| !blocked && revertible(journal, entry),
@@ -308,7 +327,7 @@ mod tests {
     fn page(journal: &Journal, boot: BootId, lang: Lang) -> JournalPage {
         let summary = summarize(journal, boot, &|_: &ProcessIdentity| Liveness::Dead);
         let time = |at: Timestamp| text::history_time(utc_parts(at), false, lang);
-        journal_page(Some(journal), &summary, &time, &name_of, lang)
+        journal_page(Some(journal), Some(boot), &summary, &time, &name_of, lang)
     }
 
     #[test]

@@ -399,7 +399,7 @@ export component ImeHelpScreen inherits VerticalLayout {
         // starts, so a session that started before a pending restart may treat 英数 as on a US
         // keyboard. Guidance only (plan 3.10).
         Body {
-            text: @tr("Over Remote Desktop, the remote PC decides what each key does. Its key table is fixed when the session starts, so a change that waits for a restart reaches Remote Desktop only after the restart and a new sign-in. If the 英数 key does not switch Japanese input over Remote Desktop, use Shift+英数 (what the 英数 key does), Ctrl+英数 (ひらがな), Alt+英数 (カタカナ) or Alt+半角/全角 (IME on/off), or assign Ctrl+Space with the steps above.");
+            text: @tr("Remote Desktop uses one keyboard layout per session. Per-keyboard assignments affect keyboards attached to the PC you connect to; they do not change the session layout. How the host standard and client report determine this layout, and when a change reaches it, are not yet verified. Check Shift+2 in the session. To change the standard of the PC running MKLM, use the standard layout button on the keyboard list. If 英数 does not switch Japanese input, try Shift+英数 or Alt+半角/全角, or assign Ctrl+Space using the steps above.");
         }
 
         HorizontalLayout {

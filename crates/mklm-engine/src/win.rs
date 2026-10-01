@@ -671,6 +671,10 @@ impl Host for WinHost {
     fn take_recovery_assets_moved(&mut self) -> bool {
         std::mem::take(&mut self.assets_moved)
     }
+
+    fn remote_session(&self) -> bool {
+        mklm_win::is_remote_session()
+    }
 }
 
 /// Milliseconds since the Unix epoch; 0 for a clock set before 1970.

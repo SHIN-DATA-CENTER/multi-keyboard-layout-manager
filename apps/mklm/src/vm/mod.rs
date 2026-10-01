@@ -14,6 +14,7 @@ pub mod restart;
 pub mod result;
 pub mod session;
 pub mod settings;
+pub mod standard;
 pub mod status;
 #[cfg(test)]
 pub(crate) mod test_journal;

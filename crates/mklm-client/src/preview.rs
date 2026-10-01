@@ -17,6 +17,9 @@ use mklm_core::{
 
 use crate::values::{model_value, op_value};
 
+mod standard;
+pub use standard::{StandardRole, StandardRow, standard_rows};
+
 /// The approved plan the helper must match before it writes (design review S6).
 pub fn expected(plan: &OperationPlan) -> ExpectedPlan {
     ExpectedPlan {
@@ -334,6 +337,10 @@ pub fn undo_preview<'a>(
 /// Raw Input says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckRow {
+    /// Physical keyboard identity, shared by its HID collections.
+    pub group_id: String,
+    pub present: bool,
+    pub remote: bool,
     pub instance_id: String,
     pub name: String,
     pub expected: Option<KeyboardType>,
@@ -347,7 +354,7 @@ impl CheckRow {
         matches!((self.expected, self.reported), (Some(e), Some(r)) if e == r)
     }
 
-    /// Raw Input does not report the keyboard (not connected).
+    /// Raw Input does not report the keyboard; presence is tracked separately.
     pub fn not_reported(&self) -> bool {
         self.reported.is_none()
     }
@@ -378,6 +385,29 @@ pub fn check_rows(snapshot: &SystemSnapshot, entry: &JournalEntry) -> Vec<CheckR
             }
         }
     }
+    if let OpKind::SetStandard { keyboards, .. } = &entry.kind {
+        ids.clear();
+        for (id, choice) in keyboards {
+            if *choice == mklm_core::LayoutChoice::Standard {
+                ids.push(id);
+            }
+        }
+        for kb in &snapshot.keyboards {
+            if kb.present
+                && !kb.is_remote_desktop()
+                && kb.driver == KeyboardDriver::Kbdhid
+                && kb.transport == Transport::Virtual
+                && kb
+                    .predicted_type(&snapshot.global)
+                    .is_some_and(|ty| ty.per_keyboard_table().is_none())
+                && !ids
+                    .iter()
+                    .any(|id| id.eq_ignore_ascii_case(&kb.instance_id))
+            {
+                ids.push(&kb.instance_id);
+            }
+        }
+    }
     ids.iter()
         .filter_map(|id| {
             assessment
@@ -386,6 +416,25 @@ pub fn check_rows(snapshot: &SystemSnapshot, entry: &JournalEntry) -> Vec<CheckR
                 .find(|ka| ka.instance_id.eq_ignore_ascii_case(id))
         })
         .map(|ka| CheckRow {
+            group_id: assessment
+                .groups
+                .iter()
+                .find(|g| g.keyboards.contains(&ka.instance_id))
+                .and_then(|g| {
+                    if g.is_internal {
+                        None
+                    } else {
+                        snapshot
+                            .keyboards
+                            .iter()
+                            .find(|kb| kb.instance_id == ka.instance_id)
+                            .and_then(|kb| kb.known_container_id())
+                            .map(str::to_owned)
+                    }
+                })
+                .unwrap_or_else(|| ka.instance_id.clone()),
+            present: ka.present,
+            remote: snapshot.os.remote_session,
             instance_id: ka.instance_id.clone(),
             name: ka.display_name.clone(),
             expected: ka.predicted_type,
@@ -393,4 +442,126 @@ pub fn check_rows(snapshot: &SystemSnapshot, entry: &JournalEntry) -> Vec<CheckR
             layout: ka.after_restart.as_ref().map(|l| l.table.clone()),
         })
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckGroup {
+    pub id: String,
+    pub name: String,
+    pub rows: Vec<CheckRow>,
+}
+
+impl CheckGroup {
+    pub fn matches(&self) -> bool {
+        self.rows.iter().all(CheckRow::matches)
+    }
+    pub fn differs(&self) -> bool {
+        self.rows
+            .iter()
+            .any(|r| matches!((r.expected, r.reported), (Some(e), Some(a)) if e != a))
+    }
+}
+
+pub fn group_check_rows(rows: &[CheckRow]) -> Vec<CheckGroup> {
+    let mut groups: Vec<CheckGroup> = Vec::new();
+    for row in rows {
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|g| g.id.eq_ignore_ascii_case(&row.group_id))
+        {
+            group.rows.push(row.clone());
+        } else {
+            groups.push(CheckGroup {
+                id: row.group_id.clone(),
+                name: row.name.clone(),
+                rows: vec![row.clone()],
+            });
+        }
+    }
+    groups
+}
+
+pub fn check_groups(snapshot: &SystemSnapshot, entry: &JournalEntry) -> Vec<CheckGroup> {
+    group_check_rows(&check_rows(snapshot, entry))
+}
+
+#[cfg(test)]
+mod check_tests {
+    use super::*;
+    use mklm_core::{Layout, LayoutChoice, fixtures};
+
+    #[test]
+    fn an_unknown_container_does_not_merge_unrelated_keyboards() {
+        let (ops, baselines) = fixtures::schema_1_journal();
+        let mut entry = Journal::parse(&ops, &baselines).entries.remove(0);
+        let mut snapshot = fixtures::dev_machine();
+        let mut one = fixtures::keychron();
+        one.instance_id = "one".into();
+        one.container_id = Some("{00000000-0000-0000-0000-000000000000}".into());
+        let mut two = one.clone();
+        two.instance_id = "two".into();
+        snapshot.keyboards = vec![one, two];
+        entry.kind = OpKind::SetLayout {
+            requested: "one".into(),
+            instance_ids: vec!["one".into(), "two".into()],
+            layout: LayoutChoice::Us,
+        };
+        entry.records[0].target = WriteTarget::Device {
+            instance_id: "one".into(),
+        };
+        let mut second = entry.records[0].clone();
+        second.target = WriteTarget::Device {
+            instance_id: "two".into(),
+        };
+        entry.records.push(second);
+        assert_eq!(check_groups(&snapshot, &entry).len(), 2);
+    }
+
+    #[test]
+    fn standard_checks_followers_and_virtual_collections_but_excludes_pins_and_rdp() {
+        let (ops, baselines) = fixtures::schema_1_journal();
+        let mut entry = Journal::parse(&ops, &baselines).entries.remove(0);
+        let mut snapshot = fixtures::dev_machine();
+        let mut follower = fixtures::keychron();
+        follower.instance_id = "follower-1".into();
+        follower.container_id = Some("external-group".into());
+        follower.overrides = Default::default();
+        let mut second = follower.clone();
+        second.instance_id = "follower-2".into();
+        let mut virtual_kb = follower.clone();
+        virtual_kb.instance_id = "virtual".into();
+        virtual_kb.container_id = None;
+        virtual_kb.transport = Transport::Virtual;
+        snapshot.keyboards.extend([follower, second, virtual_kb]);
+        entry.kind = OpKind::SetStandard {
+            from: Layout::Jis,
+            to: Layout::Us,
+            keyboards: vec![
+                ("follower-1".into(), LayoutChoice::Standard),
+                ("follower-2".into(), LayoutChoice::Standard),
+                (fixtures::keychron().instance_id, LayoutChoice::Jis),
+            ],
+        };
+        let groups = check_groups(&snapshot, &entry);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].rows.len(), 2);
+        assert_eq!(groups[1].rows[0].instance_id, "virtual");
+        assert!(
+            groups
+                .iter()
+                .flat_map(|g| &g.rows)
+                .all(|r| r.instance_id.starts_with("follower") || r.instance_id == "virtual")
+        );
+        let mut rows = groups[0].rows.clone();
+        for row in &mut rows {
+            row.reported = row.expected;
+        }
+        assert!(group_check_rows(&rows)[0].matches());
+        rows[1].reported = Some(KeyboardType::US);
+        let mixed = group_check_rows(&rows);
+        assert!(mixed[0].differs());
+        assert!(!mixed[0].matches());
+        rows[1].reported = None;
+        assert!(!group_check_rows(&rows)[0].matches());
+    }
 }

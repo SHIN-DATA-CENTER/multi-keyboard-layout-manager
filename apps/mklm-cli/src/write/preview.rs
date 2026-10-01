@@ -15,7 +15,7 @@ pub use mklm_client::preview::{
     preview_restore, undo_preview,
 };
 
-use super::render::{apply_text, entry_line, key_text, model_value, op_value, put, value_text};
+use super::render::{apply_text, entry_line_at, key_text, model_value, op_value, put, value_text};
 use crate::text::{table_name, type_text};
 
 /// The plan of a `set` or `migrate`, as the user approves it. `only`: the keyboards to list
@@ -226,7 +226,11 @@ pub fn restore_text(preview: &RestorePreview) -> String {
 
 /// What `undo` (design D.10) would do now: interrupted entries are recovered first, then every
 /// open entry that waits for the user is undone, newest first.
-pub fn undo_text(journal: &Journal, current: &dyn Fn(&ValueRecord) -> Option<RegValue>) -> String {
+pub fn undo_text(
+    journal: &Journal,
+    current: &dyn Fn(&ValueRecord) -> Option<RegValue>,
+    boot: Option<mklm_core::BootId>,
+) -> String {
     let mut out = String::new();
     let preview = undo_preview(journal, current);
     if preview.is_empty() {
@@ -237,10 +241,10 @@ pub fn undo_text(journal: &Journal, current: &dyn Fn(&ValueRecord) -> Option<Reg
         return out;
     }
     for entry in &preview.recovered_first {
-        put!(out, "Recovered first: {}", entry_line(entry));
+        put!(out, "Recovered first: {}", entry_line_at(entry, boot));
     }
     for undone in &preview.undone {
-        put!(out, "Undo {}", entry_line(undone.entry));
+        put!(out, "Undo {}", entry_line_at(undone.entry, boot));
         for value in &undone.values {
             let record = value.record;
             let now_text = value
@@ -280,9 +284,10 @@ pub fn undo_text(journal: &Journal, current: &dyn Fn(&ValueRecord) -> Option<Reg
 pub fn revert_text(
     entry: &JournalEntry,
     current: &dyn Fn(&ValueRecord) -> Option<RegValue>,
+    boot: Option<mklm_core::BootId>,
 ) -> String {
     let mut out = String::new();
-    put!(out, "Revert {}", entry_line(entry));
+    put!(out, "Revert {}", entry_line_at(entry, boot));
     for record in &entry.records {
         let now = current(record).map_or_else(|| "?".to_string(), |v| value_text(&v));
         put!(
@@ -309,20 +314,41 @@ pub fn check_text(rows: &[CheckRow], migration: bool, remote: bool) -> String {
     let mut out = String::new();
     let mut table = crate::table::Table::new(&["Keyboard", "Expected", "Raw Input", "", "Layout"])
         .max_width(0, 32);
-    for row in rows {
-        let mark = match (row.expected, row.reported) {
-            (Some(expected), Some(reported)) if expected == reported => "ok",
-            (_, None) => "not connected",
-            _ => "DIFFERENT",
+    for group in mklm_client::preview::group_check_rows(rows) {
+        let row = &group.rows[0];
+        let mark = match () {
+            _ if group.differs() => "DIFFERENT",
+            _ if group.matches() => "ok",
+            _ if group.rows.iter().all(|r| !r.present) => "not connected",
+            _ if group
+                .rows
+                .iter()
+                .any(|r| r.present && r.remote && r.not_reported()) =>
+            {
+                "not visible in this Remote Desktop session"
+            }
+            _ => "cannot be checked",
         };
         table.row(vec![
             row.name.clone(),
-            type_text(row.expected),
-            type_text(row.reported),
+            if group.rows.iter().all(|r| r.expected == row.expected) {
+                type_text(row.expected)
+            } else {
+                "mixed".into()
+            },
+            if group.rows.iter().all(|r| r.reported == row.reported) {
+                type_text(row.reported)
+            } else {
+                "mixed".into()
+            },
             mark.to_string(),
-            row.layout
-                .as_ref()
-                .map_or_else(|| "-".to_string(), |t| table_name(t).to_string()),
+            if group.rows.iter().all(|r| r.layout == row.layout) {
+                row.layout
+                    .as_ref()
+                    .map_or_else(|| "-".to_string(), |t| table_name(t).to_string())
+            } else {
+                "mixed".into()
+            },
         ]);
     }
     out.push_str(&table.render("  "));
@@ -345,8 +371,9 @@ pub fn check_text(rows: &[CheckRow], migration: bool, remote: bool) -> String {
 
 /// The typing test in a Remote Desktop session (design m2 D.6).
 const REMOTE_CHECK_NOTE: &str = "This is a Remote Desktop session: keys typed in it come from the \
-    remote PC, so they check none of the keyboards above. Do the typing test at this PC, on its own \
-    keyboards, before you keep the change.";
+    PC you connect from, so they check none of the keyboards above. Raw Input here may not list \
+    the keyboards attached to the PC you connect to. Do the typing test at that PC, on its own \
+    keyboards, before keeping a change that changes their layout.";
 
 #[cfg(test)]
 mod tests {
@@ -588,22 +615,22 @@ mod tests {
 
     #[test]
     fn undo_and_revert_previews() {
-        assert!(undo_text(&Journal::default(), &|_| None).starts_with("Nothing to undo"));
+        assert!(undo_text(&Journal::default(), &|_| None, None).starts_with("Nothing to undo"));
         let at = |value| move |_: &ValueRecord| Some(RegValue::Dword { value });
         let waiting = Journal {
             entries: vec![entry(OpState::AwaitingConfirm)],
             ..Journal::default()
         };
-        let text = undo_text(&waiting, &at(7));
+        let text = undo_text(&waiting, &at(7), None);
         assert!(text.contains("Undo 3f2a9c1e"), "{text}");
         assert!(text.contains("KeyboardTypeOverride: 7 -> 4"), "{text}");
         let conflict = Journal {
             entries: vec![entry(OpState::Conflict)],
             ..Journal::default()
         };
-        assert!(undo_text(&conflict, &at(5)).contains("left alone"));
-        assert!(!undo_text(&conflict, &at(7)).contains("left alone"));
-        let text = revert_text(&entry(OpState::Confirmed), &at(7));
+        assert!(undo_text(&conflict, &at(5), None).contains("left alone"));
+        assert!(!undo_text(&conflict, &at(7), None).contains("left alone"));
+        let text = revert_text(&entry(OpState::Confirmed), &at(7), None);
         assert!(text.contains("KeyboardTypeOverride: 7 -> 4"), "{text}");
     }
 
@@ -631,13 +658,31 @@ mod tests {
         let text = check_text(&rows, true, true);
         assert!(
             text.contains(
-                "This is a Remote Desktop session: keys typed in it come from the remote PC, so \
-                 they check none of the keyboards above. Do the typing test at this PC, on its own \
-                 keyboards, before you keep the change."
+                "This is a Remote Desktop session: keys typed in it come from the \
+                 PC you connect from, so they check none of the keyboards above."
             ),
             "{text}"
         );
         assert!(text.contains("Raw Input cannot show"), "{text}");
         assert!(text.contains("Shift+2"), "{text}");
+    }
+
+    #[test]
+    fn one_physical_check_row_never_hides_a_collection_mismatch() {
+        let snapshot = fixtures::dev_machine();
+        let mut rows = check_rows(&snapshot, &entry(OpState::PendingReboot));
+        let mut second = rows[0].clone();
+        second.instance_id = "second-collection".into();
+        second.reported = Some(KeyboardType::JIS);
+        rows.push(second);
+        let text = check_text(&rows, false, false);
+        assert_eq!(text.matches("Keychron Receiver").count(), 1);
+        assert!(text.contains("DIFFERENT"));
+        assert!(!text.contains(" ok "));
+        rows[1].reported = None;
+        rows[1].remote = true;
+        let text = check_text(&rows, false, true);
+        assert!(text.contains("not visible in this Remote Desktop session"));
+        assert!(!text.contains(" ok "));
     }
 }

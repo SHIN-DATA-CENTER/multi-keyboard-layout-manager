@@ -39,4 +39,6 @@ pub use update::*;
 ///
 /// 3 (M5b, design m5b D.3): `CallerMessage::{RecordTrust, StageUpdate, InstallerChunk}`,
 /// `HelperMessage::Update`.
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// 4 (standard-layout B.9): `Request::SetStandard`.
+pub const PROTOCOL_VERSION: u32 = 4;

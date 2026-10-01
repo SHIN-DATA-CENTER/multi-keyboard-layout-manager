@@ -1450,8 +1450,13 @@ mod tests {
         let vxe = fixtures::desktop_vxe().instance_id;
         // Either collection names the physical keyboard, in any case.
         for requested in [second.to_ascii_lowercase(), wireless.clone()] {
-            let plan =
-                plan_set_standard(&keyboards, &global, Layout::Us, &[requested.clone()]).unwrap();
+            let plan = plan_set_standard(
+                &keyboards,
+                &global,
+                Layout::Us,
+                std::slice::from_ref(&requested),
+            )
+            .unwrap();
             assert_eq!(plan.change.pinned, vec![vxe.clone()], "{requested}");
             assert_eq!(
                 plan.change.following,

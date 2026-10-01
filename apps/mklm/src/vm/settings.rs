@@ -204,6 +204,7 @@ pub fn with_countdown(
     apply.countdown_seconds = seconds;
     match &mut request {
         Request::SetLayout(set) => set.apply.countdown_seconds = seconds,
+        Request::SetStandard(set) => set.apply.countdown_seconds = seconds,
         Request::RestoreBaseline(restore) => restore.apply.countdown_seconds = seconds,
         Request::ResolveConflict(resolve) => resolve.apply.countdown_seconds = seconds,
         Request::Revert { apply, .. } | Request::Recover { apply } | Request::Undo { apply } => {

@@ -1,0 +1,64 @@
+import { Button, CheckBox, ScrollView } from "std-widgets.slint";
+import { Body, PageHeader } from "../widgets.slint";
+
+export struct StandardRowVm { id: string, text: string, keep-label: string, selectable: bool, keep: bool }
+
+export component StandardScreen inherits VerticalLayout {
+    in property <string> title;
+    in property <string> note;
+    in property <string> error;
+    in property <string> keep-label;
+    in property <string> reset-label;
+    in property <string> apply-label;
+    in property <string> reset-note;
+    in property <string> restart-note;
+    in property <string> details;
+    in property <string> uac-line;
+    in property <bool> editable;
+    in property <[StandardRowVm]> rows;
+    in property <int> selected;
+    in property <bool> reset;
+    in property <bool> can-reset;
+    in property <bool> ready;
+    callback choose(int);
+    callback keep(string, bool);
+    callback reset-changed(bool);
+    callback apply();
+    callback cancel();
+    spacing: 12px;
+    PageHeader { title: root.title; }
+    ScrollView {
+        VerticalLayout {
+            spacing: 12px;
+            Body { text: root.note; }
+            HorizontalLayout {
+                Button { text: "JIS"; enabled: root.editable && root.selected != 0; clicked => { root.choose(0); } }
+                Button { text: "US"; enabled: root.editable && root.selected != 1; clicked => { root.choose(1); } }
+            }
+            for row in root.rows: VerticalLayout {
+                Body { text: row.text; }
+                if row.selectable: CheckBox {
+                    text: row.keep-label;
+                    enabled: root.editable;
+                    checked: row.keep;
+                    toggled => { root.keep(row.id, self.checked); }
+                }
+            }
+            if root.can-reset: CheckBox {
+                text: root.reset-label;
+                checked: root.reset;
+                enabled: root.editable;
+                toggled => { root.reset-changed(self.checked); }
+            }
+            Body { text: root.reset-note; }
+            Body { text: root.restart-note; }
+            Body { text: root.uac-line; }
+            Body { text: root.error; }
+            Body { text: root.details; }
+        }
+    }
+    HorizontalLayout {
+        Button { text: @tr("Cancel"); clicked => { root.cancel(); } }
+        Button { text: root.apply-label; enabled: root.ready; clicked => { root.apply(); } }
+    }
+}

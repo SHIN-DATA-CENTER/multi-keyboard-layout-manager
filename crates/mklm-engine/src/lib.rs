@@ -39,7 +39,7 @@ pub use error::EngineError;
 pub use host::{Host, HostError};
 pub use params::{
     CleanupParams, MachineSettingsParams, MigrateParams, ResolveParams, RestoreBaselineParams,
-    RestoreMode, SetLayoutParams,
+    RestoreMode, SetLayoutParams, SetStandardParams,
 };
 pub use session_end::{SessionEnd, SessionEndSink};
 pub use sink::{DecisionPoll, EventSink, NullSink};
